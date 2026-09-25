@@ -1,0 +1,38 @@
+def targetBuilds = [
+        'forge-1.20.1'    : [directory: 'targets/forge-1.20.1', task: 'buildForge1201'],
+        'fabric-1.20.1'   : [directory: 'targets/fabric-1.20.1', task: 'buildFabric1201'],
+        'neoforge-1.21.1' : [directory: 'targets/neoforge-1.21.1', task: 'buildNeoForge1211']
+]
+
+def selectedTarget = providers.gradleProperty('target').orNull
+def buildAllTargets = providers.gradleProperty('allTargets').map { it.toBoolean() }.orElse(false)
+
+if (selectedTarget != null && !targetBuilds.containsKey(selectedTarget)) {
+    throw new GradleException("Unknown target '${selectedTarget}'. Available targets: ${targetBuilds.keySet().join(', ')}")
+}
+
+targetBuilds.each { targetName, targetBuild ->
+    tasks.register(targetBuild.task, Exec) {
+        group = 'build'
+        description = "Builds ${targetName} in its independent Gradle project."
+        workingDir rootDir
+        commandLine 'cmd', '/c', 'gradlew.bat', '-p', targetBuild.directory.replace('/', '\\'), 'build', '--console', 'plain', '--no-daemon'
+    }
+}
+
+tasks.register('build') {
+    group = 'build'
+    description = 'Builds common and an optionally selected JDK 21 target.'
+    dependsOn ':common:build'
+
+    if (selectedTarget != null) {
+        dependsOn tasks.named(targetBuilds[selectedTarget].task)
+    }
+
+    if (buildAllTargets.get()) {
+        targetBuilds.values().each { targetBuild ->
+            dependsOn tasks.named(targetBuild.task)
+        }
+    }
+}
+

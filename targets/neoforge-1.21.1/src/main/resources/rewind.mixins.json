@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "cc.sighs.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ChunkMapAccessor",
+    "ChunkStorageAccessor",
+    "MinecraftServerAccessor",
+    "ServerChunkCacheAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
