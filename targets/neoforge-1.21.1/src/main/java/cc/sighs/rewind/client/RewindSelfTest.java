@@ -14,9 +14,6 @@ import cc.sighs.rewind.snapshot.SnapshotMirror;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.events.GuiEventListener;
-import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -185,10 +182,15 @@ public final class RewindSelfTest {
             }
             case VERIFY_SNAPSHOT: {
                 verifySnapshotFiles(minecraft);
-                if (failures.isEmpty()) {
+                if (!failures.isEmpty()) {
+                    report();
+                } else if (cycle == 1) {
+                    // 第 1 轮：先改世界再回溯，验证各处状态确实被抹掉
                     goTo(Stage.MUTATE);
                 } else {
-                    report();
+                    // 第 2 轮：中间什么都不改，用来验证反向增量还原「一个文件都不用回拷」
+                    Rewind.LOGGER.info("Rewind self-test: cycle {} restores without touching the world", cycle);
+                    goTo(Stage.TRIGGER_RESTORE);
                 }
                 return;
             }
@@ -214,6 +216,9 @@ public final class RewindSelfTest {
                         "mutation should add 5 diamonds (" + baseline.diamonds + " -> " + state.diamonds + ")");
                 check(Math.abs(state.px - baseline.px) > 5.0D || Math.abs(state.pz - baseline.pz) > 5.0D,
                         "mutation should have teleported the player (still at " + state.describe() + ")");
+                check(Math.abs(state.dayTime - baseline.dayTime) > 5000L,
+                        "mutation should have pushed the world time away from the checkpoint ("
+                                + baseline.dayTime + " -> " + state.dayTime + ")");
                 if (failures.isEmpty()) {
                     goTo(Stage.TRIGGER_RESTORE);
                 } else {
@@ -223,25 +228,22 @@ public final class RewindSelfTest {
             }
             case TRIGGER_RESTORE: {
                 if (stageTicks == 1) {
+                    // A/B：第 1 轮走快速重启，第 2 轮走原版 openWorld，好在同一份世界上比耗时
+                    CheckpointController.setFastRestartEnabled(cycle == 1);
+                    Rewind.LOGGER.info("Rewind self-test: cycle {} will restore via the {} path", cycle,
+                            cycle == 1 ? "fast" : "vanilla");
                     Rewind.LOGGER.info("Rewind self-test: simulating F8 via KeyMapping.click({})",
                             InputConstants.KEY_F8);
                     KeyMapping.click(InputConstants.Type.KEYSYM.getOrCreate(InputConstants.KEY_F8));
                     return;
                 }
-                if (minecraft.screen instanceof ConfirmScreen) {
-                    Button yes = firstButton(minecraft.screen.children());
-                    if (yes == null) {
-                        fail("restore confirmation screen has no button");
-                        report();
-                        return;
-                    }
-                    Rewind.LOGGER.info("Rewind self-test: confirming restore through the vanilla confirm screen");
-                    yes.onPress();
+                // F8 不再要确认屏：点下去就应该直接开始关世界
+                if (CheckpointController.isBusy() || minecraft.level == null) {
                     goTo(Stage.WAIT_WORLD_CLOSED);
                     return;
                 }
                 if (stageTicks > 200) {
-                    fail("F8 did not open the restore confirmation screen (keybind not wired?)");
+                    fail("F8 did not start the restore (keybind not wired?)");
                     report();
                 }
                 return;
@@ -282,6 +284,20 @@ public final class RewindSelfTest {
                         "restored inventory mismatch: diamonds " + state.diamonds + " != " + baseline.diamonds);
                 check(Math.abs(state.px - baseline.px) < 2.5D && Math.abs(state.pz - baseline.pz) < 2.5D,
                         "restored player position mismatch: " + state.describe() + " vs " + baseline.describe());
+                // dayTime 只能来自 level.dat，回溯后必须回到建点时的值（差几 tick 是回溯期间正常流逝）
+                check(Math.abs(state.dayTime - baseline.dayTime) < 2000L,
+                        "restored world time mismatch: " + state.dayTime + " != " + baseline.dayTime);
+                // 反向增量：只有建点之后真正被改写过的文件才该回拷。
+                // 注意「没动过」在活着的世界里并不存在——服务端每秒都在卸载区块、tick POI，
+                // 所以判据只能是「回拷的明显少于总数」（没有增量优化时这里恒等于文件总数）。
+                int copiedFiles = CheckpointController.lastRestoreCopiedFiles();
+                int skippedFiles = CheckpointController.lastRestoreSkippedFiles();
+                int totalFiles = CheckpointController.lastRestoreFileCount();
+                check(copiedFiles >= 0 && skippedFiles > 0 && copiedFiles < totalFiles,
+                        "restore should skip the files the checkpoint already matches, copied=" + copiedFiles
+                                + " skipped=" + skippedFiles + " total=" + totalFiles);
+                Rewind.LOGGER.info("Rewind self-test: cycle {} incremental restore copied={} skipped={} total={}",
+                        cycle, copiedFiles, skippedFiles, totalFiles);
                 if (cycle < MAX_CYCLES && failures.isEmpty()) {
                     cycle++;
                     Rewind.LOGGER.info("Rewind self-test: starting cycle {} (覆盖已有存档点后再次回溯)", cycle);
@@ -375,6 +391,8 @@ public final class RewindSelfTest {
         ServerLevel level = server.overworld();
         BlockPos anchor = level.getSharedSpawnPos().offset(0, 2, 0);
         state.block = level.getBlockState(anchor).getBlock();
+        // 世界时间来自 level.dat（WorldData），用来验证「快速重启」确实重读了快照里的 level.dat
+        state.dayTime = level.getDayTime();
 
         Objective objective = server.getScoreboard().getObjective(OBJECTIVE);
         if (objective != null) {
@@ -409,15 +427,6 @@ public final class RewindSelfTest {
                 Rewind.LOGGER.error("Rewind self-test: command failed: /{}", command, t);
             }
         });
-    }
-
-    private static Button firstButton(List<? extends GuiEventListener> children) {
-        for (GuiEventListener child : children) {
-            if (child instanceof Button button) {
-                return button;
-            }
-        }
-        return null;
     }
 
     private static void logKeyMappings() {
@@ -465,13 +474,15 @@ public final class RewindSelfTest {
         private double py;
         private double pz;
         private int diamonds = -1;
+        private long dayTime;
 
         private String describe() {
             return "block=" + block
                     + " score=" + score
                     + " stands=" + stands
                     + " player=" + String.format(Locale.ROOT, "%.2f/%.2f/%.2f", px, py, pz)
-                    + " diamonds=" + diamonds;
+                    + " diamonds=" + diamonds
+                    + " dayTime=" + dayTime;
         }
     }
 }

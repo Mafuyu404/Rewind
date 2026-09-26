@@ -37,7 +37,7 @@ public final class RewindCommands {
                 }))
                 .then(Commands.literal("restore").executes(context -> {
                     CommandSourceStack source = context.getSource();
-                    Minecraft.getInstance().execute(() -> CheckpointController.requestRestore("command", true));
+                    Minecraft.getInstance().execute(() -> CheckpointController.requestRestore("command"));
                     return 1;
                 })));
     }

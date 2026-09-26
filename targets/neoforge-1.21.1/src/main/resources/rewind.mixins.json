@@ -4,7 +4,15 @@
   "package": "cc.sighs.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-
+    "RollbackDiscardMixins$ChunkMapDiscard",
+    "RollbackDiscardMixins$ServerChunkCacheDiscard",
+    "RollbackDiscardMixins$PlayerListDiscard",
+    "RollbackDiscardMixins$EntityDiscard",
+    "RollbackDiscardMixins$DataStorageDiscard",
+    "RollbackDiscardMixins$RegionFileDiscard",
+    "RollbackDiscardMixins$SavedDataDiscard",
+    "RollbackDiscardMixins$SinglePlayerSaveDiscard",
+    "RollbackDiscardMixins$LevelDataDiscard"
   ],
   "injectors": {
     "defaultRequire": 1

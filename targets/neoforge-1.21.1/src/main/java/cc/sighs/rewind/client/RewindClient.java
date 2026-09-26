@@ -58,7 +58,7 @@ public final class RewindClient {
             CheckpointController.requestSnapshot("key");
         }
         if (restoreKey != null && restoreKey.consumeClick()) {
-            CheckpointController.requestRestore("key", true);
+            CheckpointController.requestRestore("key");
         }
     }
 }

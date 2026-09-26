@@ -3,19 +3,6 @@
   "key.rewind.snapshot": "建立/覆盖存档点",
   "key.rewind.restore": "回溯到存档点",
 
-  "rewind.screen.title": "时间树",
-  "rewind.progress.pausing_snapshot": "正在冻结世界…",
-  "rewind.progress.flushing": "正在同步落盘…",
-  "rewind.progress.copying": "正在写入存档点…",
-  "rewind.progress.closing_world": "正在关闭世界…",
-  "rewind.progress.rewriting": "正在还原存档点…",
-  "rewind.progress.reopening": "正在重新加载世界…",
-
-  "rewind.confirm.title": "回溯确认",
-  "rewind.confirm.message": "将把「%s」还原到 %s 前建立的存档点。当前进度会被覆盖。",
-  "rewind.confirm.yes": "回溯",
-  "rewind.confirm.no": "取消",
-
   "rewind.msg.snapshot_done": "已建立存档点",
   "rewind.msg.restored": "已回溯到存档点",
 

@@ -3,19 +3,6 @@
   "key.rewind.snapshot": "Create/overwrite checkpoint",
   "key.rewind.restore": "Rewind to checkpoint",
 
-  "rewind.screen.title": "Timeline",
-  "rewind.progress.pausing_snapshot": "Freezing the world...",
-  "rewind.progress.flushing": "Flushing world data...",
-  "rewind.progress.copying": "Writing checkpoint...",
-  "rewind.progress.closing_world": "Closing the world...",
-  "rewind.progress.rewriting": "Restoring checkpoint...",
-  "rewind.progress.reopening": "Reloading the world...",
-
-  "rewind.confirm.title": "Confirm rewind",
-  "rewind.confirm.message": "This will roll \"%s\" back to the checkpoint taken %s ago. Current progress will be overwritten.",
-  "rewind.confirm.yes": "Rewind",
-  "rewind.confirm.no": "Cancel",
-
   "rewind.msg.snapshot_done": "Checkpoint written",
   "rewind.msg.restored": "Rewound to checkpoint",
 
