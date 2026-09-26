@@ -7,6 +7,9 @@ import net.minecraft.client.Minecraft;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
+import net.neoforged.neoforge.client.event.ScreenEvent;
+import net.neoforged.neoforge.client.event.ViewportEvent;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
@@ -27,6 +30,12 @@ public final class RewindClient {
         modBus.addListener(RegisterKeyMappingsEvent.class, RewindClient::onRegisterKeyMappings);
         NeoForge.EVENT_BUS.addListener(ClientTickEvent.Post.class, RewindClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class, RewindCommands::register);
+        // 过渡后处理：每帧结束时重采样整幅画面（存档广角 / 回溯高斯模糊）
+        NeoForge.EVENT_BUS.addListener(RenderFrameEvent.Post.class, RewindClient::onRenderFramePost);
+        // 过渡期间拦掉原版加载屏，保证全程不出现任何界面
+        NeoForge.EVENT_BUS.addListener(ScreenEvent.Opening.class, RewindScreens::onScreenOpening);
+        // 广角过渡顺便把真实 FOV 一起推宽
+        NeoForge.EVENT_BUS.addListener(ViewportEvent.ComputeFov.class, RewindScreens::onComputeFov);
     }
 
     public static KeyMapping snapshotKey() {
@@ -35,6 +44,10 @@ public final class RewindClient {
 
     public static KeyMapping restoreKey() {
         return restoreKey;
+    }
+
+    private static void onRenderFramePost(RenderFrameEvent.Post event) {
+        RewindTransitionRenderer.onRenderFramePost(Minecraft.getInstance());
     }
 
     private static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
@@ -50,8 +63,8 @@ public final class RewindClient {
         CheckpointController.tick(minecraft);
         RewindSelfTest.tick(minecraft);
 
-        // 原版只在没有界面时给 KeyMapping 计数，这里再加一道保险：进度屏期间不响应热键
-        if (minecraft.screen != null) {
+        // 原版只在没有界面时给 KeyMapping 计数；过渡期间也不接受新的操作
+        if (minecraft.screen != null || RewindTransition.isActive()) {
             return;
         }
         if (snapshotKey != null && snapshotKey.consumeClick()) {

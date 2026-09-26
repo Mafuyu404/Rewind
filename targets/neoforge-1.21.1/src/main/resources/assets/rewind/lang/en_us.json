@@ -21,6 +21,5 @@
   "rewind.error.close_failed": "Failed to close the world",
   "rewind.error.no_snapshot": "No checkpoint yet - press F7 first",
 
-  "rewind.cmd.snapshot_started": "Writing checkpoint...",
   "rewind.cmd.status_empty": "No checkpoints yet"
 }

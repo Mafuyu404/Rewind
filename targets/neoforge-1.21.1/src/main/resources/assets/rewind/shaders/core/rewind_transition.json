@@ -1,0 +1,11 @@
+{
+    "vertex": "rewind:rewind_transition",
+    "fragment": "rewind:rewind_transition",
+    "samplers": [
+        { "name": "Sampler0" }
+    ],
+    "uniforms": [
+        { "name": "EffectStrength", "type": "float", "count": 1, "values": [ 0.0 ] },
+        { "name": "TexelSize", "type": "float", "count": 2, "values": [ 0.0, 0.0 ] }
+    ]
+}

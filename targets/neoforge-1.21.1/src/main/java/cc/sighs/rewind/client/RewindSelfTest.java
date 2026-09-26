@@ -73,8 +73,14 @@ public final class RewindSelfTest {
     private static int cycle = 1;
     private static final List<String> failures = new ArrayList<>();
     private static WorldState baseline;
+    private static boolean screenLeakReported;
 
     private RewindSelfTest() {
+    }
+
+    /** 自测是否开着（自测会在过渡满强度时存一张截图，方便人眼确认效果）。 */
+    public static boolean isEnabled() {
+        return enabled;
     }
 
     public static void tick(Minecraft minecraft) {
@@ -90,6 +96,7 @@ public final class RewindSelfTest {
         if (!enabled) {
             return;
         }
+        assertNoUiDuringTransition(minecraft);
         if (stage == Stage.FINISHED) {
             if (++finishedTicks > 60) {
                 Rewind.LOGGER.info("Rewind self-test: stopping client");
@@ -313,6 +320,20 @@ public final class RewindSelfTest {
     }
 
     // ------------------------------------------------------------------ 校验
+
+    /**
+     * 硬性要求：过渡期间不允许出现任何界面。
+     * 唯一允许存在的是我们自己那个什么都不画的逻辑屏（它是为了满足原版「没有世界就一定有界面」的假设）。
+     */
+    private static void assertNoUiDuringTransition(Minecraft minecraft) {
+        if (screenLeakReported || !RewindTransition.isActive() || RewindTransition.strength() <= 0.5F) {
+            return;
+        }
+        if (minecraft.screen != null && !(minecraft.screen instanceof RewindBlankScreen)) {
+            screenLeakReported = true;
+            fail("a screen appeared during the transition: " + minecraft.screen.getClass().getName());
+        }
+    }
 
     private static void verifySnapshotFiles(Minecraft minecraft) {
         try {

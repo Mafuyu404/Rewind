@@ -5,6 +5,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import com.mojang.serialization.Dynamic;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.server.WorldFlush;
@@ -51,12 +53,16 @@ import net.minecraft.world.level.storage.WorldData;
 public final class CheckpointController {
     public enum Phase {
         IDLE,
+        /** F7：等过渡淡入完成，然后开始落盘。 */
         PAUSING,
         FLUSHING,
         SNAPSHOTTING,
+        /** F8：等过渡淡入完成，然后关世界。 */
         CLOSING_WORLD,
         REWRITING,
-        REOPENING
+        REOPENING,
+        /** 新世界已经回来，等第一帧画出来再让过渡淡出。 */
+        REVEALING
     }
 
     /** 供外部（命令、自测）观察的结果。 */
@@ -70,6 +76,10 @@ public final class CheckpointController {
     private static final int TIMEOUT_FLUSH_TICKS = 1200;
     private static final int TIMEOUT_SNAPSHOT_TICKS = 24000;
     private static final int TIMEOUT_REWRITE_TICKS = 24000;
+    /** 服务端线程最多冻结多久（秒）。客户端的 keep-alive 超时远大于这个值，超了也只是提前放行。 */
+    private static final long SERVER_FREEZE_SECONDS = 20L;
+    /** 新世界回来了之后再等几 tick 才收起模糊，避免露出还没收到区块的空画面。 */
+    private static final int REVEAL_SETTLE_TICKS = 10;
 
     /**
      * 操作期间显示的提示屏：用原版自己的 {@link GenericMessageScreen}（原版「保存并退出」用的就是它），
@@ -83,6 +93,11 @@ public final class CheckpointController {
     private static int phaseTicks;
 
     private static CompletableFuture<Void> flushFuture;
+    /**
+     * 存档时用来冻结服务端线程：落盘做完之后让服务端线程停在这里，直到快照写完才放行。
+     * 没有界面就没有「暂停世界」这个手段，只能靠把线程摁住来保证拷贝期间没人写盘。
+     */
+    private static CountDownLatch releaseServerLatch;
     private static WorldFlush.Result flushed;
     private static Path worldRoot;
     private static String levelId = "";
@@ -109,8 +124,6 @@ public final class CheckpointController {
 
     private static Outcome lastOutcome = Outcome.NONE;
     private static String lastMessage = "";
-    /** 世界正处于「已关闭 / 正在重开」时，消息先存下来，等玩家回来再发。 */
-    private static Component pendingMessage;
 
     private CheckpointController() {
     }
@@ -153,7 +166,7 @@ public final class CheckpointController {
 
     // ------------------------------------------------------------------ F7
 
-    /** F7：建立/覆盖存档点。 */
+    /** F7：建立/覆盖存档点。没有界面，靠「广角过渡 + 冻结服务端线程」完成。 */
     public static void requestSnapshot(String source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!ensureUsable(minecraft)) {
@@ -164,7 +177,8 @@ public final class CheckpointController {
         lastMessage = "";
         phase = Phase.PAUSING;
         phaseTicks = 0;
-        minecraft.setScreen(new GenericMessageScreen(SAVING_SCREEN));
+        // 先让画面开始广角畸变；等淡入到满强度再动手，视觉上就是「世界被拉宽、静止、然后恢复」
+        RewindTransition.start(RewindTransition.Effect.WIDE_ANGLE);
     }
 
     // ------------------------------------------------------------------ F8
@@ -184,12 +198,12 @@ public final class CheckpointController {
         requestSource = source;
         lastOutcome = Outcome.NONE;
         lastMessage = "";
-        // 回滚窗口要在提示屏出现之前打开：屏一出，服务端下一 tick 会做一次「进入暂停」的弱保存，
-        // 那次写盘同样是马上要被覆盖掉的。
+        phase = Phase.CLOSING_WORLD;
+        phaseTicks = 0;
+        // 回滚窗口在这一刻就打开：从淡入开始，任何世界落盘都是马上要被覆盖掉的
         Rewind.beginDiscard();
-        minecraft.setScreen(new GenericMessageScreen(SAVING_SCREEN));
-        // 阻塞式 disconnect 放到下一帧的主线程任务里执行，别卡在 tick 中途
-        minecraft.execute(() -> startRestore(minecraft));
+        // 先让画面开始高斯模糊；等淡入到满强度（世界在视觉上已经糊住）再真正关世界
+        RewindTransition.start(RewindTransition.Effect.GAUSSIAN_BLUR);
     }
 
     private static void startRestore(Minecraft minecraft) {
@@ -208,13 +222,16 @@ public final class CheckpointController {
         restoreStartedNanos = System.nanoTime();
         captureReusableResources(server);
 
-        minecraft.setScreen(new GenericMessageScreen(SAVING_SCREEN));
         Rewind.LOGGER.info("Rewind: closing world {} to restore slot {}", levelId, slot);
+        // 挂一个什么都不画的逻辑屏：接下来的重载期间客户端会短暂没有 ClientLevel，
+        // 而原版假设「没有界面就一定有玩家」，这里用它维持那条不变量（画面交给后处理）。
+        minecraft.setScreen(new RewindBlankScreen());
         // 从这里到快照写回结束，磁盘上的世界状态都会被覆盖：置位标记让 Mixin 跳过这段期间的落盘
         Rewind.beginDiscard();
         minecraft.level.disconnect();
         // 阻塞直到集成服务器线程结束：MinecraftServer.stopServer → ServerLevel.close → RegionFile.close，
         // 之后 session.lock 与所有 .mca 句柄都已释放，可以安全覆盖文件。
+        // 传进去的屏会被 RewindScreens 取消掉（过渡期间不开任何界面），这里只是需要一个非 null 参数。
         minecraft.disconnect(new GenericMessageScreen(SAVING_SCREEN));
 
         if (minecraft.level != null) {
@@ -227,7 +244,6 @@ public final class CheckpointController {
     // ------------------------------------------------------------------ tick
 
     public static void tick(Minecraft minecraft) {
-        flushPendingMessage(minecraft);
         if (phase == Phase.IDLE) {
             return;
         }
@@ -240,7 +256,8 @@ public final class CheckpointController {
                     fail(minecraft, "rewind.error.server_gone", "");
                     return;
                 }
-                if (!server.isPaused()) {
+                // 等广角过渡淡入到位再动手：画面上就是「世界被拉宽之后静止住」
+                if (!RewindTransition.isFadeInDone()) {
                     if (phaseTicks > TIMEOUT_PAUSE_TICKS) {
                         fail(minecraft, "rewind.error.pause_timeout", "");
                     }
@@ -282,10 +299,24 @@ public final class CheckpointController {
                 }
                 SnapshotMeta meta = flushed == null ? null : flushed.meta;
                 String summary = workerSummary;
+                releaseServer();
+                // 快照写完了：放开服务端线程，同时让广角效果淡出
+                RewindTransition.finish();
                 phase = Phase.IDLE;
-                minecraft.setScreen(null);
                 succeed(minecraft, "rewind.msg.snapshot_done",
                         summary + (meta == null ? "" : " | " + describeGameTime(meta.gameTime)));
+                return;
+            }
+            case CLOSING_WORLD: {
+                // 等模糊淡入到位（画面已经糊住）再真正关世界，这样关世界的过程玩家看不到
+                if (!RewindTransition.isFadeInDone()) {
+                    if (phaseTicks > TIMEOUT_PAUSE_TICKS) {
+                        fail(minecraft, "rewind.error.pause_timeout", "");
+                    }
+                    return;
+                }
+                // 这里会一直阻塞到集成服务器线程结束；不排队到下一帧，避免重复触发
+                startRestore(minecraft);
                 return;
             }
             case REWRITING: {
@@ -302,8 +333,27 @@ public final class CheckpointController {
                 beginReopen(minecraft);
                 return;
             }
+            case REVEALING: {
+                // 世界已经重建，等它真的画出来了再让模糊淡出：玩家看到的是「糊着的旧画面 → 清晰的新世界」
+                if (minecraft.level == null || minecraft.player == null) {
+                    if (phaseTicks > TIMEOUT_REWRITE_TICKS) {
+                        Rewind.LOGGER.warn("Rewind: new world did not come back, ending the transition anyway");
+                        RewindTransition.abort();
+                        phase = Phase.IDLE;
+                    }
+                    return;
+                }
+                if (phaseTicks < REVEAL_SETTLE_TICKS) {
+                    return;
+                }
+                // 世界真的回来了：摘掉逻辑屏，让模糊淡出去露出新世界
+                minecraft.setScreen(null);
+                RewindTransition.finish();
+                phase = Phase.IDLE;
+                return;
+            }
             default:
-                // CLOSING_WORLD / REOPENING 由各自的分支直接推进，不需要在这里等
+                // REOPENING 由自己的分支直接推进，不需要在这里等
         }
     }
 
@@ -314,10 +364,17 @@ public final class CheckpointController {
         phaseTicks = 0;
         CompletableFuture<Void> future = new CompletableFuture<>();
         flushFuture = future;
+        CountDownLatch release = new CountDownLatch(1);
+        releaseServerLatch = release;
         server.execute(() -> {
             try {
                 flushed = WorldFlush.flush(server, slot, requestSource);
                 future.complete(null);
+                // 落盘完成：把服务端线程摁在这里，直到快照写完再放行。
+                // 没有界面就没法靠「暂停世界」保证一致性，冻结线程是等价手段。
+                if (!release.await(SERVER_FREEZE_SECONDS, TimeUnit.SECONDS)) {
+                    Rewind.LOGGER.warn("Rewind: server freeze timed out, resuming the world");
+                }
             } catch (Throwable t) {
                 Rewind.LOGGER.error("Rewind: flush failed", t);
                 future.completeExceptionally(t);
@@ -404,7 +461,8 @@ public final class CheckpointController {
         if (fastRestartEnabled && tryFastRestart(minecraft, levelId)) {
             Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (fast restart)",
                     millisSince(reopenStartedNanos));
-            phase = Phase.IDLE;
+            phase = Phase.REVEALING;
+            phaseTicks = 0;
             succeed(minecraft, "rewind.msg.restored", workerSummary);
             return;
         }
@@ -423,7 +481,8 @@ public final class CheckpointController {
         // openWorld 返回时 ClientLevel 可能还没建好——客户端要等后续 tick 处理完登录包才会 setLevel，
         // 所以这里不能拿 level 判成败（真正失败会走上面传入的 onFail 回调）。
         Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (vanilla path)", millisSince(reopenStartedNanos));
-        phase = Phase.IDLE;
+        phase = Phase.REVEALING;
+        phaseTicks = 0;
         succeed(minecraft, "rewind.msg.restored", workerSummary);
     }
 
@@ -521,21 +580,17 @@ public final class CheckpointController {
     // ------------------------------------------------------------------ 辅助
 
     private static boolean ensureUsable(Minecraft minecraft) {
-        if (isBusy()) {
-            if (minecraft.player != null) {
-                minecraft.player.displayClientMessage(Component.translatable("rewind.error.busy"), false);
-            }
+        if (isBusy() || RewindTransition.isActive()) {
+            Rewind.LOGGER.warn("Rewind: another checkpoint operation is still running");
             return false;
         }
         if (!minecraft.hasSingleplayerServer() || minecraft.level == null || minecraft.player == null) {
-            if (minecraft.player != null) {
-                minecraft.player.displayClientMessage(Component.translatable("rewind.error.no_world"), false);
-            }
+            Rewind.LOGGER.warn("Rewind: checkpoint operations are only available in-game in a singleplayer world");
             return false;
         }
-        // 局域网开放时服务端不会因弹屏而暂停，没有一致的快照可言
+        // 局域网开放时本地服务端会继续给别的玩家发包，冻结/重开都会影响他们，不做
         if (minecraft.getSingleplayerServer().isPublished()) {
-            minecraft.player.displayClientMessage(Component.translatable("rewind.error.lan_published"), false);
+            Rewind.LOGGER.warn("Rewind: refusing to checkpoint while LAN is published");
             return false;
         }
         return true;
@@ -554,53 +609,45 @@ public final class CheckpointController {
         lastOutcome = Outcome.SUCCESS;
         lastMessage = describe(messageKey, detailText);
         Rewind.LOGGER.info("Rewind: {}", lastMessage);
-        announce(minecraft, messageKey, detailText);
+        if (restoreStartedNanos != 0L) {
+            Rewind.LOGGER.info("Rewind: rewind completed in {} ms (F8 → 玩家实体回到世界)",
+                    millisSince(restoreStartedNanos));
+            restoreStartedNanos = 0L;
+        }
     }
 
     private static void fail(Minecraft minecraft, String messageKey, String detailText) {
         lastOutcome = Outcome.FAILED;
         lastMessage = describe(messageKey, detailText);
         Rewind.LOGGER.error("Rewind: {}", lastMessage);
-        announce(minecraft, messageKey, detailText);
         // 任何失败都意味着回滚窗口结束了：标记必须清掉，否则后续正常游玩的世界保存会被跳过
         Rewind.endDiscard();
         restoreStartedNanos = 0L;
+        // 出错时不留过渡效果，也不留被冻结的服务端线程；该出现的提示屏也放行（不再拦截）
+        RewindTransition.abort();
+        releaseServer();
         if (minecraft.level != null) {
             minecraft.setScreen(null);
-        } else if (minecraft.screen instanceof GenericMessageScreen) {
-            // 世界已经关了但回不去：退回标题屏，别把玩家留在提示屏上
+        } else {
+            // 世界已经关了但回不去：退回标题屏，别把玩家留在空画面上
             minecraft.setScreen(new TitleScreen());
         }
         phase = Phase.IDLE;
     }
 
+    /** 放行被冻结的服务端线程（幂等）。 */
+    private static void releaseServer() {
+        CountDownLatch latch = releaseServerLatch;
+        if (latch != null) {
+            releaseServerLatch = null;
+            latch.countDown();
+        }
+    }
+
+    /** 结果文案只用于日志与 {@code /rewind status}，不再往聊天框里发任何东西。 */
     private static String describe(String messageKey, String detailText) {
         return Component.translatable(messageKey).getString()
                 + (detailText == null || detailText.isEmpty() ? "" : " (" + detailText + ")");
-    }
-
-    /** 回溯期间玩家实体还不存在，消息先缓存，等世界回来再发。 */
-    private static void announce(Minecraft minecraft, String messageKey, String detailText) {
-        Component message = detailText == null || detailText.isEmpty()
-                ? Component.translatable(messageKey)
-                : Component.translatable(messageKey).append(" " + detailText);
-        if (minecraft.player != null) {
-            minecraft.player.displayClientMessage(message, false);
-        } else {
-            pendingMessage = message;
-        }
-    }
-
-    private static void flushPendingMessage(Minecraft minecraft) {
-        if (pendingMessage != null && minecraft.player != null) {
-            minecraft.player.displayClientMessage(pendingMessage, false);
-            pendingMessage = null;
-            if (restoreStartedNanos != 0L) {
-                Rewind.LOGGER.info("Rewind: rewind completed in {} ms (F8 → 玩家实体回到世界)",
-                        millisSince(restoreStartedNanos));
-                restoreStartedNanos = 0L;
-            }
-        }
     }
 
     /** 耗时统计用：把单调时钟差值换成毫秒。 */

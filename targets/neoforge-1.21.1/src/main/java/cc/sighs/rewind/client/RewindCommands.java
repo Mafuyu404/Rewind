@@ -30,8 +30,6 @@ public final class RewindCommands {
                 .requires(source -> source.getServer().isSingleplayer() || source.hasPermission(2))
                 .then(Commands.literal("status").executes(context -> status(context.getSource())))
                 .then(Commands.literal("snapshot").executes(context -> {
-                    CommandSourceStack source = context.getSource();
-                    source.sendSuccess(() -> Component.translatable("rewind.cmd.snapshot_started"), false);
                     Minecraft.getInstance().execute(() -> CheckpointController.requestSnapshot("command"));
                     return 1;
                 }))
