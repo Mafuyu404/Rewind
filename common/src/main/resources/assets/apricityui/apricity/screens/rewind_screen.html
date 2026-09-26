@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="aui-viewport" content="mode=browser">
+    <meta name="aui-mouse-events" content="intercept">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    
+    <title>时间树</title>
+    <link rel="stylesheet" href="https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/ore.css">
+    <style>
+        /* ==========================================================================
+           ApricityUI — Ore theme (core, inlined so the page works offline too)
+           ========================================================================== */
+        @font-face{font-family:OreRegular;src:url("https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/fonts/minecraft-regular.otf") format("opentype");font-weight:400;font-style:normal;font-display:swap}
+        @font-face{font-family:OreDisplay;src:url("https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/fonts/minecraft-ten.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}
+        .ore-theme{
+            --ink:#f4f5f7;--ink-muted:#b6bac1;--ink-dark:#191a1c;--canvas:#202124;--surface:#48494a;
+            --surface-deep:#313233;--surface-soft:#d0d1d4;--edge:#1e1e1f;--edge-light:#77797c;
+            --green:#3c8527;--green-hover:#2a641c;--green-shadow:#1d4d13;--purple:#7345e5;--purple-hover:#5d2cc6;
+            --purple-shadow:#4a1cac;--gold:#f0b92d;--gold-shadow:#936715;--red:#b33b31;--red-hover:#8b2923;
+            --red-shadow:#662019;--blue:#2d78a8;--success:#69ad45;--warning:#f0b92d;--danger:#d45b50;
+            --info:#58a6d2;--focus:#ffffff;
+            --space-1:4px;--space-2:8px;--space-3:16px;--space-4:24px;--space-5:32px;
+            --font-sm:13px;--font-md:16px;--font-lg:20px;--font-xl:28px;
+            min-width:320px;min-height:100%;margin:0;color:var(--ink);
+            font-family:OreRegular,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+            font-size:var(--font-md);line-height:1.5;letter-spacing:0;caret-color:var(--green);
+        }
+        .ore-theme *,.ore-theme *::before,.ore-theme *::after{box-sizing:border-box}
+        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme p,.ore-theme ul,.ore-theme ol,.ore-theme figure{margin-top:0}
+        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme .font-display{color:var(--ink);font-family:OreDisplay,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;font-weight:400;line-height:1.15}
+        .ore-theme h1{margin-bottom:16px;font-size:36px}
+        .ore-theme h2{margin-bottom:14px;font-size:28px}
+        .ore-theme h3{margin-bottom:12px;font-size:22px}
+        .ore-theme h4{margin-bottom:10px;font-size:18px}
+        .ore-theme h5{margin-bottom:8px;font-size:16px}
+        .ore-theme h6{margin-bottom:8px;font-size:14px}
+        .ore-theme p{margin-bottom:16px}
+        .ore-theme strong{color:#fff}
+        .ore-theme small,.ore-theme .text-muted{color:var(--ink-muted)}
+        .ore-theme kbd{padding:2px 6px;border:2px solid var(--edge);color:#fff;background:var(--surface-deep);font-family:OreRegular,monospace;font-size:12px}
+        .ore-theme hr,.ore-theme .ore-divider{height:4px;margin:16px 0;border:0;border-top:2px solid #333334;border-bottom:2px solid #5a5b5c}
+        .ore-theme img{max-width:100%;image-rendering:pixelated}
+        .ore-theme .container{width:100%;max-width:1240px;margin:0 auto;padding:0 20px}
+        .ore-theme .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}
+        .ore-theme .col-4{grid-column:span 4}
+        .ore-theme .col-8{grid-column:span 8}
+        .ore-theme .col-12{grid-column:span 12}
+        .ore-theme .stack{display:flex;flex-direction:column;gap:12px}
+        .ore-theme .cluster{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+        .ore-theme .split{display:flex;align-items:center;justify-content:space-between;gap:16px}
+        .ore-theme .button{min-height:42px;margin:0;padding:7px 16px 13px;border:3px solid var(--edge);color:#fff;background:var(--green);box-shadow:inset 0 -6px var(--green-shadow),inset 3px 3px rgba(255,255,255,.22),inset -3px -9px rgba(0,0,0,.12);font-family:OreDisplay,sans-serif;font-size:16px;line-height:1;text-align:center;text-shadow:2px 2px rgba(0,0,0,.35);cursor:pointer;user-select:none;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+        .ore-theme .button:hover{background:var(--green-hover)}
+        .ore-theme .button:active{padding-top:9px;padding-bottom:11px;box-shadow:inset 3px 3px rgba(255,255,255,.18),inset -3px -3px rgba(0,0,0,.18)}
+        .ore-theme .button-secondary{background:var(--purple);box-shadow:inset 0 -6px var(--purple-shadow),inset 3px 3px rgba(255,255,255,.25),inset -3px -9px rgba(0,0,0,.12)}
+        .ore-theme .button-secondary:hover{background:var(--purple-hover)}
+        .ore-theme .button-tertiary{color:var(--ink-dark);background:var(--surface-soft);box-shadow:inset 0 -6px #58585a,inset 3px 3px rgba(255,255,255,.55),inset -3px -9px rgba(0,0,0,.08);text-shadow:none}
+        .ore-theme .button-tertiary:hover{color:#000;background:#b1b2b5}
+        .ore-theme .button-danger{background:var(--red);box-shadow:inset 0 -6px var(--red-shadow),inset 3px 3px rgba(255,255,255,.2),inset -3px -9px rgba(0,0,0,.12)}
+        .ore-theme .button-danger:hover{background:var(--red-hover)}
+        .ore-theme .button-gold{background:var(--gold);color:#241a06;text-shadow:none;box-shadow:inset 0 -6px var(--gold-shadow),inset 3px 3px rgba(255,255,255,.35),inset -3px -9px rgba(0,0,0,.12)}
+        .ore-theme .button-gold:hover{background:#d8a520}
+        .ore-theme .button-small{min-height:32px;padding:5px 10px 9px;font-size:13px}
+        .ore-theme .button-wide{width:100%}
+        .ore-theme .button[disabled]{border-color:#313233;color:#8b8d91;background:#55575a;box-shadow:inset 0 -5px #3b3c3e,inset 2px 2px #696b6e;text-shadow:none;cursor:default}
+        .ore-theme .card,.ore-theme .panel{border:3px solid var(--edge);color:var(--ink);background:var(--surface);box-shadow:inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
+        .ore-theme .card-header{min-height:46px;padding:12px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:OreDisplay,sans-serif;font-size:18px;line-height:1.1;display:flex;align-items:center;justify-content:space-between;gap:10px}
+        .ore-theme .card-body{padding:16px}
+        .ore-theme .card-footer{padding:12px 16px;border-top:3px solid var(--edge);background:#3a3b3d}
+        .ore-theme .form-label{margin-bottom:6px;color:var(--ink);display:block}
+        .ore-theme .form-help{margin-top:5px;color:var(--ink-muted);font-size:var(--font-sm)}
+        .ore-theme .form-input,.ore-theme .form-select{width:100%;min-height:42px;padding:8px 10px;border:3px solid var(--edge);color:#fff;background:var(--surface-deep);box-shadow:inset 0 5px #242425;font-family:OreRegular,sans-serif;font-size:15px;line-height:1.35}
+        .ore-theme .form-input:hover,.ore-theme .form-select:hover{border-color:#85878b}
+        .ore-theme .form-input:focus,.ore-theme .form-select:focus{border-color:var(--focus);outline:2px solid var(--green);outline-offset:0}
+        .ore-theme .badge{min-height:24px;padding:3px 8px;border:2px solid var(--edge);color:#fff;background:var(--blue);font-size:12px;line-height:1.2;display:inline-flex;align-items:center;gap:4px}
+        .ore-theme .badge-success{background:var(--green)}
+        .ore-theme .badge-warning{color:#221b0d;background:var(--gold)}
+        .ore-theme .badge-danger{background:var(--red)}
+        .ore-theme .badge-purple{background:var(--purple)}
+        .ore-theme .badge-ghost{background:#3a3b3d;color:var(--ink-muted)}
+        .ore-theme .alert{padding:12px 14px;border:3px solid var(--edge);border-left-width:8px;color:#fff;background:#363739;box-shadow:inset 2px 2px rgba(255,255,255,.08)}
+        .ore-theme .alert-info{border-left-color:var(--info)}
+        .ore-theme .alert-warning{border-left-color:var(--warning)}
+        .ore-theme .progress{height:24px;padding:3px;border:3px solid var(--edge);background:#252628;box-shadow:inset 0 3px #151516;overflow:hidden}
+        .ore-theme .progress-bar{height:100%;min-width:0;background:var(--green);box-shadow:inset 0 -4px var(--green-shadow),inset 2px 2px rgba(255,255,255,.2);transition:width .35s steps(6)}
+        .ore-theme .progress-purple .progress-bar{background:var(--purple);box-shadow:inset 0 -4px var(--purple-shadow),inset 2px 2px rgba(255,255,255,.2)}
+        .ore-theme .progress-gold .progress-bar{background:var(--gold);box-shadow:inset 0 -4px var(--gold-shadow),inset 2px 2px rgba(255,255,255,.25)}
+        .ore-theme .list-group{margin:0;padding:0;border:3px solid var(--edge);list-style:none}
+        .ore-theme .list-group-item{min-height:42px;padding:9px 12px;border-bottom:2px solid #292a2b;color:var(--ink);background:var(--surface);display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px}
+        .ore-theme .list-group-item:last-child{border-bottom:0}
+        .ore-theme .list-group-item:hover{background:#56585b}
+        .ore-theme .inventory-grid{display:grid;grid-template-columns:repeat(9,1fr);gap:3px}
+        .ore-theme .slot{aspect-ratio:1/1;border:3px solid #1c1c1d;border-top-color:#303133;border-left-color:#303133;color:#fff;background:#77787a;box-shadow:inset 3px 3px #4d4e50,inset -3px -3px #b2b3b5;font-family:OreDisplay,sans-serif;display:flex;align-items:center;justify-content:center;position:relative}
+        .ore-theme .slot:hover{border-color:#fff;background:#8c8e91}
+        .ore-theme .tabs{border-bottom:3px solid var(--edge);display:flex;flex-wrap:wrap;gap:4px}
+        .ore-theme .tab{min-height:38px;padding:8px 14px;border:2px solid var(--edge);border-bottom:0;color:var(--ink-muted);background:#37383a;font:inherit;font-family:OreDisplay,sans-serif;cursor:pointer}
+        .ore-theme .tab:hover,.ore-theme .tab.active{color:#fff;background:var(--surface);box-shadow:inset 0 4px var(--purple)}
+        .ore-theme .modal-backdrop{position:fixed;inset:0;z-index:900;padding:24px;background:rgba(0,0,0,.68);display:none;align-items:center;justify-content:center}
+        .ore-theme .modal-backdrop.open{display:flex}
+        .ore-theme .modal{position:relative;z-index:1;width:520px;max-width:100%;border:4px solid var(--edge);background:var(--surface);box-shadow:8px 8px rgba(0,0,0,.42),inset 2px 2px var(--edge-light);animation:pop .16s steps(3)}
+        @keyframes pop{from{transform:scale(.94);opacity:.4}to{transform:scale(1);opacity:1}}
+        .ore-theme .modal-header{min-height:50px;padding:13px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:OreDisplay,sans-serif;font-size:20px;display:flex;align-items:center;gap:10px}
+        .ore-theme .modal-body{padding:18px 16px}
+        .ore-theme .modal-footer{padding:12px 16px;border-top:3px solid var(--edge);display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+        .ore-theme .text-center{text-align:center}
+        .ore-theme .text-success{color:#8bd067}
+        .ore-theme .text-warning{color:#ffd45f}
+        .ore-theme .text-danger{color:#ef8178}
+        .ore-theme .text-info{color:#82c6ec}
+        .ore-theme .font-sm{font-size:var(--font-sm)}
+        .ore-theme .m-0{margin:0}
+        .ore-theme .mt-2{margin-top:8px}.ore-theme .mt-3{margin-top:16px}
+        .ore-theme .mb-1{margin-bottom:4px}.ore-theme .mb-2{margin-bottom:8px}.ore-theme .mb-3{margin-bottom:16px}
+        .ore-theme .p-2{padding:8px}.ore-theme .p-3{padding:16px}
+
+        /* ---------- Ore extension bits used here (toast) ---------- */
+        .ore-theme .toast-area{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:1200;width:92%;max-width:520px;display:flex;flex-direction:column-reverse;align-items:center;gap:6px;pointer-events:none}
+        .ore-theme .toast-2{max-width:100%;margin:0;padding:8px 16px;border:2px solid #101114;color:#f5f6f6;background:#2f3133;box-shadow:3px 3px 0 rgba(0,0,0,.45);font-size:15px;text-align:center;opacity:0;transform:translateY(18px);transition:opacity .28s ease,transform .28s ease}
+        .ore-theme .toast-2.show{opacity:1;transform:translateY(0)}
+        .ore-theme .toast-success{color:#8bd067}.ore-theme .toast-warning{color:#ffd45f}
+        .ore-theme .toast-danger{color:#ef8178}.ore-theme .toast-info{color:#82c6ec}
+
+        /* ==========================================================================
+           Save / Load screen
+           ========================================================================== */
+        html,body{height:100%}
+        body.save-page{
+            min-height:100vh;display:flex;flex-direction:column;
+            background-color:#141518;
+            background-image:
+                    repeating-linear-gradient(0deg,rgba(255,255,255,.018) 0 2px,transparent 2px 4px),
+                    repeating-linear-gradient(90deg,rgba(255,255,255,.014) 0 2px,transparent 2px 4px),
+                    radial-gradient(circle at 18% -10%,#33363a 0%,#1d1f22 45%,#121316 100%);
+            background-attachment:fixed;
+        }
+        .page-main{flex:1 1 auto;padding:22px 0 34px}
+        .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px}
+        .page-head h1{margin-bottom:0;text-shadow:3px 3px rgba(0,0,0,.55)}
+        .hud-bar{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+        .hud-chip{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:2px solid #14151a;background:#2c2e31;box-shadow:inset 2px 2px rgba(255,255,255,.09),inset -2px -2px rgba(0,0,0,.35);font-size:13px;color:var(--ink-muted)}
+        .hud-chip b{color:#fff;font-weight:400}
+
+        /* special (auto / quick) slots */
+        .special-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:20px}
+        .special-card{display:grid;grid-template-columns:132px 1fr;cursor:pointer;transition:transform .12s steps(2),border-color .12s,box-shadow .12s;overflow:hidden;position:relative}
+        .special-card:hover{transform:translateY(-2px);border-color:var(--edge-light)}
+        .special-card.selected{border-color:var(--gold);box-shadow:0 0 0 2px rgba(240,185,45,.3),inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
+        .special-cover{position:relative;border-right:3px solid var(--edge);background:#15161a;overflow:hidden;min-height:104px}
+        .special-body{padding:10px 12px;display:flex;flex-direction:column;gap:5px;min-width:0}
+        .special-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+        .special-head h4{margin:0;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .special-sub{margin-bottom: 0 !important;margin:0;color:var(--ink-muted);font-size:12.5px;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .special-actions{display:flex;gap:6px;margin-top:auto;padding-top:6px;flex-wrap:wrap}
+
+        /* slot grid */
+        .toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:12px}
+        .toolbar h3{margin:0;display:flex;align-items:center;gap:10px}
+        .toolbar .cluster .form-input,.toolbar .cluster .form-select{min-height:36px;width:172px;padding:5px 8px;font-size:14px}
+        .slot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(216px,1fr));gap:12px}
+        .slot-card{position:relative;display:flex;flex-direction:column;cursor:pointer;overflow:hidden;transition:transform .12s steps(2),border-color .12s,box-shadow .12s}
+        .slot-card:hover{transform:translateY(-3px);border-color:#9a9ca0}
+        .slot-card:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+        .slot-card.selected{border-color:var(--gold);box-shadow:0 0 0 2px rgba(240,185,45,.32),inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
+        /* 封面为纯色块，颜色直接写在槽位标记的 style 上 */
+        .slot-cover{position:relative;aspect-ratio:16/9;background:#131418;border-bottom:3px solid var(--edge);overflow:hidden}
+        .cover-shade{position:absolute;left:0;right:0;bottom:0;height:48%;background:linear-gradient(transparent,rgba(0,0,0,.72));pointer-events:none}
+        .slot-index{position:absolute;left:6px;top:6px;min-width:30px;padding:2px 6px 3px;border:2px solid #101114;background:rgba(14,15,18,.78);color:#fff;font-family:OreDisplay,sans-serif;font-size:13px;text-align:center;letter-spacing:.5px}
+        .slot-tags{position:absolute;right:6px;top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
+        .slot-tags .badge{font-size:11px;min-height:20px;padding:1px 6px;border-width:2px}
+        .slot-cover.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+            background-color:#232427;
+            background-image:repeating-conic-gradient(#2b2c2f 0% 25%,#232427 0% 50%);background-size:16px 16px}
+        .slot-cover.empty .plus{font-family:OreDisplay,sans-serif;font-size:32px;color:#7b7d82;line-height:1;text-shadow:2px 2px rgba(0,0,0,.5)}
+        .slot-cover.empty .empty-text{color:#8b8d91;font-size:12px}
+        .slot-card:hover .slot-cover.empty .plus{color:var(--gold)}
+        .slot-body{padding:10px 11px 8px;display:flex;flex-direction:column;gap:5px;min-width:0;flex:1}
+        /* 标题和游戏内时间同一行，时间贴右 */
+        .slot-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0}
+        .slot-title{margin:0;font-size:16px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .slot-head .slot-title{flex:1 1 auto;min-width:0}
+        .slot-clock{flex:0 0 auto;font-size:12px;color:#9a9ca0}
+        .slot-line{margin-bottom: 0 !important;margin:0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-muted)}
+        .slot-line .badge{font-size:11px;min-height:19px;padding:0 5px;}
+        .slot-empty-body{padding:14px 12px;display:flex;flex-direction:column;gap:6px;align-items:flex-start;justify-content:center;flex:1;min-height:96px}
+        /* The three slot actions stay on one line, whatever the card width. */
+        .slot-actions{display:flex;gap:6px;padding:0 10px 10px}
+        .slot-actions .button,.special-actions .button{flex:1 1 0;min-width:0;padding-left:5px;padding-right:5px;font-size:12px}
+        .newest-flag{position:absolute;left:0;bottom:0;background:var(--gold);color:#241a06;font-size:11px;padding:2px 7px;border:2px solid #101114;border-left:0;border-bottom:0;font-family:OreDisplay,sans-serif}
+
+        /* detail panel */
+        .detail-cover{position:relative;border:3px solid var(--edge);overflow:hidden;background:#131418;aspect-ratio:16/9}
+        /* 详情标题和游戏内时间同一行，时间贴右 */
+        .detail-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:12px 0 4px}
+        .detail-head .detail-title{flex:1 1 auto;min-width:0;margin:0}
+        .detail-clock{flex:0 0 auto;font-size:13px;color:var(--ink-muted)}
+        .detail-title{margin:12px 0 4px;font-size:21px;line-height:1.2;word-break:break-all}
+        /* 详情面板的操作按钮：同一行的小按钮 */
+        .detail-actions{display:flex;gap:6px;margin-top:14px}
+        .detail-actions .button{flex:1 1 0;min-width:0;padding-left:5px;padding-right:5px}
+        .inv-title{margin:18px 0 8px;color:var(--ink-muted);font-size:13px;letter-spacing:1px}
+        .inv-item{width:100%;height:100%;position:relative;box-shadow:inset -2px -2px rgba(0,0,0,.35),inset 2px 2px rgba(255,255,255,.28)}
+        .inv-count{position:absolute;right:1px;bottom:0;font-size:10px;color:#fff;text-shadow:1px 1px #000;font-family:OreDisplay,sans-serif}
+        .stat-row{display:flex;justify-content:space-between;gap:10px}
+        .scroll-area{max-height:480px;overflow-y:auto;padding-right:4px}
+        .scroll-area::-webkit-scrollbar{width:12px}
+        .scroll-area::-webkit-scrollbar-track{background:#252628;box-shadow:inset 0 0 0 2px #14151a}
+        .scroll-area::-webkit-scrollbar-thumb{background:#5a5c60;border:2px solid #14151a;box-shadow:inset 2px 2px #7d7f83}
+        .scroll-area::-webkit-scrollbar-thumb:hover{background:var(--green)}
+        .empty-note{padding:26px 14px;text-align:center;color:var(--ink-muted);border:3px dashed #3a3b3d;background:rgba(0,0,0,.18)}
+        @media (max-width:900px){
+            .ore-theme .col-4,.ore-theme .col-8{grid-column:span 12}
+        }
+        @media (max-width:560px){
+            .ore-theme h1{font-size:28px}
+            .toolbar .cluster .form-input,.toolbar .cluster .form-select{width:100%}
+            .special-card{grid-template-columns:104px 1fr}
+        }
+    </style>
+</head>
+<body class="ore-theme save-page">
+
+<main class="page-main">
+    <div class="container">
+
+        <!-- 当前世界状态：静态写入，接入真实数据后由游戏侧替换 -->
+        <div class="page-head">
+            <h1>时间树</h1>
+            <div class="hud-bar" id="hudBar">
+                <span class="hud-chip">群系 <b>赭岩峡谷</b></span>
+                <span class="hud-chip">坐标 <b>96, 74, -210</b></span>
+                <span class="hud-chip">游戏内 <b>第 8 天 10:36</b></span>
+                <span class="hud-chip">已游玩 <b>2 小时 23 分</b></span>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="col-8">
+
+                <!-- 自动 / 快速存档 -->
+                <div class="special-grid" id="specialGrid">
+                    <article class="card special-card" data-act="select" data-id="auto" tabindex="0" role="button" aria-label="自动存档">
+                        <div class="special-cover" style="background:#1d3f5c"></div>
+                        <div class="special-body">
+                            <div class="special-head"><span class="badge badge-warning">自动</span><h4>自动存档</h4></div>
+                            <p class="special-sub">霜落村 · 第 5 天 18:24</p>
+                            <p class="special-sub">6 分钟前 · 9.2 MB · 雪原针叶林</p>
+                            <div class="special-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="auto">读取</button>
+                                <button class="button button-small" data-act="save" data-id="auto">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="auto">重命名</button>
+                            </div>
+                        </div>
+                    </article>
+
+                    <article class="card special-card" data-act="select" data-id="quick" tabindex="0" role="button" aria-label="快速存档">
+                        <div class="special-cover" style="background:#8f2410"></div>
+                        <div class="special-body">
+                            <div class="special-head"><span class="badge badge-purple">快速</span><h4>快速存档</h4></div>
+                            <p class="special-sub">熔火深渊 · 第 7 天 18:24</p>
+                            <p class="special-sub">24 分钟前 · 13.2 MB · 玄武岩三角洲</p>
+                            <div class="special-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="quick">读取</button>
+                                <button class="button button-small" data-act="save" data-id="quick">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="quick">重命名</button>
+                            </div>
+                        </div>
+                    </article>
+                </div>
+
+                <div class="toolbar">
+                    <h3>存档槽位 <span class="badge badge-purple" id="slotCount">6 / 8</span></h3>
+                    <div class="cluster">
+                        <input class="form-input" id="search" type="search" placeholder="搜索世界名称…" aria-label="搜索存档">
+                        <select class="form-select" id="sort" aria-label="排序方式">
+                            <option value="recent">最近修改</option>
+                            <option value="oldest">最早修改</option>
+                            <option value="name">名称 A→Z</option>
+                            <option value="playtime">游玩时长</option>
+                            <option value="index">槽位序号</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="scroll-area">
+                    <div class="slot-grid" id="slotGrid">
+                        <!-- 槽位 1 - 6 -->
+                        <article class="card slot-card selected" data-act="select" data-id="s1" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#5b2a63">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">01</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">黎明要塞</h4>
+                                    <span class="slot-clock">第 11 天 14:00</span>
+                                </div>
+                                <p class="slot-line">2 小时前<span>·</span>平原高地<span>·</span>15.5 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s1">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s1">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s1">重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s2" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#141c26">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">02</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">幽晶深窟</h4>
+                                    <span class="slot-clock">第 18 天 10:00</span>
+                                </div>
+                                <p class="slot-line">9 小时前<span>·</span>深板岩洞窟<span>·</span>25.9 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s2">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s2">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s2">重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s3" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#0c4f68">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">03</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">沉没遗迹</h4>
+                                    <span class="slot-clock">第 28 天 22:00</span>
+                                </div>
+                                <p class="slot-line">1 天前<span>·</span>温水海洋<span>·</span>40.2 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s3">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s3">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s3">重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s4" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#2b1b3f">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">04</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">雾隐沼泽</h4>
+                                    <span class="slot-clock">第 35 天 12:00</span>
+                                </div>
+                                <p class="slot-line">2 天前<span>·</span>沼泽湿地<span>·</span>50.3 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s4">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s4">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s4">重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s5" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#d99b5c">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">05</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">赤沙神殿</h4>
+                                    <span class="slot-clock">第 50 天 08:00</span>
+                                </div>
+                                <p class="slot-line">5 天前<span>·</span>赤沙沙漠<span>·</span>68.0 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s5">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s5">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s5">重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s6" tabindex="0" role="button">
+                            <div class="slot-cover" style="background:#6b2f8f">
+                                <span class="cover-shade"></span>
+                                <span class="slot-index">06</span>
+                                <span class="slot-tags"></span>
+                            </div>
+                            <div class="slot-body">
+                                <div class="slot-head">
+                                    <h4 class="slot-title">浮空秘境</h4>
+                                    <span class="slot-clock">第 64 天 22:00</span>
+                                </div>
+                                <p class="slot-line">11 天前<span>·</span>末地边缘<span>·</span>87.8 MB</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s6">读取</button>
+                                <button class="button button-small" data-act="save" data-id="s6">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s6">重命名</button>
+                            </div>
+                        </article>
+
+                        <!-- 槽位 7 - 8：空 -->
+                        <article class="card slot-card" data-act="select" data-id="s7" tabindex="0" role="button">
+                            <div class="slot-cover empty"><span class="plus">＋</span><span class="empty-text">空槽位</span></div>
+                            <div class="slot-index">07</div>
+                            <div class="slot-empty-body">
+                                <h4 class="slot-title text-muted">槽位 7</h4>
+                                <p class="slot-line">未使用 · 可随时写入当前进度</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s7" disabled>读取</button>
+                                <button class="button button-small" data-act="save" data-id="s7">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s7" disabled>重命名</button>
+                            </div>
+                        </article>
+
+                        <article class="card slot-card" data-act="select" data-id="s8" tabindex="0" role="button">
+                            <div class="slot-cover empty"><span class="plus">＋</span><span class="empty-text">空槽位</span></div>
+                            <div class="slot-index">08</div>
+                            <div class="slot-empty-body">
+                                <h4 class="slot-title text-muted">槽位 8</h4>
+                                <p class="slot-line">未使用 · 可随时写入当前进度</p>
+                            </div>
+                            <div class="slot-actions">
+                                <button class="button button-small button-secondary" data-act="load" data-id="s8" disabled>读取</button>
+                                <button class="button button-small" data-act="save" data-id="s8">覆盖</button>
+                                <button class="button button-small button-tertiary" data-act="rename" data-id="s8" disabled>重命名</button>
+                            </div>
+                        </article>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 详情：当前选中槽位 01 -->
+            <div class="col-4">
+                <div class="card" id="detailCard">
+                    <div class="card-header"><span>槽位详情</span><span class="badge badge-ghost">槽位 01</span></div>
+                    <div class="card-body">
+                        <div class="detail-cover" style="background:#5b2a63"></div>
+                        <div class="detail-head">
+                            <h3 class="detail-title">黎明要塞</h3>
+                            <span class="detail-clock">第 11 天 14:00</span>
+                        </div>
+                        <div class="inv-title">背包快照</div>
+                        <div class="inventory-grid">
+                            <div class="slot" title="红石粉 × 12"><span class="inv-item" style="background:#d4483c"></span><span class="inv-count">12</span></div>
+                            <div class="slot" title="小麦 × 25"><span class="inv-item" style="background:#e0c455"></span><span class="inv-count">25</span></div>
+                            <div class="slot"></div>
+                            <div class="slot" title="小麦 × 9"><span class="inv-item" style="background:#e0c455"></span><span class="inv-count">9</span></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
+                            <div class="slot" title="铁锭 × 55"><span class="inv-item" style="background:#d8d8d8"></span><span class="inv-count">55</span></div>
+                            <div class="slot"></div>
+                            <div class="slot" title="面包 × 11"><span class="inv-item" style="background:#c98a52"></span><span class="inv-count">11</span></div>
+                        </div>
+                        <ul class="list-group mt-3">
+                            <li class="list-group-item"><span class="text-muted">保存时间</span><span>2026-09-25 19:38（2 小时前）</span></li>
+                            <li class="list-group-item"><span class="text-muted">游玩时长</span><span>3 小时 26 分</span></li>
+                            <li class="list-group-item"><span class="text-muted">生物群系</span><span>平原高地</span></li>
+                            <li class="list-group-item"><span class="text-muted">坐标</span><span>342, 71, -128</span></li>
+                            <li class="list-group-item"><span class="text-muted">文件大小</span><span>15.5 MB</span></li>
+                        </ul>
+                        <div class="detail-actions">
+                            <button class="button button-small button-secondary" data-act="load" data-id="s1">读取存档</button>
+                            <button class="button button-small" data-act="save" data-id="s1">覆盖保存</button>
+                            <button class="button button-small button-tertiary" data-act="rename" data-id="s1">重命名</button>
+                            <button class="button button-small button-danger" data-act="delete" data-id="s1">删除存档</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通用确认弹窗（覆盖 / 删除时使用） -->
+    <div class="modal-backdrop" id="modalConfirm" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <div class="modal">
+            <div class="modal-header"><span id="confirmIcon">!</span><span id="confirmTitle">确认操作</span></div>
+            <div class="modal-body" id="confirmBody">确定要执行该操作吗？</div>
+            <div class="modal-footer">
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalConfirm">取消</button>
+                <button class="button button-danger" id="confirmOk">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 重命名弹窗 -->
+    <div class="modal-backdrop" id="modalRename" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+        <div class="modal">
+            <div class="modal-header"><span>✎</span><span id="renameTitle">重命名存档</span></div>
+            <div class="modal-body">
+                <label class="form-label" for="renameInput">世界名称</label>
+                <input class="form-input" id="renameInput" maxlength="20" placeholder="输入新的世界名称">
+                <p class="form-help" id="renameHelp">1 - 20 个字符，名称会显示在槽位封面上方。</p>
+            </div>
+            <div class="modal-footer">
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalRename">取消</button>
+                <button class="button" data-act="rename-ok">保存名称</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-area" id="toastArea"></div>
+</main>
+
+<script>
+
+    /* ==========================================================================
+       1. 交互：静态模板只保留必要的事件绑定
+       ========================================================================== */
+    const $=id=>document.getElementById(id);
+
+    function openModal(id){
+        document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'));
+        $(id).classList.add('open');
+    }
+    function closeModals(){document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'));}
+    function toast(msg,type){
+        const area=$('toastArea');
+        const el=document.createElement('div');
+        el.className='toast-2'+(type?' toast-'+type:'');
+        el.textContent=msg;
+        area.appendChild(el);
+        requestAnimationFrame(()=>el.classList.add('show'));
+        setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),320);},2600);
+        while(area.children.length>4)area.firstChild.remove();
+    }
+
+    document.addEventListener('click',e=>{
+        if(e.target.classList.contains('modal-backdrop')){closeModals();return;}
+        const t=e.target.closest('[data-act]');
+        if(!t)return;
+        const card=t.closest('.slot-card, .special-card');
+        switch(t.dataset.act){
+            // 卡片只做选中高亮；详情面板是静态内容，接入真实存档后再联动。
+            case 'select':
+                document.querySelectorAll('.slot-card.selected, .special-card.selected').forEach(c=>c.classList.remove('selected'));
+                if(card)card.classList.add('selected');
+                break;
+            case 'load':toast('已读取存档','success');break;
+            case 'save':case 'delete':openModal('modalConfirm');break;
+            case 'rename':openModal('modalRename');break;
+            case 'rename-ok':{
+                const v=$('renameInput').value.trim();
+                if(!v){toast('名称不能为空','danger');break;}
+                closeModals();
+                toast('已重命名为「'+v.slice(0,20)+'」','success');
+                break;
+            }
+            case 'modal-close':closeModals();break;
+        }
+    });
+    $('confirmOk').addEventListener('click',closeModals);
+</script>
+</body>
+</html>

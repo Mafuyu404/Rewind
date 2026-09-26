@@ -1,0 +1,39 @@
+{
+  "key.categories.rewind": "Rewind",
+  "key.rewind.snapshot": "建立/覆盖存档点",
+  "key.rewind.restore": "回溯到存档点",
+
+  "rewind.screen.title": "时间树",
+  "rewind.progress.pausing_snapshot": "正在冻结世界…",
+  "rewind.progress.flushing": "正在同步落盘…",
+  "rewind.progress.copying": "正在写入存档点…",
+  "rewind.progress.closing_world": "正在关闭世界…",
+  "rewind.progress.rewriting": "正在还原存档点…",
+  "rewind.progress.reopening": "正在重新加载世界…",
+
+  "rewind.confirm.title": "回溯确认",
+  "rewind.confirm.message": "将把「%s」还原到 %s 前建立的存档点。当前进度会被覆盖。",
+  "rewind.confirm.yes": "回溯",
+  "rewind.confirm.no": "取消",
+
+  "rewind.msg.snapshot_done": "已建立存档点",
+  "rewind.msg.restored": "已回溯到存档点",
+
+  "rewind.error.busy": "上一个存档点操作还没有结束",
+  "rewind.error.no_world": "只能在单人世界的游戏内使用",
+  "rewind.error.lan_published": "局域网已开放，服务端不会暂停，无法取得一致快照；请先关闭局域网",
+  "rewind.error.server_gone": "集成服务器已消失",
+  "rewind.error.pause_timeout": "等待世界暂停超时",
+  "rewind.error.flush_timeout": "等待落盘超时",
+  "rewind.error.flush_failed": "落盘失败",
+  "rewind.error.copy_timeout": "写入存档点超时",
+  "rewind.error.copy_failed": "写入存档点失败",
+  "rewind.error.rewrite_timeout": "还原存档点超时",
+  "rewind.error.rewrite_failed": "还原存档点失败",
+  "rewind.error.reopen_failed": "重新加载世界失败",
+  "rewind.error.close_failed": "关闭世界失败",
+  "rewind.error.no_snapshot": "还没有存档点，先按 F7 建立一个",
+
+  "rewind.cmd.snapshot_started": "开始建立存档点…",
+  "rewind.cmd.status_empty": "还没有任何存档点"
+}

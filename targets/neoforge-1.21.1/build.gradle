@@ -9,6 +9,12 @@ file('../../gradle.properties').withInputStream { properties.load(it) }
 file('gradle.properties').withInputStream { properties.load(it) }
 properties.each { key, value -> ext.set(key.toString(), value.toString()) }
 
+// 本地端到端自测用的可选运行参数，不传就不生效：
+//   -PrwQuickPlay=<存档目录名>  直接把客户端开进某个单人世界（--quickPlaySingleplayer）
+//   -PrwSelfTest=true          打开模组内置自测（-Drewind.selftest=true）
+def rewindQuickPlay = project.findProperty('rwQuickPlay')
+def rewindSelfTest = project.findProperty('rwSelfTest')
+
 group = mod_group_id
 version = mod_version
 
@@ -26,6 +32,13 @@ neoForge {
     runs {
         client {
             client()
+            if (rewindQuickPlay) {
+                programArgument '--quickPlaySingleplayer'
+                programArgument rewindQuickPlay.toString()
+            }
+            if (rewindSelfTest) {
+                systemProperty 'rewind.selftest', rewindSelfTest.toString()
+            }
         }
         server {
             server()
@@ -48,7 +61,11 @@ repositories {
 
 dependencies {
     implementation project(':common')
-    implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.2.5'
+    // dev 运行时：moddev 只把本 target 的 sourceSet 输出挂进 MOD_CLASSES，游戏类加载器实际用的是
+    // legacy classpath（clientLegacyClasspath.txt，来自 additionalRuntimeClasspath）。common 不是独立 mod，
+    // 所以必须显式挂进后者，否则 dev 下会 NoClassDefFoundError（发行 jar 里 common 的类本来就是打进去的）。
+    additionalRuntimeClasspath project(':common')
+    implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.2.5.1'
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -70,7 +87,10 @@ tasks.named('processResources', ProcessResources).configure {
 }
 
 tasks.named('jar', Jar).configure {
-    from project(':common').sourceSets.main.output
+    // common 的资源已经通过 gradle/target-conventions/publish.gradle 里的
+    // sourceSets.main.resources.srcDir 并进来了，这里只需要补它的 class，
+    // 否则同一份共享资源会在 jar 里出现两次（Gradle 会直接报 duplicate）。
+    from project(':common').sourceSets.main.output.classesDirs
 }
 
 tasks.withType(JavaCompile).configureEach {
