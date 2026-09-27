@@ -74,6 +74,12 @@ public final class RewindSelfTest {
     private static final List<String> failures = new ArrayList<>();
     private static WorldState baseline;
     private static boolean screenLeakReported;
+    /** 本轮是不是走原地回滚（第 1 轮走原地，第 2 轮走「关世界重开」做 A/B）。 */
+    private static boolean expectInPlace;
+    /** 本轮回溯期间世界有没有被关掉——原地回滚的核心断言就是「没关」。 */
+    private static boolean worldWasClosed;
+    private static long inPlaceMillis = -1L;
+    private static long reopenMillis = -1L;
 
     private RewindSelfTest() {
     }
@@ -235,16 +241,19 @@ public final class RewindSelfTest {
             }
             case TRIGGER_RESTORE: {
                 if (stageTicks == 1) {
-                    // A/B：第 1 轮走快速重启，第 2 轮走原版 openWorld，好在同一份世界上比耗时
+                    // A/B：第 1 轮走原地回滚，第 2 轮走「关世界 → 重开」，好在同一份世界上比耗时
+                    expectInPlace = cycle == 1;
+                    worldWasClosed = false;
+                    CheckpointController.setInPlaceEnabled(expectInPlace);
                     CheckpointController.setFastRestartEnabled(cycle == 1);
                     Rewind.LOGGER.info("Rewind self-test: cycle {} will restore via the {} path", cycle,
-                            cycle == 1 ? "fast" : "vanilla");
+                            expectInPlace ? "in-place" : "close-and-reopen");
                     Rewind.LOGGER.info("Rewind self-test: simulating F8 via KeyMapping.click({})",
                             InputConstants.KEY_F8);
                     KeyMapping.click(InputConstants.Type.KEYSYM.getOrCreate(InputConstants.KEY_F8));
                     return;
                 }
-                // F8 不再要确认屏：点下去就应该直接开始关世界
+                // F8 不再要确认屏：点下去就应该直接开始回溯
                 if (CheckpointController.isBusy() || minecraft.level == null) {
                     goTo(Stage.WAIT_WORLD_CLOSED);
                     return;
@@ -256,8 +265,20 @@ public final class RewindSelfTest {
                 return;
             }
             case WAIT_WORLD_CLOSED: {
-                if (minecraft.level != null) {
+                if (minecraft.level == null) {
+                    worldWasClosed = true;
+                }
+                if (CheckpointController.isBusy()) {
                     return;
+                }
+                if (expectInPlace) {
+                    check(!worldWasClosed, "in-place restore must keep the world open, but it was closed");
+                    check(CheckpointController.lastRestoreInPlace(),
+                            "restore was expected to run in place, but it fell back to close-and-reopen");
+                    inPlaceMillis = CheckpointController.lastRestoreMillis();
+                } else {
+                    check(worldWasClosed, "close-and-reopen restore should have closed the world");
+                    reopenMillis = CheckpointController.lastRestoreMillis();
                 }
                 goTo(Stage.WAIT_WORLD_REOPENED);
                 return;
@@ -305,11 +326,22 @@ public final class RewindSelfTest {
                                 + " skipped=" + skippedFiles + " total=" + totalFiles);
                 Rewind.LOGGER.info("Rewind self-test: cycle {} incremental restore copied={} skipped={} total={}",
                         cycle, copiedFiles, skippedFiles, totalFiles);
+                if (expectInPlace) {
+                    var inPlace = CheckpointController.lastInPlaceResult();
+                    Rewind.LOGGER.info("Rewind self-test: in-place rollback detail {}", inPlace == null ? "n/a" : inPlace.summary());
+                    check(inPlaceMillis > 0L && inPlaceMillis < 1500L,
+                            "in-place restore should finish well under 1.5s, took " + inPlaceMillis + " ms");
+                }
                 if (cycle < MAX_CYCLES && failures.isEmpty()) {
                     cycle++;
                     Rewind.LOGGER.info("Rewind self-test: starting cycle {} (覆盖已有存档点后再次回溯)", cycle);
                     goTo(Stage.TRIGGER_SNAPSHOT);
                 } else {
+                    Rewind.LOGGER.info("Rewind self-test: A/B restore timing in-place={} ms close-and-reopen={} ms",
+                            inPlaceMillis, reopenMillis);
+                    check(inPlaceMillis > 0L && reopenMillis > 0L && inPlaceMillis < reopenMillis,
+                            "in-place restore (" + inPlaceMillis + " ms) should beat close-and-reopen ("
+                                    + reopenMillis + " ms)");
                     report();
                 }
                 return;

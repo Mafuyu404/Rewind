@@ -9,6 +9,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import com.mojang.serialization.Dynamic;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.server.InPlaceRollback;
 import cc.sighs.rewind.server.WorldFlush;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
@@ -44,7 +45,11 @@ import net.minecraft.world.level.storage.WorldData;
  * <p>F7：弹一个会暂停世界的进度屏 → 等集成服务器真的停了 → 服务器线程强同步落盘 →
  * 后台线程把存档目录镜像进 {@code rewind_snapshots/quick/} → 关屏回到游戏。
  *
- * <p>F8：直接走原版「保存并退出」同一条路（{@code Minecraft.disconnect}），返回时
+ * <p>F8：默认走<b>原地回滚</b>（{@link InPlaceRollback}）——世界不关、客户端不重登，在活着的集成服务器里
+ * 把受影响的区块丢掉（不落盘）、释放 region 句柄、用快照覆盖文件、再从磁盘读回来。原地回滚失败时
+ * 自动退回下面这条已知能成的老路。
+ *
+ * <p>F8（回退路径）：走原版「保存并退出」同一条路（{@code Minecraft.disconnect}），返回时
  * 服务器线程已结束、{@code session.lock} 已释放、所有 region 文件句柄已关闭，
  * 此时才能安全覆盖 .mca；覆盖完走快速重启重新进世界。
  *
@@ -57,11 +62,13 @@ public final class CheckpointController {
         PAUSING,
         FLUSHING,
         SNAPSHOTTING,
-        /** F8：等过渡淡入完成，然后关世界。 */
+        /** F8（原地回滚）：等过渡淡入完成，然后在活着的服务端上回滚，世界不关。 */
+        ROLLING_BACK,
+        /** F8（回退路径）：等过渡淡入完成，然后关世界。 */
         CLOSING_WORLD,
         REWRITING,
         REOPENING,
-        /** 新世界已经回来，等第一帧画出来再让过渡淡出。 */
+        /** 新世界已经回来（或原地回滚完成），等第一帧画出来再让过渡淡出。 */
         REVEALING
     }
 
@@ -76,6 +83,8 @@ public final class CheckpointController {
     private static final int TIMEOUT_FLUSH_TICKS = 1200;
     private static final int TIMEOUT_SNAPSHOT_TICKS = 24000;
     private static final int TIMEOUT_REWRITE_TICKS = 24000;
+    /** 原地回滚整段（含区块重载）跑在服务端线程上；等太久只发一次警告，不硬超时。 */
+    private static final int IN_PLACE_WARN_INTERVAL_TICKS = 6000;
     /** 服务端线程最多冻结多久（秒）。客户端的 keep-alive 超时远大于这个值，超了也只是提前放行。 */
     private static final long SERVER_FREEZE_SECONDS = 20L;
     /** 新世界回来了之后再等几 tick 才收起模糊，避免露出还没收到区块的空画面。 */
@@ -113,6 +122,18 @@ public final class CheckpointController {
     private static WorldData reusableWorldData;
     /** 是否走快速重启；留个开关给 A/B 测量（默认开）。 */
     private static boolean fastRestartEnabled = true;
+    /** 是否走原地回滚；留个开关给 A/B 测量（默认开）。关掉就退回「关世界 → 重开」那条路。 */
+    private static boolean inPlaceEnabled = true;
+
+    /** 原地回滚跑在服务端线程上，客户端这边只轮询这几个标记。 */
+    private static volatile boolean inPlaceDone;
+    private static volatile Throwable inPlaceFailure;
+    private static volatile InPlaceRollback.Result inPlaceResult;
+    /** 本轮是否已经提交过回滚任务（只在客户端线程读写，避免同一轮反复提交）。 */
+    private static boolean inPlaceStarted;
+    /** 最近一次回溯是不是原地回滚、整段耗时（F8 → 玩家可动）。 */
+    private static boolean lastRestoreInPlace;
+    private static long lastRestoreMillis = -1L;
 
     private static volatile boolean workerFinished;
     private static volatile Throwable workerFailure;
@@ -164,6 +185,26 @@ public final class CheckpointController {
         fastRestartEnabled = enabled;
     }
 
+    /** 切换原地回滚；自测用它在同一次运行里做 A/B 对比。 */
+    public static void setInPlaceEnabled(boolean enabled) {
+        inPlaceEnabled = enabled;
+    }
+
+    /** 最近一次回溯走的是不是原地回滚。 */
+    public static boolean lastRestoreInPlace() {
+        return lastRestoreInPlace;
+    }
+
+    /** 最近一次回溯从按下 F8 到玩家可动的耗时（毫秒，-1 表示还没回溯过）。 */
+    public static long lastRestoreMillis() {
+        return lastRestoreMillis;
+    }
+
+    /** 最近一次原地回滚的分项统计（没走过原地回滚时为 null）。 */
+    public static InPlaceRollback.Result lastInPlaceResult() {
+        return inPlaceResult;
+    }
+
     // ------------------------------------------------------------------ F7
 
     /** F7：建立/覆盖存档点。没有界面，靠「广角过渡 + 冻结服务端线程」完成。 */
@@ -198,12 +239,48 @@ public final class CheckpointController {
         requestSource = source;
         lastOutcome = Outcome.NONE;
         lastMessage = "";
-        phase = Phase.CLOSING_WORLD;
+        lastRestoreInPlace = false;
+        lastRestoreMillis = -1L;
+        inPlaceResult = null;
+        inPlaceDone = false;
+        inPlaceFailure = null;
+        inPlaceStarted = false;
+        phase = inPlaceEnabled ? Phase.ROLLING_BACK : Phase.CLOSING_WORLD;
         phaseTicks = 0;
         // 回滚窗口在这一刻就打开：从淡入开始，任何世界落盘都是马上要被覆盖掉的
         Rewind.beginDiscard();
-        // 先让画面开始高斯模糊；等淡入到满强度（世界在视觉上已经糊住）再真正关世界
+        // 先让画面开始高斯模糊；等淡入到满强度（世界在视觉上已经糊住）再真正回滚
         RewindTransition.start(RewindTransition.Effect.GAUSSIAN_BLUR);
+    }
+
+    /**
+     * 原地回滚：把整段活交给服务端线程，客户端这边只轮询标记。
+     *
+     * <p>世界始终是活着的——不关服、不重登客户端，所以过渡期间也不需要任何逻辑屏来维持
+     * 「没有界面就一定有玩家」那条不变量（玩家一直没离开过）。
+     */
+    private static void startInPlaceRollback(Minecraft minecraft) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null || minecraft.level == null) {
+            inPlaceFailure = new IllegalStateException("integrated server is gone");
+            inPlaceDone = true;
+            return;
+        }
+        worldRoot = server.getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
+        levelId = String.valueOf(worldRoot.getFileName());
+        restoreStartedNanos = System.nanoTime();
+        Rewind.LOGGER.info("Rewind: in-place rollback starting on {} for slot {}", levelId, slot);
+        server.execute(() -> {
+            try {
+                inPlaceResult = InPlaceRollback.run(server, worldRoot, slot);
+                Rewind.LOGGER.info("Rewind: in-place rollback done: {}", inPlaceResult.summary());
+            } catch (Throwable t) {
+                inPlaceFailure = t;
+                Rewind.LOGGER.error("Rewind: in-place rollback threw", t);
+            } finally {
+                inPlaceDone = true;
+            }
+        });
     }
 
     private static void startRestore(Minecraft minecraft) {
@@ -305,6 +382,49 @@ public final class CheckpointController {
                 phase = Phase.IDLE;
                 succeed(minecraft, "rewind.msg.snapshot_done",
                         summary + (meta == null ? "" : " | " + describeGameTime(meta.gameTime)));
+                return;
+            }
+            case ROLLING_BACK: {
+                // 等模糊淡入到位（画面已经糊住）再动手，回滚过程玩家看不到
+                if (!RewindTransition.isFadeInDone()) {
+                    if (phaseTicks > TIMEOUT_PAUSE_TICKS) {
+                        fail(minecraft, "rewind.error.pause_timeout", "");
+                    }
+                    return;
+                }
+                if (!inPlaceStarted) {
+                    // 还没启动：在服务端线程上跑整段原地回滚，客户端这边继续出帧
+                    inPlaceStarted = true;
+                    startInPlaceRollback(minecraft);
+                    return;
+                }
+                if (!inPlaceDone) {
+                    // 服务端线程还在回滚里。这里只能等：它正在改世界，任何并发的关世界/重开都会撞上它。
+                    // 视觉上的兜底由 RewindTransition 自己的超时守卫负责，模糊不会一直挂着。
+                    if (phaseTicks % IN_PLACE_WARN_INTERVAL_TICKS == 0) {
+                        Rewind.LOGGER.warn("Rewind: in-place rollback is taking unusually long ({} ticks)", phaseTicks);
+                    }
+                    return;
+                }
+                if (inPlaceFailure != null) {
+                    // 原地回滚没做成：退回「关世界 → 覆盖 → 重开」那条已知能成的路
+                    Rewind.LOGGER.warn("Rewind: in-place rollback failed, falling back to close-and-reopen",
+                            inPlaceFailure);
+                    inPlaceFailure = null;
+                    inPlaceResult = null;
+                    phase = Phase.CLOSING_WORLD;
+                    phaseTicks = 0;
+                    return;
+                }
+                lastRestoreInPlace = true;
+                if (inPlaceResult != null) {
+                    lastRestoreCopied = inPlaceResult.mirrorCopied;
+                    lastRestoreSkipped = inPlaceResult.mirrorSkipped;
+                    lastRestoreFiles = inPlaceResult.mirrorFiles;
+                }
+                phase = Phase.REVEALING;
+                phaseTicks = 0;
+                succeed(minecraft, "rewind.msg.restored", inPlaceResult == null ? "" : inPlaceResult.summary());
                 return;
             }
             case CLOSING_WORLD: {
@@ -610,8 +730,10 @@ public final class CheckpointController {
         lastMessage = describe(messageKey, detailText);
         Rewind.LOGGER.info("Rewind: {}", lastMessage);
         if (restoreStartedNanos != 0L) {
-            Rewind.LOGGER.info("Rewind: rewind completed in {} ms (F8 → 玩家实体回到世界)",
-                    millisSince(restoreStartedNanos));
+            // 从「过渡淡入完成、真正开始动世界」算起，不含前面的淡入时间；两条路径都是同一个起点，
+            // 所以 A/B 对比是同一把尺子
+            lastRestoreMillis = millisSince(restoreStartedNanos);
+            Rewind.LOGGER.info("Rewind: rewind body finished in {} ms", lastRestoreMillis);
             restoreStartedNanos = 0L;
         }
     }

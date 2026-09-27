@@ -4,6 +4,7 @@ import cc.sighs.rewind.Rewind;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.players.PlayerList;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -49,6 +50,18 @@ public final class RollbackDiscardMixins {
          */
         @Inject(method = "hasWork()Z", at = @At("HEAD"), cancellable = true)
         private void rewind$skipDrainLoopDuringRollback(CallbackInfoReturnable<Boolean> cir) {
+            if (Rewind.isDiscarding()) {
+                cir.setReturnValue(false);
+            }
+        }
+
+        /**
+         * 单个区块的落盘（{@code scheduleUnload} / {@code saveChunkIfNeeded} / {@code saveAllChunks} 都汇到这里）。
+         * 原地回滚要主动卸载区块，卸载路径本身会调 {@code save}——这里整段跳过，省掉
+         * {@code ChunkSerializer.write} 的序列化开销（写下去的也马上会被快照覆盖）。
+         */
+        @Inject(method = "save(Lnet/minecraft/world/level/chunk/ChunkAccess;)Z", at = @At("HEAD"), cancellable = true)
+        private void rewind$skipSingleChunkSaveDuringRollback(ChunkAccess chunk, CallbackInfoReturnable<Boolean> cir) {
             if (Rewind.isDiscarding()) {
                 cir.setReturnValue(false);
             }

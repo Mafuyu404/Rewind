@@ -12,7 +12,19 @@
     "RollbackDiscardMixins$RegionFileDiscard",
     "RollbackDiscardMixins$SavedDataDiscard",
     "RollbackDiscardMixins$SinglePlayerSaveDiscard",
-    "RollbackDiscardMixins$LevelDataDiscard"
+    "RollbackDiscardMixins$LevelDataDiscard",
+    "RollbackAccessMixins$ChunkMapAccess",
+    "RollbackAccessMixins$DistanceManagerAccess",
+    "RollbackAccessMixins$ServerChunkCacheAccess",
+    "RollbackAccessMixins$ChunkStorageAccess",
+    "RollbackAccessMixins$SimpleRegionStorageAccess",
+    "RollbackAccessMixins$IOWorkerAccess",
+    "RollbackAccessMixins$RegionFileStorageAccess",
+    "RollbackAccessMixins$SectionStorageAccess",
+    "RollbackAccessMixins$EntityStorageAccess",
+    "RollbackAccessMixins$ServerLevelAccess",
+    "RollbackAccessMixins$EntitySectionManagerAccess",
+    "RollbackAccessMixins$DimensionDataStorageAccess"
   ],
   "injectors": {
     "defaultRequire": 1
