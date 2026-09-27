@@ -7,13 +7,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     
     <title>时间树</title>
-    <link rel="stylesheet" href="https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/ore.css">
     <style>
         /* ==========================================================================
            ApricityUI — Ore theme (core, inlined so the page works offline too)
            ========================================================================== */
-        @font-face{font-family:OreRegular;src:url("https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/fonts/minecraft-regular.otf") format("opentype");font-weight:400;font-style:normal;font-display:swap}
-        @font-face{font-family:OreDisplay;src:url("https://raw.githubusercontent.com/Tower-of-Sighs/AUI/refs/heads/snow/common/src/main/resources/assets/apricityui/apricity/apricityui/theme/ore/fonts/minecraft-ten.ttf") format("truetype");font-weight:400;font-style:normal;font-display:swap}
+        /* 整页统一用微软雅黑。原来的 OreRegular / OreDisplay 是远程 webfont，游戏里一直加载不到
+           （AUI 日志里 "font family unavailable, using fallback"），页面走的本来就是 fallback，
+           所以这里直接把那两个 @font-face 去掉，只留系统字体。 */
         .ore-theme{
             --ink:#f4f5f7;--ink-muted:#b6bac1;--ink-dark:#191a1c;--canvas:#202124;--surface:#48494a;
             --surface-deep:#313233;--surface-soft:#d0d1d4;--edge:#1e1e1f;--edge-light:#77797c;
@@ -24,12 +24,12 @@
             --space-1:4px;--space-2:8px;--space-3:16px;--space-4:24px;--space-5:32px;
             --font-sm:13px;--font-md:16px;--font-lg:20px;--font-xl:28px;
             min-width:320px;min-height:100%;margin:0;color:var(--ink);
-            font-family:OreRegular,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+            font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC","PingFang SC",sans-serif;
             font-size:var(--font-md);line-height:1.5;letter-spacing:0;caret-color:var(--green);
         }
         .ore-theme *,.ore-theme *::before,.ore-theme *::after{box-sizing:border-box}
         .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme p,.ore-theme ul,.ore-theme ol,.ore-theme figure{margin-top:0}
-        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme .font-display{color:var(--ink);font-family:OreDisplay,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;font-weight:400;line-height:1.15}
+        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme .font-display{color:var(--ink);font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC","PingFang SC",sans-serif;font-weight:400;line-height:1.15}
         .ore-theme h1{margin-bottom:16px;font-size:36px}
         .ore-theme h2{margin-bottom:14px;font-size:28px}
         .ore-theme h3{margin-bottom:12px;font-size:22px}
@@ -39,7 +39,7 @@
         .ore-theme p{margin-bottom:16px}
         .ore-theme strong{color:#fff}
         .ore-theme small,.ore-theme .text-muted{color:var(--ink-muted)}
-        .ore-theme kbd{padding:2px 6px;border:2px solid var(--edge);color:#fff;background:var(--surface-deep);font-family:OreRegular,monospace;font-size:12px}
+        .ore-theme kbd{padding:2px 6px;border:2px solid var(--edge);color:#fff;background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",monospace;font-size:12px}
         .ore-theme hr,.ore-theme .ore-divider{height:4px;margin:16px 0;border:0;border-top:2px solid #333334;border-bottom:2px solid #5a5b5c}
         .ore-theme img{max-width:100%;image-rendering:pixelated}
         .ore-theme .container{width:100%;max-width:1240px;margin:0 auto;padding:0 20px}
@@ -50,7 +50,7 @@
         .ore-theme .stack{display:flex;flex-direction:column;gap:12px}
         .ore-theme .cluster{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
         .ore-theme .split{display:flex;align-items:center;justify-content:space-between;gap:16px}
-        .ore-theme .button{min-height:42px;margin:0;padding:7px 16px 13px;border:3px solid var(--edge);color:#fff;background:var(--green);box-shadow:inset 0 -6px var(--green-shadow),inset 3px 3px rgba(255,255,255,.22),inset -3px -9px rgba(0,0,0,.12);font-family:OreDisplay,sans-serif;font-size:16px;line-height:1;text-align:center;text-shadow:2px 2px rgba(0,0,0,.35);cursor:pointer;user-select:none;display:inline-flex;align-items:center;justify-content:center;gap:8px}
+        .ore-theme .button{min-height:42px;margin:0;padding:7px 16px 13px;border:3px solid var(--edge);color:#fff;background:var(--green);box-shadow:inset 0 -6px var(--green-shadow),inset 3px 3px rgba(255,255,255,.22),inset -3px -9px rgba(0,0,0,.12);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:16px;line-height:1;text-align:center;text-shadow:2px 2px rgba(0,0,0,.35);cursor:pointer;user-select:none;display:inline-flex;align-items:center;justify-content:center;gap:8px}
         .ore-theme .button:hover{background:var(--green-hover)}
         .ore-theme .button:active{padding-top:9px;padding-bottom:11px;box-shadow:inset 3px 3px rgba(255,255,255,.18),inset -3px -3px rgba(0,0,0,.18)}
         .ore-theme .button-secondary{background:var(--purple);box-shadow:inset 0 -6px var(--purple-shadow),inset 3px 3px rgba(255,255,255,.25),inset -3px -9px rgba(0,0,0,.12)}
@@ -65,12 +65,12 @@
         .ore-theme .button-wide{width:100%}
         .ore-theme .button[disabled]{border-color:#313233;color:#8b8d91;background:#55575a;box-shadow:inset 0 -5px #3b3c3e,inset 2px 2px #696b6e;text-shadow:none;cursor:default}
         .ore-theme .card,.ore-theme .panel{border:3px solid var(--edge);color:var(--ink);background:var(--surface);box-shadow:inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
-        .ore-theme .card-header{min-height:46px;padding:12px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:OreDisplay,sans-serif;font-size:18px;line-height:1.1;display:flex;align-items:center;justify-content:space-between;gap:10px}
+        .ore-theme .card-header{min-height:46px;padding:12px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:18px;line-height:1.1;display:flex;align-items:center;justify-content:space-between;gap:10px}
         .ore-theme .card-body{padding:16px}
         .ore-theme .card-footer{padding:12px 16px;border-top:3px solid var(--edge);background:#3a3b3d}
         .ore-theme .form-label{margin-bottom:6px;color:var(--ink);display:block}
         .ore-theme .form-help{margin-top:5px;color:var(--ink-muted);font-size:var(--font-sm)}
-        .ore-theme .form-input,.ore-theme .form-select{width:100%;min-height:42px;padding:8px 10px;border:3px solid var(--edge);color:#fff;background:var(--surface-deep);box-shadow:inset 0 5px #242425;font-family:OreRegular,sans-serif;font-size:15px;line-height:1.35}
+        .ore-theme .form-input,.ore-theme .form-select{width:100%;min-height:42px;padding:8px 10px;border:3px solid var(--edge);color:#fff;background:var(--surface-deep);box-shadow:inset 0 5px #242425;font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:15px;line-height:1.35}
         .ore-theme .form-input:hover,.ore-theme .form-select:hover{border-color:#85878b}
         .ore-theme .form-input:focus,.ore-theme .form-select:focus{border-color:var(--focus);outline:2px solid var(--green);outline-offset:0}
         .ore-theme .badge{min-height:24px;padding:3px 8px;border:2px solid var(--edge);color:#fff;background:var(--blue);font-size:12px;line-height:1.2;display:inline-flex;align-items:center;gap:4px}
@@ -91,16 +91,16 @@
         .ore-theme .list-group-item:last-child{border-bottom:0}
         .ore-theme .list-group-item:hover{background:#56585b}
         .ore-theme .inventory-grid{display:grid;grid-template-columns:repeat(9,1fr);gap:3px}
-        .ore-theme .slot{aspect-ratio:1/1;border:3px solid #1c1c1d;border-top-color:#303133;border-left-color:#303133;color:#fff;background:#77787a;box-shadow:inset 3px 3px #4d4e50,inset -3px -3px #b2b3b5;font-family:OreDisplay,sans-serif;display:flex;align-items:center;justify-content:center;position:relative}
+        .ore-theme .slot{aspect-ratio:1/1;border:3px solid #1c1c1d;border-top-color:#303133;border-left-color:#303133;color:#fff;background:#77787a;box-shadow:inset 3px 3px #4d4e50,inset -3px -3px #b2b3b5;font-family:"Microsoft YaHei","微软雅黑",sans-serif;display:flex;align-items:center;justify-content:center;position:relative}
         .ore-theme .slot:hover{border-color:#fff;background:#8c8e91}
         .ore-theme .tabs{border-bottom:3px solid var(--edge);display:flex;flex-wrap:wrap;gap:4px}
-        .ore-theme .tab{min-height:38px;padding:8px 14px;border:2px solid var(--edge);border-bottom:0;color:var(--ink-muted);background:#37383a;font:inherit;font-family:OreDisplay,sans-serif;cursor:pointer}
+        .ore-theme .tab{min-height:38px;padding:8px 14px;border:2px solid var(--edge);border-bottom:0;color:var(--ink-muted);background:#37383a;font:inherit;font-family:"Microsoft YaHei","微软雅黑",sans-serif;cursor:pointer}
         .ore-theme .tab:hover,.ore-theme .tab.active{color:#fff;background:var(--surface);box-shadow:inset 0 4px var(--purple)}
         .ore-theme .modal-backdrop{position:fixed;inset:0;z-index:900;padding:24px;background:rgba(0,0,0,.68);display:none;align-items:center;justify-content:center}
         .ore-theme .modal-backdrop.open{display:flex}
         .ore-theme .modal{position:relative;z-index:1;width:520px;max-width:100%;border:4px solid var(--edge);background:var(--surface);box-shadow:8px 8px rgba(0,0,0,.42),inset 2px 2px var(--edge-light);animation:pop .16s steps(3)}
         @keyframes pop{from{transform:scale(.94);opacity:.4}to{transform:scale(1);opacity:1}}
-        .ore-theme .modal-header{min-height:50px;padding:13px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:OreDisplay,sans-serif;font-size:20px;display:flex;align-items:center;gap:10px}
+        .ore-theme .modal-header{min-height:50px;padding:13px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:20px;display:flex;align-items:center;gap:10px}
         .ore-theme .modal-body{padding:18px 16px}
         .ore-theme .modal-footer{padding:12px 16px;border-top:3px solid var(--edge);display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}
         .ore-theme .text-center{text-align:center}
@@ -162,16 +162,17 @@
         .slot-card:hover{transform:translateY(-3px);border-color:#9a9ca0}
         .slot-card:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
         .slot-card.selected{border-color:var(--gold);box-shadow:0 0 0 2px rgba(240,185,45,.32),inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
-        /* 封面为纯色块，颜色直接写在槽位标记的 style 上 */
+        /* 封面为纯色块，颜色直接写在槽位标记的 style 上；有截图时截图盖在上面 */
         .slot-cover{position:relative;aspect-ratio:16/9;background:#131418;border-bottom:3px solid var(--edge);overflow:hidden}
-        .cover-shade{position:absolute;left:0;right:0;bottom:0;height:48%;background:linear-gradient(transparent,rgba(0,0,0,.72));pointer-events:none}
-        .slot-index{position:absolute;left:6px;top:6px;min-width:30px;padding:2px 6px 3px;border:2px solid #101114;background:rgba(14,15,18,.78);color:#fff;font-family:OreDisplay,sans-serif;font-size:13px;text-align:center;letter-spacing:.5px}
+        /* 建点时抓的那张封面：铺满封面框，比框大的部分由 overflow:hidden 裁掉（不盖渐变阴影） */
+        .cover-shot{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover}
+        .slot-index{position:absolute;left:6px;top:6px;min-width:30px;padding:2px 6px 3px;border:2px solid #101114;background:rgba(14,15,18,.78);color:#fff;font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:13px;text-align:center;letter-spacing:.5px}
         .slot-tags{position:absolute;right:6px;top:6px;display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
         .slot-tags .badge{font-size:11px;min-height:20px;padding:1px 6px;border-width:2px}
         .slot-cover.empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
             background-color:#232427;
             background-image:repeating-conic-gradient(#2b2c2f 0% 25%,#232427 0% 50%);background-size:16px 16px}
-        .slot-cover.empty .plus{font-family:OreDisplay,sans-serif;font-size:32px;color:#7b7d82;line-height:1;text-shadow:2px 2px rgba(0,0,0,.5)}
+        .slot-cover.empty .plus{font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:32px;color:#7b7d82;line-height:1;text-shadow:2px 2px rgba(0,0,0,.5)}
         .slot-cover.empty .empty-text{color:#8b8d91;font-size:12px}
         .slot-card:hover .slot-cover.empty .plus{color:var(--gold)}
         .slot-body{padding:10px 11px 8px;display:flex;flex-direction:column;gap:5px;min-width:0;flex:1}
@@ -186,7 +187,7 @@
         /* The three slot actions stay on one line, whatever the card width. */
         .slot-actions{display:flex;gap:6px;padding:0 10px 10px}
         .slot-actions .button,.special-actions .button{flex:1 1 0;min-width:0;padding-left:5px;padding-right:5px;font-size:12px}
-        .newest-flag{position:absolute;left:0;bottom:0;background:var(--gold);color:#241a06;font-size:11px;padding:2px 7px;border:2px solid #101114;border-left:0;border-bottom:0;font-family:OreDisplay,sans-serif}
+        .newest-flag{position:absolute;left:0;bottom:0;background:var(--gold);color:#241a06;font-size:11px;padding:2px 7px;border:2px solid #101114;border-left:0;border-bottom:0;font-family:"Microsoft YaHei","微软雅黑",sans-serif}
 
         /* detail panel */
         .detail-cover{position:relative;border:3px solid var(--edge);overflow:hidden;background:#131418;aspect-ratio:16/9}
@@ -198,9 +199,14 @@
         /* 详情面板的操作按钮：同一行的小按钮 */
         .detail-actions{display:flex;gap:6px;margin-top:14px}
         .detail-actions .button{flex:1 1 0;min-width:0;padding-left:5px;padding-right:5px}
-        .inv-title{margin:18px 0 8px;color:var(--ink-muted);font-size:13px;letter-spacing:1px}
+        .inv-title{margin:18px 0 8px;color:var(--ink-muted);font-size:13px;letter-spacing:1px;cursor:pointer;user-select:none}
+        .inv-title:hover{color:var(--ink)}
+        /* 标题左边那个折叠 / 展开箭头 */
+        .inv-caret{display:inline-block;width:14px}
+        /* 展开时快捷栏（第四行）和上面三行背包之间的间隔 */
+        .inv-gap{height:12px}
         .inv-item{width:100%;height:100%;position:relative;box-shadow:inset -2px -2px rgba(0,0,0,.35),inset 2px 2px rgba(255,255,255,.28)}
-        .inv-count{position:absolute;right:1px;bottom:0;font-size:10px;color:#fff;text-shadow:1px 1px #000;font-family:OreDisplay,sans-serif}
+        .inv-count{position:absolute;right:1px;bottom:0;font-size:10px;color:#fff;text-shadow:1px 1px #000;font-family:"Microsoft YaHei","微软雅黑",sans-serif}
         .stat-row{display:flex;justify-content:space-between;gap:10px}
         .scroll-area{max-height:480px;overflow-y:auto;padding-right:4px}
         .scroll-area::-webkit-scrollbar{width:12px}
@@ -219,6 +225,17 @@
     </style>
 </head>
 <body class="ore-theme save-page">
+
+<!--
+    模板契约：下面的静态内容只是「没接上数据时的样子」，运行时由 Java 侧
+    （cc.sighs.rewind.client.RewindTreeScreen）整体替换这些容器：
+      #hudBar       当前世界状态（群系 / 坐标 / 游戏内时间 / 已游玩）
+      #specialGrid  自动、快速两个特殊槽位
+      #slotGrid     8 个手动槽位
+      #detailBody   选中槽位的详情（含背包快照）
+      #modalConfirm / #modalRename / #toastArea  确认弹窗、重命名弹窗、提示条，由 Java 开关
+    页面里不再有 <script>：AUI 的页面脚本要有 KubeJS 才会执行，而这套界面完全由 Java 驱动。
+-->
 
 <main class="page-main">
     <div class="container">
@@ -248,7 +265,7 @@
                             <div class="special-actions">
                                 <button class="button button-small button-secondary" data-act="load" data-id="auto">读取</button>
                                 <button class="button button-small" data-act="save" data-id="auto">覆盖</button>
-                                <button class="button button-small button-tertiary" data-act="rename" data-id="auto">重命名</button>
+                                <button class="button button-small button-tertiary" data-act="settings" data-id="auto">设置</button>
                             </div>
                         </div>
                     </article>
@@ -262,7 +279,7 @@
                             <div class="special-actions">
                                 <button class="button button-small button-secondary" data-act="load" data-id="quick">读取</button>
                                 <button class="button button-small" data-act="save" data-id="quick">覆盖</button>
-                                <button class="button button-small button-tertiary" data-act="rename" data-id="quick">重命名</button>
+                                <button class="button button-small button-tertiary" data-act="settings" data-id="quick">设置</button>
                             </div>
                         </div>
                     </article>
@@ -273,11 +290,11 @@
                     <div class="cluster">
                         <input class="form-input" id="search" type="search" placeholder="搜索世界名称…" aria-label="搜索存档">
                         <select class="form-select" id="sort" aria-label="排序方式">
+                            <option value="index" selected>槽位序号</option>
                             <option value="recent">最近修改</option>
                             <option value="oldest">最早修改</option>
                             <option value="name">名称 A→Z</option>
                             <option value="playtime">游玩时长</option>
-                            <option value="index">槽位序号</option>
                         </select>
                     </div>
                 </div>
@@ -287,7 +304,6 @@
                         <!-- 槽位 1 - 6 -->
                         <article class="card slot-card selected" data-act="select" data-id="s1" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#5b2a63">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">01</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -307,7 +323,6 @@
 
                         <article class="card slot-card" data-act="select" data-id="s2" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#141c26">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">02</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -327,7 +342,6 @@
 
                         <article class="card slot-card" data-act="select" data-id="s3" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#0c4f68">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">03</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -347,7 +361,6 @@
 
                         <article class="card slot-card" data-act="select" data-id="s4" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#2b1b3f">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">04</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -367,7 +380,6 @@
 
                         <article class="card slot-card" data-act="select" data-id="s5" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#d99b5c">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">05</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -387,7 +399,6 @@
 
                         <article class="card slot-card" data-act="select" data-id="s6" tabindex="0" role="button">
                             <div class="slot-cover" style="background:#6b2f8f">
-                                <span class="cover-shade"></span>
                                 <span class="slot-index">06</span>
                                 <span class="slot-tags"></span>
                             </div>
@@ -440,14 +451,14 @@
             <!-- 详情：当前选中槽位 01 -->
             <div class="col-4">
                 <div class="card" id="detailCard">
-                    <div class="card-header"><span>槽位详情</span><span class="badge badge-ghost">槽位 01</span></div>
-                    <div class="card-body">
+                    <div class="card-header"><span id="detailTitle">槽位详情</span><span class="badge badge-ghost" id="detailBadge">槽位 01</span></div>
+                    <div class="card-body" id="detailBody">
                         <div class="detail-cover" style="background:#5b2a63"></div>
                         <div class="detail-head">
                             <h3 class="detail-title">黎明要塞</h3>
                             <span class="detail-clock">第 11 天 14:00</span>
                         </div>
-                        <div class="inv-title">背包快照</div>
+                        <div class="inv-title" data-act="toggle-inventory"><span class="inv-caret">▶</span>背包快照</div>
                         <div class="inventory-grid">
                             <div class="slot" title="红石粉 × 12"><span class="inv-item" style="background:#d4483c"></span><span class="inv-count">12</span></div>
                             <div class="slot" title="小麦 × 25"><span class="inv-item" style="background:#e0c455"></span><span class="inv-count">25</span></div>
@@ -485,7 +496,7 @@
             <div class="modal-body" id="confirmBody">确定要执行该操作吗？</div>
             <div class="modal-footer">
                 <button class="button button-tertiary" data-act="modal-close" data-target="modalConfirm">取消</button>
-                <button class="button button-danger" id="confirmOk">确定</button>
+                <button class="button button-danger" id="confirmOk" data-act="confirm-ok">确定</button>
             </div>
         </div>
     </div>
@@ -506,57 +517,21 @@
         </div>
     </div>
 
+    <!-- 设置弹窗：自动 / 快速这两个固定槽位用它（它们不需要改名） -->
+    <div class="modal-backdrop" id="modalSettings" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal">
+            <div class="modal-header"><span>⚙</span><span id="settingsTitle">设置</span></div>
+            <div class="modal-body">
+                <ul class="list-group" id="settingsInfo"></ul>
+                <p class="form-help mt-2" id="settingsNote"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalSettings">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <div class="toast-area" id="toastArea"></div>
 </main>
-
-<script>
-
-    /* ==========================================================================
-       1. 交互：静态模板只保留必要的事件绑定
-       ========================================================================== */
-    const $=id=>document.getElementById(id);
-
-    function openModal(id){
-        document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'));
-        $(id).classList.add('open');
-    }
-    function closeModals(){document.querySelectorAll('.modal-backdrop').forEach(m=>m.classList.remove('open'));}
-    function toast(msg,type){
-        const area=$('toastArea');
-        const el=document.createElement('div');
-        el.className='toast-2'+(type?' toast-'+type:'');
-        el.textContent=msg;
-        area.appendChild(el);
-        requestAnimationFrame(()=>el.classList.add('show'));
-        setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),320);},2600);
-        while(area.children.length>4)area.firstChild.remove();
-    }
-
-    document.addEventListener('click',e=>{
-        if(e.target.classList.contains('modal-backdrop')){closeModals();return;}
-        const t=e.target.closest('[data-act]');
-        if(!t)return;
-        const card=t.closest('.slot-card, .special-card');
-        switch(t.dataset.act){
-            // 卡片只做选中高亮；详情面板是静态内容，接入真实存档后再联动。
-            case 'select':
-                document.querySelectorAll('.slot-card.selected, .special-card.selected').forEach(c=>c.classList.remove('selected'));
-                if(card)card.classList.add('selected');
-                break;
-            case 'load':toast('已读取存档','success');break;
-            case 'save':case 'delete':openModal('modalConfirm');break;
-            case 'rename':openModal('modalRename');break;
-            case 'rename-ok':{
-                const v=$('renameInput').value.trim();
-                if(!v){toast('名称不能为空','danger');break;}
-                closeModals();
-                toast('已重命名为「'+v.slice(0,20)+'」','success');
-                break;
-            }
-            case 'modal-close':closeModals();break;
-        }
-    });
-    $('confirmOk').addEventListener('click',closeModals);
-</script>
 </body>
 </html>

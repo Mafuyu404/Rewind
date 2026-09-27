@@ -7,4 +7,8 @@ scoreboard players set rewind_marker rewind_test 1
 setblock ~ ~2 ~ minecraft:gold_block replace
 kill @e[type=minecraft:armor_stand,tag=rewind_test]
 summon minecraft:armor_stand ~2 ~2 ~ {Tags:["rewind_test"],CustomName:'"REWIND_TEST_ENTITY"',NoGravity:1b,Invulnerable:1b}
+# 背包也要有确定的内容：自测会断言「背包快照」抓到了这些物品，回溯时它们同样要回来
+clear @a
+give @a minecraft:redstone 12
+give @a minecraft:iron_ingot 55
 say REWIND_TEST prepared

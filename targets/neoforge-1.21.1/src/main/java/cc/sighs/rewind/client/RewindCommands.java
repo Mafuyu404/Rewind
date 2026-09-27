@@ -15,6 +15,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
  * {@code /rewind} 命令：给手动测试和没有热键的场景用。
  *
  * <p>只做命令层的事——参数、权限、把结果念给玩家听；真正的活全部转给 {@link RewindApi}。
+ * {@code /rewind ui} 打开时间树（等价于按 F9）。
  */
 public final class RewindCommands {
     private RewindCommands() {
@@ -25,6 +26,11 @@ public final class RewindCommands {
         dispatcher.register(Commands.literal("rewind")
                 .requires(source -> source.getServer().isSingleplayer() || source.hasPermission(2))
                 .then(Commands.literal("status").executes(context -> status(context.getSource())))
+                .then(Commands.literal("ui").executes(context -> {
+                    // 时间树只在客户端里有；服务端这边只写一条日志
+                    RewindTreeScreen.open();
+                    return 1;
+                }))
                 .then(Commands.literal("snapshot").executes(context -> {
                     // 带过渡的异步入口，等价于按 F7
                     RewindApi.requestCheckpoint("command");

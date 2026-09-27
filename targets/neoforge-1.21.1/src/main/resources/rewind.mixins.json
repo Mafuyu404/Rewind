@@ -25,7 +25,8 @@
     "RollbackAccessMixins$ServerLevelAccess",
     "RollbackAccessMixins$EntitySectionManagerAccess",
     "RollbackAccessMixins$DimensionDataStorageAccess",
-    "InPlaceGuardMixins$ChunkMapRecreationGuard"
+    "InPlaceGuardMixins$ChunkMapRecreationGuard",
+    "AutoCheckpointMixins$MinecraftServerAutosave"
   ],
   "injectors": {
     "defaultRequire": 1

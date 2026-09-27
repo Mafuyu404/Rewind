@@ -69,6 +69,9 @@ public final class SnapshotIndex {
         meta.minecraftVersion = properties.getProperty(key(slot, "minecraftVersion"), "");
         meta.modVersion = properties.getProperty(key(slot, "modVersion"), "");
         meta.source = properties.getProperty(key(slot, "source"), "");
+        meta.displayName = properties.getProperty(key(slot, "displayName"), "");
+        meta.biomeId = properties.getProperty(key(slot, "biomeId"), "");
+        meta.playtimeTicks = readLong(slot, "playtimeTicks", 0L);
         meta.gameTime = readLong(slot, "gameTime", 0L);
         meta.playerX = readDouble(slot, "playerX", 0.0D);
         meta.playerY = readDouble(slot, "playerY", 0.0D);
@@ -91,12 +94,32 @@ public final class SnapshotIndex {
         properties.setProperty(key(slot, "minecraftVersion"), meta.minecraftVersion);
         properties.setProperty(key(slot, "modVersion"), meta.modVersion);
         properties.setProperty(key(slot, "source"), meta.source);
+        properties.setProperty(key(slot, "displayName"), meta.displayName);
+        properties.setProperty(key(slot, "biomeId"), meta.biomeId);
+        properties.setProperty(key(slot, "playtimeTicks"), Long.toString(meta.playtimeTicks));
         properties.setProperty(key(slot, "gameTime"), Long.toString(meta.gameTime));
         properties.setProperty(key(slot, "playerX"), Double.toString(meta.playerX));
         properties.setProperty(key(slot, "playerY"), Double.toString(meta.playerY));
         properties.setProperty(key(slot, "playerZ"), Double.toString(meta.playerZ));
         properties.setProperty(key(slot, "fileCount"), Integer.toString(meta.fileCount));
         properties.setProperty(key(slot, "totalBytes"), Long.toString(meta.totalBytes));
+    }
+
+    /**
+     * 删掉一个槽位的全部字段（只改内存，落盘由 {@link #save(Path)} 负责）。
+     *
+     * @return 槽位本来是否存在
+     */
+    public boolean remove(String slot) {
+        String prefix = "slot." + slot + ".";
+        boolean removed = false;
+        for (String key : new ArrayList<>(properties.stringPropertyNames())) {
+            if (key.startsWith(prefix)) {
+                properties.remove(key);
+                removed = true;
+            }
+        }
+        return removed;
     }
 
     /** 先写临时文件再替换，避免写一半留下坏索引。 */

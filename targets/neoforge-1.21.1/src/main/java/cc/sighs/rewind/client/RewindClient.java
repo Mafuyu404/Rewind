@@ -5,6 +5,7 @@ import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
@@ -23,9 +24,11 @@ public final class RewindClient {
     private static final String CATEGORY = "key.categories.rewind";
     private static final int SNAPSHOT_REQUEST = 1;
     private static final int RESTORE_REQUEST = 2;
+    private static final int TREE_REQUEST = 3;
 
     private static KeyMapping snapshotKey;
     private static KeyMapping restoreKey;
+    private static KeyMapping treeKey;
     /** 待执行的热键请求：0 = 没有，见 {@link #flushPendingRequest()}。 */
     private static int pendingRequest;
 
@@ -40,11 +43,17 @@ public final class RewindClient {
         modBus.addListener(RegisterKeyMappingsEvent.class, RewindClient::onRegisterKeyMappings);
         NeoForge.EVENT_BUS.addListener(ClientTickEvent.Post.class, RewindClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class, RewindCommands::register);
+        // 存档点的封面：建点的人（服务端线程）留一条待办，这里在下一帧把画面抓下来
+        NeoForge.EVENT_BUS.addListener(RenderFrameEvent.Pre.class,
+                event -> CoverCapture.onFramePre(Minecraft.getInstance()));
+        // 抓帧要在 HIGHEST：必须抢在过渡后处理之前读那一帧，否则封面会带上存档过渡的饱和度
+        NeoForge.EVENT_BUS.addListener(EventPriority.HIGHEST, RenderFrameEvent.Post.class,
+                event -> CoverCapture.onFramePost(Minecraft.getInstance()));
         // 过渡后处理：每帧结束时重采样整幅画面（存档广角 / 回溯高斯模糊）
         NeoForge.EVENT_BUS.addListener(RenderFrameEvent.Post.class, RewindClient::onRenderFramePost);
         // 过渡期间拦掉原版加载屏，保证全程不出现任何界面
         NeoForge.EVENT_BUS.addListener(ScreenEvent.Opening.class, RewindScreens::onScreenOpening);
-        // F7 / F8 走原始按键输入，而不是 KeyMapping 的点击计数：原版只在没有界面时才累计
+        // F7 / F8 / F9 走原始按键输入，而不是 KeyMapping 的点击计数：原版只在没有界面时才累计
         // 点击（KeyboardHandler 里 flag4 = screen == null），界面开着就永远收不到。
         NeoForge.EVENT_BUS.addListener(InputEvent.Key.class, RewindClient::onKeyInput);
     }
@@ -57,6 +66,10 @@ public final class RewindClient {
         return restoreKey;
     }
 
+    public static KeyMapping treeKey() {
+        return treeKey;
+    }
+
     private static void onRenderFramePost(RenderFrameEvent.Post event) {
         RewindTransitionRenderer.onRenderFramePost(Minecraft.getInstance());
     }
@@ -64,9 +77,11 @@ public final class RewindClient {
     private static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
         snapshotKey = new KeyMapping("key.rewind.snapshot", InputConstants.KEY_F7, CATEGORY);
         restoreKey = new KeyMapping("key.rewind.restore", InputConstants.KEY_F8, CATEGORY);
+        treeKey = new KeyMapping("key.rewind.tree", InputConstants.KEY_F9, CATEGORY);
         event.register(snapshotKey);
         event.register(restoreKey);
-        Rewind.LOGGER.info("Rewind: registered key mappings (F7=checkpoint, F8=restore)");
+        event.register(treeKey);
+        Rewind.LOGGER.info("Rewind: registered key mappings (F7=checkpoint, F8=restore, F9=time tree)");
     }
 
     private static void onClientTick(ClientTickEvent.Post event) {
@@ -77,7 +92,7 @@ public final class RewindClient {
     }
     /**
      * 原始按键：无论有没有界面都会走到这里（原版只在 {@code screen == null} 时给 KeyMapping 累计点击），
-     * 所以 F7 / F8 在世界内任何地方都能生效，包括 GUI 里。
+     * 所以 F7 / F8 / F9 在世界内任何地方都能生效，包括 GUI 里。
      *
      * <p>用 {@link KeyMapping#matches} 判定，所以玩家在按键设置里改绑依然有效。按下的时机如果正好撞上
      * 上一次过渡或还没结束的操作，就记下来等空下来再执行——等价于原版 {@code KeyMapping} 点击计数
@@ -91,6 +106,8 @@ public final class RewindClient {
             pendingRequest = SNAPSHOT_REQUEST;
         } else if (restoreKey != null && restoreKey.matches(event.getKey(), event.getScanCode())) {
             pendingRequest = RESTORE_REQUEST;
+        } else if (treeKey != null && treeKey.matches(event.getKey(), event.getScanCode())) {
+            pendingRequest = TREE_REQUEST;
         }
     }
 
@@ -102,8 +119,10 @@ public final class RewindClient {
         pendingRequest = 0;
         if (request == SNAPSHOT_REQUEST) {
             RewindApi.requestCheckpoint("key");
-        } else {
+        } else if (request == RESTORE_REQUEST) {
             RewindApi.requestRollback("key");
+        } else {
+            RewindTreeScreen.open();
         }
     }
 }

@@ -91,6 +91,7 @@ public final class CheckpointController {
     private static Phase phase = Phase.IDLE;
     private static String requestSource = "";
     private static int phaseTicks;
+    /** 本轮操作针对的槽位。热键用 {@link Rewind#SLOT}，界面上的读取/覆盖按玩家选的槽位覆盖它。 */
     private static String slot = Rewind.SLOT;
 
     /** 本轮要跑的活 + 服务端线程回填的结果。 */
@@ -199,13 +200,13 @@ public final class CheckpointController {
     public static void installApiBridge() {
         RewindApi.installClientBridge(new RewindApi.ClientBridge() {
             @Override
-            public void requestCheckpoint(String source) {
-                requestSnapshot(source);
+            public void requestCheckpoint(String targetSlot, String source) {
+                requestSnapshot(targetSlot, source);
             }
 
             @Override
-            public void requestRollback(String source) {
-                requestRestore(source);
+            public void requestRollback(String targetSlot, String source) {
+                requestRestore(targetSlot, source);
             }
 
             @Override
@@ -217,12 +218,26 @@ public final class CheckpointController {
 
     // ------------------------------------------------------------------ F7
 
-    /** F7：建立/覆盖存档点。没有界面，靠「广角过渡 + 服务端线程上同步落盘」完成。 */
+    /** F7：建立/覆盖 {@link Rewind#SLOT} 的存档点。 */
     public static void requestSnapshot(String source) {
+        requestSnapshot(Rewind.SLOT, source);
+    }
+
+    /**
+     * 建立/覆盖指定槽位的存档点。没有界面，靠「广角过渡 + 服务端线程上同步落盘」完成。
+     *
+     * <p>界面上的「覆盖」也走这里——它会先把界面摘掉，因为过渡是整帧后处理，界面开着会挡在效果上面。
+     */
+    public static void requestSnapshot(String targetSlot, String source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!ensureUsable(minecraft)) {
             return;
         }
+        if (!SnapshotLayout.isValidSlotName(targetSlot)) {
+            Rewind.LOGGER.warn("Rewind: refusing to write an invalid slot name: {}", targetSlot);
+            return;
+        }
+        slot = targetSlot;
         closeScreen(minecraft);
         requestSource = source;
         lastOutcome = Outcome.NONE;
@@ -234,12 +249,22 @@ public final class CheckpointController {
 
     // ------------------------------------------------------------------ F8
 
-    /** F8：回溯到存档点。直接执行，不再要确认屏。 */
+    /** F8：回溯到 {@link Rewind#SLOT} 的存档点。直接执行，不再要确认屏。 */
     public static void requestRestore(String source) {
+        requestRestore(Rewind.SLOT, source);
+    }
+
+    /** 回溯到指定槽位的存档点；界面上的「读取」走这条。 */
+    public static void requestRestore(String targetSlot, String source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!ensureUsable(minecraft)) {
             return;
         }
+        if (!SnapshotLayout.isValidSlotName(targetSlot)) {
+            Rewind.LOGGER.warn("Rewind: refusing to read an invalid slot name: {}", targetSlot);
+            return;
+        }
+        slot = targetSlot;
         Path world = RewindApi.worldRoot(minecraft.getSingleplayerServer());
         if (!RewindApi.hasCheckpoint(world, slot)) {
             // 没有存档点不是「操作失败」，只是一个空动作：不动玩家当前的界面

@@ -9,12 +9,19 @@ import java.util.concurrent.TimeUnit;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
 import cc.sighs.rewind.api.RewindResult;
+import cc.sighs.rewind.server.RewindServerConfig;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
+import cc.sighs.rewind.snapshot.SnapshotInventory;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 import cc.sighs.rewind.snapshot.SnapshotMirror;
 import com.mojang.blaze3d.platform.InputConstants;
+import com.sighs.apricityui.init.Document;
+import com.sighs.apricityui.init.Element;
+import com.sighs.apricityui.loader.Loader;
+import com.sighs.apricityui.render.ImageDrawer;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
@@ -42,6 +49,10 @@ import net.neoforged.neoforge.common.NeoForge;
  * {@code KeyMapping.click(...)} 模拟真实按键，走的就是 F7 / F8 那条路；世界状态由数据包
  * {@code rewind_test}（{@code run/saves/<世界>/datapacks/rewind_test/}）改，校验在模组侧读服务端状态。
  *
+ * <p>第 1 轮在存档点写完之后会开一次「时间树」界面（{@link Stage#VERIFY_TREE}），最后一轮结束后
+ * 再开一次查覆盖 / 删除（{@link Stage#VERIFY_TREE_MANAGE}）——那套界面完全由 Java 侧驱动，
+ * 所以能在这里直接把 DOM 查一遍。
+ *
  * <p>结论以日志行为准：{@code REWIND_SELFTEST PASS} 或 {@code REWIND_SELFTEST FAIL: ...}。
  */
 public final class RewindSelfTest {
@@ -52,6 +63,18 @@ public final class RewindSelfTest {
     private static final String ENTITY_TAG = "rewind_test";
     /** 建点之后才召唤的实体用的 tag：用来验证「只放实体、没动方块」的区块也会被回滚。 */
     private static final String EXTRA_TAG = "rewind_test_extra";
+    /** 自测里给槽位起的名字（跑完会改回去，不留在存档里）。 */
+    private static final String RENAME_PROBE = "rewind-selftest";
+    /** 最后一段（界面上的覆盖 / 删除）走到哪一步：0 = 还没查，1 = 已触发覆盖、等写盘落地。 */
+    private static int managePhase;
+    /** 覆盖 / 删除这两条路用的探针槽位：建完就删，跑完不留痕迹。 */
+    private static final String PROBE_SLOT = SnapshotLayout.manualSlot(1);
+    /** 自动建点之前快速槽位的 savedAt，用来断言「自动存档不许碰快速槽位」。 */
+    private static long quickSavedAtBeforeAuto = -1L;
+    /** 主背包的格数（9 × 4，含快捷栏），展开后详情面板至少要有这么多格。 */
+    private static final int MAIN_INVENTORY_CELLS = 36;
+    /** 折叠状态下只显示一行快捷栏（9 格）。 */
+    private static final int HOTBAR_CELLS = 9;
     private static final int STAGE_TIMEOUT_TICKS = 12000;
 
     private enum Stage {
@@ -61,6 +84,12 @@ public final class RewindSelfTest {
         CAPTURE_BASELINE,
         TRIGGER_SNAPSHOT,
         VERIFY_SNAPSHOT,
+        /** 打开「时间树」界面，验证它确实把磁盘上的存档点渲染出来了（只在第 1 轮跑）。 */
+        VERIFY_TREE,
+        /** 「跟着原版自动保存建点」：关掉不写、打开写（只在第 1 轮跑）。 */
+        VERIFY_AUTO,
+        /** 界面上的覆盖 / 删除：探针槽位建点 → 弹确认 → 删除（最后一步）。 */
+        VERIFY_TREE_MANAGE,
         MUTATE,
         VERIFY_MUTATION,
         TRIGGER_RESTORE,
@@ -236,12 +265,97 @@ public final class RewindSelfTest {
                 if (!failures.isEmpty()) {
                     report();
                 } else if (cycle == 1) {
-                    // 第 1 轮：先改世界再回溯，验证各处状态确实被抹掉
-                    goTo(Stage.MUTATE);
+                    // 第 1 轮：先验自动建点、看一眼时间树，再改世界、回溯，验证各处状态确实被抹掉
+                    goTo(Stage.VERIFY_AUTO);
                 } else {
                     // 第 2 轮：中间什么都不改，用来验证反向增量还原「一个文件都不用回拷」
                     Rewind.LOGGER.info("Rewind self-test: cycle {} restores without touching the world", cycle);
                     goTo(Stage.TRIGGER_RESTORE);
+                }
+                return;
+            }
+            case VERIFY_AUTO: {
+                // 「跟着原版自动保存建点」：关掉时不该写，打开时该写。触发的就是原版自动保存那一次
+                // 调用的参数（saveEverything(true, false, false)），不用等五分钟一次的真自动保存。
+                IntegratedServer server = minecraft.getSingleplayerServer();
+                if (server == null) {
+                    fail("the integrated server is gone before the auto checkpoint check");
+                    report();
+                    return;
+                }
+                Path world = RewindApi.worldRoot(server);
+                if (stageTicks == 1) {
+                    // 自动存档是**独立**槽位：先记下快速槽位此刻的状态，等下断言自动建点没碰它
+                    SnapshotMeta quick = RewindApi.describe(world, Rewind.SLOT);
+                    quickSavedAtBeforeAuto = quick == null ? -1L : quick.savedAtMillis;
+                    RewindApi.deleteCheckpoint(world, SnapshotLayout.SLOT_AUTO);
+                    RewindServerConfig.setAutoCheckpointEnabled(false);
+                    runAutosave(server);
+                    return;
+                }
+                if (stageTicks == 20) {
+                    check(!RewindApi.hasCheckpoint(world, SnapshotLayout.SLOT_AUTO),
+                            "the auto slot must stay empty while the follow-autosave toggle is off");
+                    Rewind.LOGGER.info("Rewind self-test: auto checkpoint off -> the slot stayed empty");
+                    RewindServerConfig.setAutoCheckpointEnabled(true);
+                    runAutosave(server);
+                    return;
+                }
+                if (stageTicks < 40) {
+                    return;
+                }
+                if (RewindApi.hasCheckpoint(world, SnapshotLayout.SLOT_AUTO)) {
+                    SnapshotMeta auto = RewindApi.describe(world, SnapshotLayout.SLOT_AUTO);
+                    check(auto != null && "autosave".equals(auto.source),
+                            "the auto checkpoint should record source=autosave, got "
+                                    + (auto == null ? "absent" : auto.source));
+                    // 自动存档和快速存档是两个独立槽位：自动建点不许碰快速槽位
+                    SnapshotMeta quickAfter = RewindApi.describe(world, Rewind.SLOT);
+                    check(quickAfter != null && quickAfter.savedAtMillis == quickSavedAtBeforeAuto,
+                            "the auto checkpoint must not touch the quick slot (savedAt " + quickSavedAtBeforeAuto
+                                    + " -> " + (quickAfter == null ? "absent" : quickAfter.savedAtMillis) + ")");
+                    check(auto != null && quickAfter != null && auto.savedAtMillis != quickAfter.savedAtMillis,
+                            "the auto and quick slots should hold different checkpoints");
+                    Rewind.LOGGER.info("Rewind self-test: auto checkpoint written by the vanilla autosave ({})",
+                            auto == null ? "absent" : auto.describe());
+                    goTo(Stage.VERIFY_TREE);
+                    return;
+                }
+                if (stageTicks > 200) {
+                    fail("the vanilla autosave did not write the auto slot");
+                    report();
+                }
+                return;
+            }
+            case VERIFY_TREE: {
+                if (stageTicks == 1) {
+                    // 存档点的过渡还在淡出时不能开界面：那会被「过渡期间不得出现任何界面」当场抓住
+                    if (RewindTransition.isActive()) {
+                        stageTicks = 0;
+                        return;
+                    }
+                    Rewind.LOGGER.info("Rewind self-test: opening the time tree");
+                    RewindTreeScreen.open();
+                    return;
+                }
+                if (!(minecraft.screen instanceof RewindTreeScreen tree)) {
+                    if (stageTicks > 100) {
+                        fail("the tree screen did not open (screen=" + minecraft.screen + ")");
+                        report();
+                    }
+                    return;
+                }
+                if (stageTicks < 5) {
+                    // 让 AUI 的样式与布局先跑一两帧，别去读还没算完的盒子
+                    return;
+                }
+                verifyTree(tree);
+                screenshotTree(minecraft, "rewind-tree");
+                minecraft.setScreen(null);
+                if (failures.isEmpty()) {
+                    goTo(Stage.MUTATE);
+                } else {
+                    report();
                 }
                 return;
             }
@@ -395,6 +509,57 @@ public final class RewindSelfTest {
                     check(inPlaceMillis > 0L && reopenMillis > 0L && inPlaceMillis < reopenMillis,
                             "in-place restore (" + inPlaceMillis + " ms) should beat close-and-reopen ("
                                     + reopenMillis + " ms)");
+                    if (failures.isEmpty()) {
+                        goTo(Stage.VERIFY_TREE_MANAGE);
+                    } else {
+                        report();
+                    }
+                }
+                return;
+            }
+            case VERIFY_TREE_MANAGE: {
+                if (stageTicks == 1) {
+                    if (RewindTransition.isActive()) {
+                        stageTicks = 0;
+                        return;
+                    }
+                    managePhase = 0;
+                    // 先给探针槽位建一个存档点（同步等它写完：这轮不用过渡，也就没有淡入可等）
+                    writeProbeSlot(minecraft);
+                    return;
+                }
+                if (stageTicks < 5) {
+                    return;
+                }
+                if (!(minecraft.screen instanceof RewindTreeScreen tree)) {
+                    Rewind.LOGGER.info("Rewind self-test: opening the time tree for the management checks");
+                    RewindTreeScreen.open();
+                    return;
+                }
+                if (managePhase == 0) {
+                    // 探针卡片 / 重命名 / 删除 / 触发一次界面里的覆盖，都在这一帧里同步做完
+                    verifyTreeManage(tree);
+                    managePhase = 1;
+                    return;
+                }
+                // 界面里那次覆盖是后台写的：等它落地，同时确认界面一直开着、没起过渡
+                IntegratedServer manageServer = minecraft.getSingleplayerServer();
+                SnapshotMeta written = manageServer == null
+                        ? null
+                        : RewindApi.describe(RewindApi.worldRoot(manageServer), PROBE_SLOT);
+                if (written != null && written.isComplete()) {
+                    check(minecraft.screen instanceof RewindTreeScreen,
+                            "the tree should still be open after the background save, but the screen is "
+                                    + minecraft.screen);
+                    check(!RewindTransition.isActive(), "the background save must not start a transition");
+                    Rewind.LOGGER.info("Rewind self-test: overwriting from the tree kept the screen open ({})",
+                            written.describe());
+                    minecraft.setScreen(null);
+                    report();
+                    return;
+                }
+                if (stageTicks > 400) {
+                    fail("the overwrite started from the tree never finished");
                     report();
                 }
                 return;
@@ -466,11 +631,363 @@ public final class RewindSelfTest {
                 check(Files.size(slotDir.resolve("region").resolve(first)) == Files.size(world.resolve("region").resolve(first)),
                         "snapshot region file size mismatch for " + first);
             }
+            // 界面要用的那几样：一次读完整张索引、槽位清单、背包快照
+            check(RewindApi.slots().size() == SnapshotLayout.MANUAL_SLOT_COUNT + 2,
+                    "RewindApi.slots() should list the 2 special slots plus "
+                            + SnapshotLayout.MANUAL_SLOT_COUNT + " manual ones, got " + RewindApi.slots());
+            check(RewindApi.describeAll(world).containsKey(Rewind.SLOT),
+                    "RewindApi.describeAll() should contain slot " + Rewind.SLOT);
+            check(!RewindApi.deleteCheckpoint(world, "rewind_selftest_absent_slot"),
+                    "deleting a slot that was never written should report nothing to delete");
+
+            SnapshotInventory inventory = RewindApi.readInventory(world, Rewind.SLOT);
+            check(!inventory.isEmpty(), "the checkpoint should carry an inventory snapshot");
+            boolean hasFixtureItems = inventory.entries().stream()
+                    .anyMatch(entry -> entry.item.contains("minecraft:redstone"))
+                    && inventory.entries().stream().anyMatch(entry -> entry.item.contains("minecraft:iron_ingot"));
+            check(hasFixtureItems, "the inventory snapshot should contain the fixture's redstone and iron, got "
+                    + inventory.size() + " entries");
+            check(inventory.entries().stream().allMatch(entry -> entry.index >= 0 && entry.index < SnapshotInventory.SLOT_COUNT),
+                    "the inventory snapshot has an out-of-range slot index");
+            Rewind.LOGGER.info("Rewind self-test: inventory snapshot entries={}", inventory.size());
+
+            if (meta != null) {
+                check(!meta.biomeId.isEmpty(), "the checkpoint should record the player's biome");
+                check(meta.playtimeTicks > 0, "the checkpoint should record the playtime, got " + meta.playtimeTicks);
+                Rewind.LOGGER.info("Rewind self-test: meta biome={} playtimeTicks={} name=\"{}\"",
+                        meta.biomeId, meta.playtimeTicks, meta.displayName);
+            }
+
             Rewind.LOGGER.info("Rewind self-test: snapshot files verified (worldFiles={}, snapshotFiles={}, regions={})",
                     worldFiles.size(), snapshotFiles.size(), regions.size());
         } catch (Exception e) {
             fail("snapshot verification threw: " + e);
         }
+    }
+
+    /**
+     * 「时间树」界面：模板扫没扫到、卡片有没有按磁盘上的数据铺出来、点击能不能选中、重命名能不能落地。
+     *
+     * <p>这套界面完全由 Java 侧驱动（AUI 的页面 {@code <script>} 要有 KubeJS 才会执行），所以这里查的
+     * 就是 Java 侧真的把 DOM 铺对了——包括 AUI 的自定义 {@code <item>} 元素有没有被解析出来。
+     */
+    private static void verifyTree(RewindTreeScreen tree) {
+        Document document = tree.getLinkedDocument();
+        check(document != null, "the tree screen has no document (is screens/rewind_screen.html being scanned?)");
+        if (document == null) {
+            return;
+        }
+        List<Element> special = document.querySelectorAll("#specialGrid .special-card");
+        List<Element> manual = document.querySelectorAll("#slotGrid .slot-card");
+        List<Element> chips = document.querySelectorAll("#hudBar .hud-chip");
+        check(special.size() == 2, "the tree should render 2 special cards, got " + special.size());
+        check(manual.size() == 8, "the tree should render 8 manual slots, got " + manual.size());
+        check(chips.size() == 4, "the tree HUD should have 4 chips, got " + chips.size());
+
+        IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
+        Element quickCard = document.querySelector("#specialGrid [data-slot=\"" + Rewind.SLOT + "\"]");
+        check(quickCard != null, "the quick slot card is missing");
+        if (quickCard != null && server != null) {
+            String worldName = server.getWorldData().getLevelName();
+            check(quickCard.getTextContent().contains(worldName),
+                    "the quick card should show the world name \"" + worldName + "\", got: " + quickCard.getTextContent());
+        }
+
+        // 空槽位的「读取」必须是禁用的
+        Element emptyLoad = document.querySelector("#slotGrid [data-slot=\"s8\"] [data-act=\"load\"]");
+        check(emptyLoad != null && emptyLoad.hasAttribute("disabled"),
+                "the load button of an empty slot should be disabled, got " + emptyLoad);
+
+        // 背包快照：默认折叠，只铺一行快捷栏（9 格）；点标题上那个箭头才展开成完整背包
+        int cells = document.querySelectorAll("#detailBody .inventory-grid .slot").size();
+        int items = document.querySelectorAll("#detailBody item").size();
+        check(cells == HOTBAR_CELLS,
+                "the collapsed inventory should show just the hotbar row (" + HOTBAR_CELLS + " cells), got " + cells);
+        check(items > 0, "the inventory snapshot should be rendered as <item> elements, got " + items);
+        Element inventoryTitle = document.querySelector("#detailBody .inv-title");
+        check(inventoryTitle != null, "the inventory title should be clickable");
+        if (inventoryTitle != null) {
+            inventoryTitle.click();
+            int expanded = document.querySelectorAll("#detailBody .inventory-grid .slot").size();
+            check(expanded >= MAIN_INVENTORY_CELLS,
+                    "expanding should show the whole inventory (" + MAIN_INVENTORY_CELLS + "+ cells), got " + expanded);
+            Element caret = document.querySelector("#detailBody .inv-caret");
+            check(caret != null && caret.getTextContent().contains("▼"),
+                    "the expanded caret should point down, got: " + (caret == null ? "none" : caret.getTextContent()));
+            Element again = document.querySelector("#detailBody .inv-title");
+            if (again != null) {
+                again.click();
+            }
+            check(document.querySelectorAll("#detailBody .inventory-grid .slot").size() == HOTBAR_CELLS,
+                    "clicking the title again should collapse it back to the hotbar row");
+        }
+
+        // 点另一张卡片：详情面板要跟着换
+        Element emptyCard = document.querySelector("#slotGrid [data-slot=\"s8\"]");
+        if (emptyCard != null) {
+            emptyCard.click();
+            check(document.querySelector("#detailBody .empty-note") != null,
+                    "selecting an empty slot should show the empty note in the detail panel");
+            Element backToQuick = document.querySelector("#specialGrid [data-slot=\"" + Rewind.SLOT + "\"]");
+            if (backToQuick != null) {
+                backToQuick.click();
+            }
+        }
+
+        verifyTreeSettings(document);
+        verifyAutoCard(document);
+        verifyAutoSettings(document);
+        verifyCover(document);
+        Rewind.LOGGER.info("Rewind self-test: time tree verified (special={}, manual={}, chips={}, cells={}, items={})",
+                special.size(), manual.size(), chips.size(), cells, items);
+    }
+
+    /** 「自动存档」那张卡：跟着原版自动保存建点之后，卡片上应该有内容（不是空槽位的样子）。 */
+    private static void verifyAutoCard(Document document) {
+        Element card = document.querySelector("#specialGrid [data-slot=\"" + SnapshotLayout.SLOT_AUTO + "\"]");
+        check(card != null, "the auto slot card is missing");
+        IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (card == null || server == null) {
+            return;
+        }
+        String worldName = server.getWorldData().getLevelName();
+        check(card.getTextContent().contains(worldName),
+                "the auto card should show the checkpoint the vanilla autosave wrote, got: " + card.getTextContent());
+        // 自动建的那次也该抓封面（封面是建点的人请求的，跟是谁触发的无关）
+        Path world = RewindApi.worldRoot(server);
+        SnapshotMeta auto = RewindApi.describe(world, SnapshotLayout.SLOT_AUTO);
+        check(auto != null && CoverCapture.hasCover(String.valueOf(world.getFileName()),
+                        SnapshotLayout.SLOT_AUTO, auto.savedAtMillis),
+                "the auto checkpoint should have captured a cover image too");
+    }
+
+    /** 封面：建点时抓的那张图应该在，而且卡片上真的拿它当 background-image 用了。 */
+    private static void verifyCover(Document document) {
+        IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        Path world = RewindApi.worldRoot(server);
+        String worldDir = String.valueOf(world.getFileName());
+        SnapshotMeta meta = RewindApi.describe(world, Rewind.SLOT);
+        check(meta != null, "the quick slot should be on disk before checking the cover");
+        if (meta == null) {
+            return;
+        }
+        check(CoverCapture.hasCover(worldDir, Rewind.SLOT, meta.savedAtMillis),
+                "the checkpoint should have captured a cover image");
+        Element cover = document.querySelector("#specialGrid [data-slot=\"" + Rewind.SLOT + "\"] .special-cover");
+        check(cover != null, "the quick card should have a cover area");
+        if (cover != null) {
+            String marker = Rewind.SLOT + "-" + meta.savedAtMillis + ".png";
+            Element shot = cover.querySelector("img.cover-shot");
+            check(shot != null, "the cover area should hold the screenshot <img>");
+            if (shot != null) {
+                String src = shot.getAttribute("src");
+                check(src != null && src.contains(marker),
+                        "the cover <img> should point at the screenshot, got: " + src);
+                Rewind.LOGGER.info("Rewind self-test: cover img src={} ready={}", src,
+                        src == null ? "n/a"
+                                : String.valueOf(ImageDrawer.isTextureReady(
+                                        Loader.resolve(document.getPath(), src), shot)));
+            }
+        }
+        Rewind.LOGGER.info("Rewind self-test: cover verified ({})",
+                CoverCapture.coverUrl(worldDir, Rewind.SLOT, meta.savedAtMillis));
+    }
+
+    /** 「自动存档」卡的设置：那个开关能翻，而且真的写进配置（翻完再翻回来）。 */
+    private static void verifyAutoSettings(Document document) {
+        Element settings = document.querySelector(
+                "#specialGrid [data-slot=\"" + SnapshotLayout.SLOT_AUTO + "\"] [data-act=\"settings\"]");
+        check(settings != null, "the auto card should offer a settings button");
+        if (settings == null) {
+            return;
+        }
+        boolean before = RewindServerConfig.autoCheckpointEnabled();
+        settings.click();
+        Element toggle = document.querySelector("#modalSettings [data-act=\"toggle-auto\"]");
+        check(toggle != null, "the auto settings should offer the follow-autosave toggle");
+        if (toggle == null) {
+            return;
+        }
+        toggle.click();
+        check(RewindServerConfig.autoCheckpointEnabled() != before,
+                "clicking the toggle should flip the follow-autosave setting");
+        Element again = document.querySelector("#modalSettings [data-act=\"toggle-auto\"]");
+        if (again != null) {
+            again.click();
+        }
+        check(RewindServerConfig.autoCheckpointEnabled() == before,
+                "the toggle should flip back, leaving the setting as it was");
+        Element close = document.querySelector("#modalSettings [data-act=\"modal-close\"]");
+        if (close != null) {
+            close.click();
+        }
+    }
+
+    /**
+     * 特殊槽位的「设置」：自动 / 快速是固定角色的槽位，没有名字可改，第三个按钮是设置。
+     *
+     * <p>这里只查接线：按钮在、弹窗能开、里面有内容、能关掉。
+     */
+    private static void verifyTreeSettings(Document document) {
+        String card = "#specialGrid [data-slot=\"" + Rewind.SLOT + "\"] ";
+        Element settings = document.querySelector(card + "[data-act=\"settings\"]");
+        check(settings != null, "the special cards should offer a settings button");
+        check(document.querySelector(card + "[data-act=\"rename\"]") == null,
+                "the special cards should not offer renaming");
+        if (settings == null) {
+            return;
+        }
+        settings.click();
+        check(modalOpen(document, "modalSettings"), "clicking settings should open the settings modal");
+        Element info = document.querySelector("#settingsInfo");
+        check(info != null && !info.getTextContent().isBlank(), "the settings modal should describe the slot");
+        Element close = document.querySelector("#modalSettings [data-act=\"modal-close\"]");
+        check(close != null, "the settings modal has no close button");
+        if (close != null) {
+            close.click();
+        }
+        check(!modalOpen(document, "modalSettings"), "closing should hide the settings modal");
+    }
+
+    /**
+     * 跑一次「原版自动保存」：参数与 {@code MinecraftServer.tickServer} 里那一句完全一致，
+     * 所以走的就是挂点认出来的那条路。
+     */
+    private static void runAutosave(IntegratedServer server) {
+        server.submit(() -> server.saveEverything(true, false, false));
+    }
+
+    /** 在探针槽位建一个存档点：界面上的覆盖 / 删除要有靶子。 */
+    private static void writeProbeSlot(Minecraft minecraft) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null) {
+            fail("the integrated server is gone before the management checks");
+            return;
+        }
+        try {
+            RewindResult result = server
+                    .submit(() -> RewindApi.createCheckpoint(server, PROBE_SLOT, "selftest"))
+                    .get(30, TimeUnit.SECONDS);
+            check(result.success, "writing the probe slot " + PROBE_SLOT + " failed: " + result.failure);
+            Rewind.LOGGER.info("Rewind self-test: probe slot {} written ({})", PROBE_SLOT, result.summary);
+        } catch (Exception e) {
+            fail("writing the probe slot " + PROBE_SLOT + " threw: " + e);
+        }
+    }
+
+    /**
+     * 界面上的覆盖 / 删除。
+     *
+     * <p>删除是就地做的（纯文件操作，走 {@code RewindApi.deleteCheckpoint}），所以能一路查到文件没了；
+     * 覆盖只是把请求转给 F7 那条带过渡的管线，这里查到「确认弹窗弹出来、取消能收掉」为止——
+     * 真的跑一遍过渡会和后面的断言抢时序，没有意义（F7 本身已经被前几轮覆盖了）。
+     */
+    private static void verifyTreeManage(RewindTreeScreen tree) {
+        Document document = tree.getLinkedDocument();
+        check(document != null, "the tree screen has no document during the management checks");
+        if (document == null) {
+            return;
+        }
+        IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        Path world = RewindApi.worldRoot(server);
+        check(RewindApi.hasCheckpoint(world, PROBE_SLOT), "the probe slot " + PROBE_SLOT + " should be on disk");
+
+        Element probeCard = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"]");
+        check(probeCard != null, "the probe slot card is missing from the tree");
+        if (probeCard == null) {
+            return;
+        }
+        // 手动卡片显示的是「多久之前 · 生物群系 · 大小」（世界名只在特殊卡上），所以这里查结构：
+        // 有存档点的卡片不会是空槽位那种封面，而且会多出一个时钟
+        check(probeCard.querySelector(".slot-cover.empty") == null && probeCard.querySelector(".slot-clock") != null,
+                "the probe card should render the checkpoint, got: " + probeCard.getTextContent());
+
+        // 重命名：只有手动槽位有这个按钮（自动 / 快速是固定角色，第三个按钮是设置）
+        Element rename = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"] [data-act=\"rename\"]");
+        Element nameInput = document.querySelector("#renameInput");
+        Element renameOk = document.querySelector("[data-act=\"rename-ok\"]");
+        check(rename != null && nameInput != null && renameOk != null,
+                "the probe card should offer renaming (rename=" + rename + " input=" + nameInput + " ok=" + renameOk + ")");
+        if (rename != null && nameInput != null && renameOk != null) {
+            rename.click();
+            nameInput.setValue(RENAME_PROBE);
+            renameOk.click();
+            SnapshotMeta renamed = RewindApi.describe(world, PROBE_SLOT);
+            check(renamed != null && RENAME_PROBE.equals(renamed.displayName),
+                    "renaming through the tree did not stick, the index says: "
+                            + (renamed == null ? "absent" : renamed.displayName));
+        }
+
+        // 删除：先选中探针槽位（删除按钮只在详情面板上），再确认
+        Element select = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"]");
+        if (select != null) {
+            select.click();
+        }
+        Element delete = document.querySelector("#detailBody [data-act=\"delete\"]");
+        check(delete != null, "the detail panel should offer a delete button");
+        if (delete == null) {
+            return;
+        }
+        delete.click();
+        check(modalOpen(document, "modalConfirm"), "clicking delete should open the confirm modal");
+        Element confirm = document.querySelector("#confirmOk");
+        check(confirm != null, "the confirm modal has no confirm button");
+        if (confirm != null) {
+            confirm.click();
+        }
+        check(!RewindApi.hasCheckpoint(world, PROBE_SLOT),
+                "deleting through the tree should remove the checkpoint from the index");
+        check(!Files.exists(SnapshotLayout.slotDir(world, PROBE_SLOT)),
+                "deleting through the tree should remove the slot directory");
+        Element afterDelete = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"]");
+        check(afterDelete != null && afterDelete.querySelector(".slot-cover.empty") != null,
+                "after deleting, the probe card should go back to the empty state, got: "
+                        + (afterDelete == null ? "missing card" : afterDelete.getTextContent()));
+        Rewind.LOGGER.info("Rewind self-test: time tree management verified (rename, delete)");
+
+        // 最后：从界面里覆盖一次（探针槽位刚被删掉，所以这一下是新建）。**界面不许退出去**，
+        // 也不放过渡，写盘在服务端线程上做；写完由调用方（stage）等出来再断言。
+        Element save = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"] [data-act=\"save\"]");
+        check(save != null, "the overwrite button is missing on the probe card");
+        if (save == null) {
+            return;
+        }
+        save.click();
+        check(modalOpen(document, "modalConfirm"), "clicking overwrite should open the confirm modal");
+        Element confirmSave = document.querySelector("#confirmOk");
+        check(confirmSave != null, "the confirm modal has no confirm button");
+        if (confirmSave != null) {
+            confirmSave.click();
+        }
+        check(!modalOpen(document, "modalConfirm"), "confirming should close the confirm modal");
+        check(Minecraft.getInstance().screen instanceof RewindTreeScreen,
+                "overwriting from the tree must keep the tree open, but the screen is "
+                        + Minecraft.getInstance().screen);
+        check(!RewindTransition.isActive(), "overwriting from the tree must not start a transition");
+        Rewind.LOGGER.info("Rewind self-test: overwrite from the tree started, waiting for the background write");
+    }
+
+    private static boolean modalOpen(Document document, String id) {
+        Element modal = document.querySelector("#" + id);
+        return modal != null && modal.getClassList().contains("open");
+    }
+
+    /**
+     * 给「时间树」存一张截图（{@code run/screenshots/<名字>.png}）。
+     *
+     * <p>结构对不对能用断言查，长什么样查不出来——留张图给人眼（或视觉模型）确认。这一刻读的是
+     * 主渲染目标里上一帧的内容，而上一帧正是画着这个界面的那一帧。
+     */
+    private static void screenshotTree(Minecraft minecraft, String name) {
+        Screenshot.grab(minecraft.gameDirectory, name + ".png", minecraft.getMainRenderTarget(), component -> {
+        });
+        Rewind.LOGGER.info("Rewind self-test: saved the tree screenshot to run/screenshots/{}.png", name);
     }
 
     private static WorldState readState(Minecraft minecraft) {
@@ -583,11 +1100,14 @@ public final class RewindSelfTest {
     private static void logKeyMappings() {
         KeyMapping snapshot = RewindClient.snapshotKey();
         KeyMapping restore = RewindClient.restoreKey();
-        Rewind.LOGGER.info("Rewind self-test: keybindings snapshot={} key={} restore={} key={}",
+        KeyMapping tree = RewindClient.treeKey();
+        Rewind.LOGGER.info("Rewind self-test: keybindings snapshot={} key={} restore={} key={} tree={} key={}",
                 snapshot == null ? "MISSING" : snapshot.getName(),
                 snapshot == null ? "-" : String.valueOf(snapshot.getKey().getValue()),
                 restore == null ? "MISSING" : restore.getName(),
-                restore == null ? "-" : String.valueOf(restore.getKey().getValue()));
+                restore == null ? "-" : String.valueOf(restore.getKey().getValue()),
+                tree == null ? "MISSING" : tree.getName(),
+                tree == null ? "-" : String.valueOf(tree.getKey().getValue()));
     }
 
     private static void goTo(Stage next) {

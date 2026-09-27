@@ -1,6 +1,9 @@
 package cc.sighs.rewind.snapshot;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -18,8 +21,23 @@ public final class SnapshotLayout {
     public static final String INDEX_FILE_NAME = "index.properties";
     /** 槽位文件清单后缀，用于增量快照。 */
     public static final String MANIFEST_SUFFIX = ".manifest";
+    /** 槽位背包快照后缀，位于存档点根目录内、与槽位目录同级（不参与镜像）。 */
+    public static final String INVENTORY_SUFFIX = ".inventory";
     /** 默认槽位：F7 / F8 使用的滚动槽位。 */
     public static final String DEFAULT_SLOT = "quick";
+    /** 快速槽位（= {@link #DEFAULT_SLOT}），界面上那张「快速」卡片。 */
+    public static final String SLOT_QUICK = DEFAULT_SLOT;
+    /**
+     * 自动槽位，界面上那张「自动」卡片。
+     *
+     * <p>它和别的槽位没有区别，只是被预留出来——当前没有任何代码会自动往里写存档点
+     * （「自动保存」是原版自己的事，Rewind 的存档点不掺和）。玩家可以手动覆盖它。
+     */
+    public static final String SLOT_AUTO = "auto";
+    /** 手动槽位数量，对应界面上的 8 张编号卡片。 */
+    public static final int MANUAL_SLOT_COUNT = 8;
+    /** 槽位显示名的长度上限，与界面上的输入框一致。 */
+    public static final int NAME_MAX_LENGTH = 20;
 
     /** 槽位正在写入（未完成）。 */
     public static final String STATUS_INCOMPLETE = "incomplete";
@@ -55,6 +73,68 @@ public final class SnapshotLayout {
 
     public static Path manifestFile(Path worldRoot, String slot) {
         return snapshotRoot(worldRoot).resolve(slot + MANIFEST_SUFFIX);
+    }
+
+    /** 槽位的背包快照文件（与槽位目录同级，不参与镜像，删槽位时要一起删）。 */
+    public static Path inventoryFile(Path worldRoot, String slot) {
+        return snapshotRoot(worldRoot).resolve(slot + INVENTORY_SUFFIX);
+    }
+
+    /** 第 {@code index} 个手动槽位的 id（{@code index} 从 1 开始），形如 {@code s1}。 */
+    public static String manualSlot(int index) {
+        return "s" + index;
+    }
+
+    /** {@link #manualSlot(int)} 的逆运算；不是手动槽位时返回 0。 */
+    public static int manualIndex(String slot) {
+        if (slot == null || slot.length() < 2 || slot.charAt(0) != 's') {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(slot.substring(1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /** 界面固定展示的槽位顺序：自动、快速，然后是 8 个手动槽位。 */
+    public static List<String> uiSlots() {
+        List<String> slots = new ArrayList<>();
+        slots.add(SLOT_AUTO);
+        slots.add(SLOT_QUICK);
+        for (int i = 1; i <= MANUAL_SLOT_COUNT; i++) {
+            slots.add(manualSlot(i));
+        }
+        return Collections.unmodifiableList(slots);
+    }
+
+    /** 是不是「自动 / 快速」这两张特殊卡片。 */
+    public static boolean isSpecialSlot(String slot) {
+        return SLOT_AUTO.equals(slot) || SLOT_QUICK.equals(slot);
+    }
+
+    /** 槽位名能不能安全地当目录名用。 */
+    public static boolean isValidSlotName(String slot) {
+        if (slot == null || slot.isEmpty() || slot.length() > 32) {
+            return false;
+        }
+        for (int i = 0; i < slot.length(); i++) {
+            char c = slot.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 玩家起的槽位名是否合法：去空白后 1 - {@value #NAME_MAX_LENGTH} 个字符。 */
+    public static boolean isValidDisplayName(String name) {
+        if (name == null) {
+            return false;
+        }
+        String trimmed = name.trim();
+        return !trimmed.isEmpty() && trimmed.length() <= NAME_MAX_LENGTH;
     }
 
     /** 把绝对路径转成相对根的、以 {@code /} 分隔的字符串。 */

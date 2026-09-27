@@ -3,12 +3,16 @@ package cc.sighs.rewind.api;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import javax.annotation.Nullable;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.server.CheckpointWriter;
 import cc.sighs.rewind.server.InPlaceRollback;
+import cc.sighs.rewind.server.SnapshotStore;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
+import cc.sighs.rewind.snapshot.SnapshotInventory;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 import net.minecraft.server.MinecraftServer;
@@ -25,11 +29,14 @@ import net.minecraft.world.level.storage.LevelResource;
  *       任意线程都行。这一层不引用任何客户端类，专用服务器上也能用。</li>
  *   <li><b>带过渡的异步入口</b>（{@link #requestCheckpoint} / {@link #requestRollback}）：
  *       等价于玩家按 F7 / F8——收起当前界面、跑过渡、在服务端线程上执行上面那层。
- *       需要客户端（集成服务器）；专用服务器上没有客户端桥接，调用会返回 false 并写一条日志。</li>
+ *       需要客户端（集成服务器）；专用服务器上没有客户端桥接，调用会返回 false 并写一条日志。
+ *       不带槽位参数的版本操作 {@link #DEFAULT_SLOT}，带槽位参数的版本可以指向任意槽位（界面用它）。</li>
  * </ul>
  *
- * <p>查询类方法（{@link #hasCheckpoint} / {@link #describe} / {@link #listCheckpoints}）只读存档目录，
- * 任意线程、任意端都能调。
+ * <p>查询类方法（{@link #hasCheckpoint} / {@link #describe} / {@link #describeAll} / {@link #listCheckpoints} /
+ * {@link #readInventory}）只读存档目录，任意线程、任意端都能调。槽位管理
+ * （{@link #deleteCheckpoint} / {@link #renameCheckpoint}）是纯文件操作，任意线程可调，
+ * 但不要和存档点操作并发（两边都写同一张索引）。
  *
  * <p>典型用法（自己写命令 / 别的模组）：
  * <pre>{@code
@@ -52,9 +59,9 @@ public final class RewindApi {
      * 专用服务器上这个字段保持 null，本类仍然可以被加载和调用。
      */
     public interface ClientBridge {
-        void requestCheckpoint(String source);
+        void requestCheckpoint(String slot, String source);
 
-        void requestRollback(String source);
+        void requestRollback(String slot, String source);
 
         boolean isBusy();
     }
@@ -75,6 +82,10 @@ public final class RewindApi {
     public static RewindResult createCheckpoint(MinecraftServer server, String slot, String source) {
         if (!checkServerThread(server)) {
             return fail(RewindResult.Kind.CHECKPOINT, slot, new IllegalStateException("must be called on the server thread"));
+        }
+        RewindResult invalid = invalidSlot(RewindResult.Kind.CHECKPOINT, slot);
+        if (invalid != null) {
+            return invalid;
         }
         try {
             CheckpointWriter.Result written = CheckpointWriter.create(server, slot, source);
@@ -100,6 +111,10 @@ public final class RewindApi {
     public static RewindResult rollbackInPlace(MinecraftServer server, String slot) {
         if (!checkServerThread(server)) {
             return fail(RewindResult.Kind.ROLLBACK, slot, new IllegalStateException("must be called on the server thread"));
+        }
+        RewindResult invalid = invalidSlot(RewindResult.Kind.ROLLBACK, slot);
+        if (invalid != null) {
+            return invalid;
         }
         Path worldRoot = worldRoot(server);
         // 回滚窗口在这一刻打开：从这里到文件还原完，任何世界落盘都是马上要被覆盖掉的
@@ -177,6 +192,83 @@ public final class RewindApi {
         return metas;
     }
 
+    /** 一次读完整张索引：槽位名 → 元数据。界面渲染整页槽位用它，避免每个槽位各读一遍文件。 */
+    public static Map<String, SnapshotMeta> describeAll(Path worldRoot) {
+        Map<String, SnapshotMeta> metas = new LinkedHashMap<>();
+        try {
+            SnapshotIndex index = SnapshotIndex.load(SnapshotLayout.indexFile(worldRoot));
+            for (String slot : index.slots()) {
+                SnapshotMeta meta = index.get(slot);
+                if (meta != null) {
+                    metas.put(slot, meta);
+                }
+            }
+        } catch (IOException e) {
+            Rewind.LOGGER.error("Rewind: failed to read snapshot index", e);
+        }
+        return metas;
+    }
+
+    /** 界面上固定展示的槽位顺序（自动、快速，然后是 8 个手动槽位）。 */
+    public static List<String> slots() {
+        return SnapshotLayout.uiSlots();
+    }
+
+    /** 槽位的背包快照；没建过点或文件缺失时返回空快照。 */
+    public static SnapshotInventory readInventory(Path worldRoot, String slot) {
+        return SnapshotInventory.load(SnapshotLayout.inventoryFile(worldRoot, slot));
+    }
+
+    // ------------------------------------------------------------------ 槽位管理（纯文件操作）
+
+    /**
+     * 删除一个槽位：目录、清单、背包快照、索引条目。
+     *
+     * <p>纯文件操作，任意线程可调；但**不要在存档点操作进行中调用**（{@link #isBusy()}），
+     * 两边都会写同一张索引。
+     *
+     * @return 是否真的删掉了东西
+     */
+    public static boolean deleteCheckpoint(Path worldRoot, String slot) {
+        if (!SnapshotLayout.isValidSlotName(slot)) {
+            Rewind.LOGGER.warn("Rewind: refusing to delete a checkpoint with an invalid slot name: {}", slot);
+            return false;
+        }
+        try {
+            return SnapshotStore.delete(worldRoot, slot);
+        } catch (IOException e) {
+            Rewind.LOGGER.error("Rewind: failed to delete checkpoint {}", slot, e);
+            return false;
+        }
+    }
+
+    /**
+     * 给槽位改名（只改索引里的显示名，槽位 id 与目录不动）。
+     *
+     * <p>名字必须通过 {@link SnapshotLayout#isValidDisplayName}；传空串表示清掉自定义名。
+     * 覆盖这个槽位时名字会保留。
+     *
+     * @return 槽位是否存在
+     */
+    public static boolean renameCheckpoint(Path worldRoot, String slot, String displayName) {
+        if (!SnapshotLayout.isValidSlotName(slot)) {
+            Rewind.LOGGER.warn("Rewind: refusing to rename a checkpoint with an invalid slot name: {}", slot);
+            return false;
+        }
+        if (displayName != null && !displayName.trim().isEmpty()
+                && !SnapshotLayout.isValidDisplayName(displayName)) {
+            Rewind.LOGGER.warn("Rewind: refusing to rename {} to \"{}\": name must be 1-{} characters",
+                    slot, displayName, SnapshotLayout.NAME_MAX_LENGTH);
+            return false;
+        }
+        try {
+            return SnapshotStore.rename(worldRoot, slot, displayName);
+        } catch (IOException e) {
+            Rewind.LOGGER.error("Rewind: failed to rename checkpoint {}", slot, e);
+            return false;
+        }
+    }
+
     // ------------------------------------------------------------------ 带过渡的异步入口
 
     /** 由客户端在 setup 时调用；专用服务器上不要调。 */
@@ -184,25 +276,35 @@ public final class RewindApi {
         clientBridge = bridge;
     }
 
-    /** 等价于按 F7。返回 false 表示当前没有客户端可用（专用服务器 / 还没 setup）。 */
+    /** 等价于按 F7（写 {@link #DEFAULT_SLOT}）。返回 false 表示当前没有客户端可用（专用服务器 / 还没 setup）。 */
     public static boolean requestCheckpoint(String source) {
+        return requestCheckpoint(DEFAULT_SLOT, source);
+    }
+
+    /** 等价于按 F7，但写指定槽位。 */
+    public static boolean requestCheckpoint(String slot, String source) {
         ClientBridge bridge = clientBridge;
         if (bridge == null) {
-            Rewind.LOGGER.warn("Rewind: requestCheckpoint needs a client; ignoring (source={})", source);
+            Rewind.LOGGER.warn("Rewind: requestCheckpoint needs a client; ignoring (slot={}, source={})", slot, source);
             return false;
         }
-        bridge.requestCheckpoint(source);
+        bridge.requestCheckpoint(slot, source);
         return true;
     }
 
-    /** 等价于按 F8。返回 false 表示当前没有客户端可用。 */
+    /** 等价于按 F8（读 {@link #DEFAULT_SLOT}）。返回 false 表示当前没有客户端可用。 */
     public static boolean requestRollback(String source) {
+        return requestRollback(DEFAULT_SLOT, source);
+    }
+
+    /** 等价于按 F8，但读指定槽位。 */
+    public static boolean requestRollback(String slot, String source) {
         ClientBridge bridge = clientBridge;
         if (bridge == null) {
-            Rewind.LOGGER.warn("Rewind: requestRollback needs a client; ignoring (source={})", source);
+            Rewind.LOGGER.warn("Rewind: requestRollback needs a client; ignoring (slot={}, source={})", slot, source);
             return false;
         }
-        bridge.requestRollback(source);
+        bridge.requestRollback(slot, source);
         return true;
     }
 
@@ -231,6 +333,15 @@ public final class RewindApi {
         }
         Rewind.LOGGER.error("Rewind: this entry point must be called on the server thread", new IllegalStateException());
         return false;
+    }
+
+    /** 槽位名会当目录名用，必须校验。名字不合法时返回一条失败结果，合法时返回 null。 */
+    @Nullable
+    private static RewindResult invalidSlot(RewindResult.Kind kind, String slot) {
+        if (SnapshotLayout.isValidSlotName(slot)) {
+            return null;
+        }
+        return fail(kind, slot, new IllegalArgumentException("invalid slot name: " + slot));
     }
 
     private static RewindResult fail(RewindResult.Kind kind, String slot, Throwable t) {
