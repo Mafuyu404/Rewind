@@ -6,11 +6,14 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.locks.LockSupport;
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongSet;
 import cc.sighs.mixin.RollbackAccessMixins.ChunkMapAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ChunkStorageAccess;
 import cc.sighs.mixin.RollbackAccessMixins.DimensionDataStorageAccess;
@@ -36,12 +39,14 @@ import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ServerScoreboard;
+import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkLevel;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.village.poi.PoiManager;
 import net.minecraft.world.entity.raid.Raids;
 import net.minecraft.world.level.ChunkPos;
@@ -54,6 +59,8 @@ import net.minecraft.world.level.chunk.storage.IOWorker;
 import net.minecraft.world.level.chunk.storage.RegionFile;
 import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
+import net.minecraft.world.level.entity.EntityAccess;
+import net.minecraft.world.level.entity.EntitySectionStorage;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.storage.DimensionDataStorage;
 import net.minecraft.world.level.storage.ServerLevelData;
@@ -94,6 +101,8 @@ public final class InPlaceRollback {
     private static final int ENTITY_SETTLE_ROUNDS = 40;
     /** 每一轮之间让出一点时间给世界生成 / 后台线程，否则空转推进不了。 */
     private static final long PARK_NANOS = 200_000L;
+    /** 卸载流水线连续多少轮没有进展就放弃（剩下的交给重建那一步兜住）。 */
+    private static final int STALL_ROUNDS = 40;
 
     /** 单次原地回滚的统计，用于日志与自测。 */
     public static final class Result {
@@ -173,9 +182,12 @@ public final class InPlaceRollback {
             List<Target> targets = collectTargets(server, worldRoot, slotDir, result);
             unload(server, targets, result);
             drainUnloads(server);
-            // 实体区块的卸载由区块状态驱动，落在下一次 entityManager.tick()；必须在回拷文件之前跑完，
-            // 否则实体数据会以「改世界之后」的内容写到刚还原的文件上。
-            tickEntityManagers(server);
+            // 实体区块的卸载由区块状态驱动，靠 entityManager.tick() 推进，而且可能因为「实体还没读完」
+            // 被推迟到下一 tick。必须在这一段里彻底排空，否则它会落到回滚窗口之外，把「改世界之后」的
+            // 实体列表写回刚还原的文件。
+            drainEntityUnloads(server);
+            // 到这里被回滚接管的区块都已经从内存里丢掉了；接下来由回滚自己重建 holder，不再需要挡重建
+            Rewind.clearUnloadGuards();
             invalidateCaches(server, targets);
             result.unloadMs = millisSince(stepNanos);
 
@@ -192,17 +204,31 @@ public final class InPlaceRollback {
             result.mirrorFiles = mirror.files.size();
             result.copyMs = millisSince(stepNanos);
 
-            // 回滚窗口到此结束：后面（重载 + 正常游玩）的落盘都是必须发生的
-            Rewind.endDiscard();
-
             stepNanos = System.nanoTime();
-            reload(server, targets, result);
+            recreateHolders(server, targets, result);
             result.reloadMs = millisSince(stepNanos);
 
+            // 玩家 / 时间天气必须排在这里：holder 已经重建、但区块还没成批重发。
+            // 位置包要排在区块包前面，否则客户端得先处理完上百个区块包才会回 ack，而服务端在收到 ack
+            // 之前是关着右键交互的（handleUseItemOn 里那道 awaitingPositionFromClient 的门）。
+            // 也不能更早：player.load() 会走 Entity.setPosRaw，NeoForge 在那里会 level.getChunk() 请求
+            // 区块，holder 不在就会直接 NPE。
             stepNanos = System.nanoTime();
-            restoreMemoryState(server, slotDir, result);
+            restoreWorldAndPlayers(server, slotDir, result);
             result.stateMs = millisSince(stepNanos);
+
+            stepNanos = System.nanoTime();
+            loadChunks(server, targets, result);
+            result.reloadMs += millisSince(stepNanos);
+
+            try {
+                restoreSavedData(server, slotDir);
+            } catch (Throwable t) {
+                Rewind.LOGGER.error("Rewind: failed to reload saved data in place", t);
+            }
         } finally {
+            // 回滚窗口一直开到整段结束：这期间任何落盘都是要被丢弃的（实体卸载的收尾写入尤其危险）
+            Rewind.clearUnloadGuards();
             Rewind.endDiscard();
         }
 
@@ -213,19 +239,28 @@ public final class InPlaceRollback {
     // ------------------------------------------------------------------ 1. 找受影响区块
 
     /**
-     * 判据一：内存里 {@code isUnsaved()}（改过、还没落盘，磁盘上还是存档点内容）。
-     * 判据二：所在 region 文件的 per-chunk 偏移/时间戳与快照里不一致（改过且已经落盘）。
-     * 两者合起来就是「自建点以来真正变过的区块」，与视距无关。
+     * 判据（任一成立就算受影响）：
+     * <ul>
+     *   <li>{@code isUnsaved()}：内存里改过还没落盘（方块 / 方块实体 / 光照 / 计划刻 / 结构都会置这个位）。</li>
+     *   <li>区块 region 文件的 per-chunk 偏移/时间戳与快照不一致（改过且已经落盘）。</li>
+     *   <li>实体或 POI 的 region 文件同样不一致（落过盘的实体改动）。</li>
+     *   <li>内存里还有「会被保存的实体」，或者快照里这个区块本来有实体。
+     *       这条是实体回滚的关键：实体存储没有 per-chunk 脏标记，新放的实体在自动保存之前
+     *       磁盘上完全看不出来，只能靠内存状态判断。</li>
+     * </ul>
+     * 所以代价与「真正改了多少区块」成正比，与视距无关。
      */
     private static List<Target> collectTargets(MinecraftServer server, Path worldRoot, Path slotDir, Result result) {
         List<Target> targets = new ArrayList<>();
         Map<Path, int[]> headerCache = new HashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
             ChunkMap chunkMap = level.getChunkSource().chunkMap;
-            Path liveRegionDir = regionFolder(chunkMap);
-            Path snapshotRegionDir = liveRegionDir == null
-                    ? null
-                    : slotDir.resolve(SnapshotLayout.relativize(worldRoot, liveRegionDir));
+            List<Path> liveDirs = liveRegionDirs(level);
+            List<Path> snapshotDirs = new ArrayList<>(liveDirs.size());
+            for (Path liveDir : liveDirs) {
+                snapshotDirs.add(slotDir.resolve(SnapshotLayout.relativize(worldRoot, liveDir)));
+            }
+            EntitySectionStorage<Entity> sections = entityManagerAccess(level).rewind$sectionStorage();
             for (var holder : mapAccess(chunkMap).rewind$getChunks()) {
                 if (holder.getTicketLevel() > ChunkLevel.MAX_LEVEL) {
                     // 已经在卸载路上：内存里的内容马上就会自己丢掉，磁盘上会被快照覆盖，不用管
@@ -236,7 +271,10 @@ public final class InPlaceRollback {
                 }
                 result.scannedChunks++;
                 ChunkPos pos = chunk.getPos();
-                if (chunk.isUnsaved() || regionChunkChanged(liveRegionDir, snapshotRegionDir, pos, headerCache)) {
+                if (chunk.isUnsaved()
+                        || regionChunkChanged(liveDirs, snapshotDirs, pos, headerCache)
+                        || hasSaveableEntities(sections, pos)
+                        || snapshotHasEntities(snapshotDirs, pos, headerCache)) {
                     targets.add(new Target(level, pos));
                 }
             }
@@ -245,33 +283,82 @@ public final class InPlaceRollback {
         return targets;
     }
 
-    /** 从 .mca 头部读这个区块的偏移/时间戳，和快照里的比：任何一个不一致就算变过。 */
-    private static boolean regionChunkChanged(Path liveDir, Path snapshotDir, ChunkPos pos, Map<Path, int[]> cache) {
-        if (liveDir == null || snapshotDir == null) {
-            return true;
-        }
-        String name = "r." + pos.getRegionX() + "." + pos.getRegionZ() + ".mca";
-        int[] live = readRegionHeader(cache, liveDir.resolve(name));
-        int[] snapshot = readRegionHeader(cache, snapshotDir.resolve(name));
-        if (live == null || snapshot == null) {
-            // 有一边不存在：新建的 region，或者快照里没有这个 region，都当成变了
-            return true;
-        }
-        int index = (pos.x & 31) + (pos.z & 31) * 32;
-        return live[index] != snapshot[index] || live[1024 + index] != snapshot[1024 + index];
+    /** 内存里这个区块还有没有会被保存的实体（玩家不算，{@code Player.shouldBeSaved()} 为 false）。 */
+    private static boolean hasSaveableEntities(EntitySectionStorage<Entity> sections, ChunkPos pos) {
+        return sections.getExistingSectionsInChunk(pos.toLong())
+                .flatMap(section -> section.getEntities())
+                .anyMatch(EntityAccess::shouldBeSaved);
     }
 
-    /** 头部前 4 KiB 是 1024 个偏移，接着 4 KiB 是 1024 个时间戳；读成 int[2048]。 */
-    private static int[] readRegionHeader(Map<Path, int[]> cache, Path file) {
-        if (cache.containsKey(file)) {
-            return cache.get(file);
+    /** 快照里的实体文件在这个区块有没有数据（{@code RegionFile.clear} 会把偏移归零，所以偏移非 0 就是有）。 */
+    private static boolean snapshotHasEntities(List<Path> snapshotDirs, ChunkPos pos, Map<Path, int[]> cache) {
+        // liveRegionDirs 的顺序是「区块 / 实体 / POI」
+        if (snapshotDirs.size() < 2) {
+            return false;
         }
-        int[] header = null;
+        int[] header = readRegionHeader(cache, snapshotDirs.get(1).resolve(regionFileName(pos)));
+        return header[(pos.x & 31) + (pos.z & 31) * 32] != 0;
+    }
+
+    private static String regionFileName(ChunkPos pos) {
+        return "r." + pos.getRegionX() + "." + pos.getRegionZ() + ".mca";
+    }
+
+    /** 这个维度里所有「按区块存 region 文件」的存储目录：区块 / 实体 / POI。 */
+    private static List<Path> liveRegionDirs(ServerLevel level) {
+        ServerChunkCache source = level.getChunkSource();
+        List<Path> dirs = new ArrayList<>(3);
+        addFolder(dirs, chunkStorageAccess(source.chunkMap).rewind$worker());
+        Object permanent = entityManagerAccess(level).rewind$permanentStorage();
+        if (permanent instanceof EntityStorage storage) {
+            addFolder(dirs, workerOf(entityStorageAccess(storage).rewind$simpleRegionStorage()));
+        }
+        addFolder(dirs, workerOf(sectionStorageAccess(source.getPoiManager()).rewind$simpleRegionStorage()));
+        return dirs;
+    }
+
+    private static void addFolder(List<Path> dirs, IOWorker worker) {
+        if (worker == null) {
+            return;
+        }
+        dirs.add(regionFileStorageAccess(ioWorkerAccess(worker).rewind$storage()).rewind$folder());
+    }
+
+    private static IOWorker workerOf(SimpleRegionStorage storage) {
+        return storage == null ? null : simpleRegionStorageAccess(storage).rewind$worker();
+    }
+
+    /** 任意一个存储里这个区块的偏移/时间戳与快照不一致就算变过。 */
+    private static boolean regionChunkChanged(List<Path> liveDirs, List<Path> snapshotDirs, ChunkPos pos,
+            Map<Path, int[]> cache) {
+        String name = regionFileName(pos);
+        int index = (pos.x & 31) + (pos.z & 31) * 32;
+        int count = Math.min(liveDirs.size(), snapshotDirs.size());
+        for (int i = 0; i < count; i++) {
+            int[] live = readRegionHeader(cache, liveDirs.get(i).resolve(name));
+            int[] snapshot = readRegionHeader(cache, snapshotDirs.get(i).resolve(name));
+            if (live[index] != snapshot[index] || live[1024 + index] != snapshot[1024 + index]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 头部前 4 KiB 是 1024 个偏移，接着 4 KiB 是 1024 个时间戳；读成 int[2048]。
+     * 文件不存在或读不满时返回全 0，这样「两边都没有这个区块」会被判成没变，
+     * 而不是因为「region 文件在一边不存在」就整片误判。
+     */
+    private static int[] readRegionHeader(Map<Path, int[]> cache, Path file) {
+        int[] cached = cache.get(file);
+        if (cached != null) {
+            return cached;
+        }
+        int[] header = new int[2048];
         if (Files.isRegularFile(file)) {
             byte[] bytes = new byte[8192];
             try (InputStream in = Files.newInputStream(file)) {
                 if (in.readNBytes(bytes, 0, 8192) == 8192) {
-                    header = new int[2048];
                     for (int i = 0; i < 2048; i++) {
                         int base = i * 4;
                         header[i] = ((bytes[base] & 0xFF) << 24)
@@ -291,6 +378,15 @@ public final class InPlaceRollback {
     // ------------------------------------------------------------------ 2. 强制卸载
 
     private static void unload(MinecraftServer server, List<Target> targets, Result result) {
+        // 先按维度登记「本轮接管的区块」：ticket 系统仍然认为它们该加载，会通过邻居传播把 holder
+        // 重建出来（进而拉起 worldgen 任务、把 refCount 钉住），这段时间必须挡住重建。
+        Map<ServerLevel, LongSet> guards = new LinkedHashMap<>();
+        for (Target target : targets) {
+            guards.computeIfAbsent(target.level, level -> new LongOpenHashSet()).add(target.pos.toLong());
+        }
+        guards.forEach((level, positions) ->
+                Rewind.beginUnloadGuard(level.getChunkSource().chunkMap, positions));
+
         int unloadedLevel = ChunkLevel.MAX_LEVEL + 1;
         for (Target target : targets) {
             ChunkMap chunkMap = target.level.getChunkSource().chunkMap;
@@ -316,17 +412,80 @@ public final class InPlaceRollback {
 
     /** 推进原版的卸载流水线，直到 toDrop / pendingUnloads / unloadQueue 都空。 */
     private static void drainUnloads(MinecraftServer server) {
+        int lastPending = Integer.MAX_VALUE;
+        int stalled = 0;
+        for (int round = 0; round < MAX_DRAIN_ROUNDS; round++) {
+            int pending = pumpUnloadsOnce(server);
+            if (pending == 0) {
+                return;
+            }
+            if (pending >= lastPending) {
+                // 没进展就别空转了：`processUnloads` 会跳过 generationRefCount 非 0 的 holder，
+                // 那说明它被某个 worldgen 任务钉着，等下去也不会自己好。
+                if (++stalled > STALL_ROUNDS) {
+                    Rewind.LOGGER.warn(
+                            "Rewind: in-place rollback gave up draining chunk unloads ({} still pending, {} pinned by generation tasks)",
+                            pending, countPinnedByGeneration(server));
+                    return;
+                }
+            } else {
+                stalled = 0;
+            }
+            lastPending = pending;
+            LockSupport.parkNanos(PARK_NANOS);
+        }
+        Rewind.LOGGER.warn("Rewind: in-place rollback could not fully drain chunk unloads ({} still pending)", lastPending);
+    }
+
+    private static int pumpUnloadsOnce(MinecraftServer server) {
+        int pending = 0;
+        for (ServerLevel level : server.getAllLevels()) {
+            ServerChunkCache source = level.getChunkSource();
+            ChunkMapAccess access = mapAccess(source.chunkMap);
+            access.rewind$processUnloads(() -> true);
+            sourceAccess(source).rewind$runDistanceManagerUpdates();
+            access.rewind$processUnloads(() -> true);
+            pending += access.rewind$toDrop().size()
+                    + access.rewind$pendingUnloads().size()
+                    + access.rewind$unloadQueue().size();
+        }
+        return pending;
+    }
+
+    private static int countPinnedByGeneration(MinecraftServer server) {
+        int pinned = 0;
+        for (ServerLevel level : server.getAllLevels()) {
+            ChunkMapAccess access = mapAccess(level.getChunkSource().chunkMap);
+            for (long pos : access.rewind$toDrop()) {
+                ChunkHolder holder = access.rewind$getUpdatingChunkIfPresent(pos);
+                if (holder != null && holder.getGenerationRefCount() != 0) {
+                    pinned++;
+                }
+            }
+        }
+        return pinned;
+    }
+
+    private static void tickEntityManagers(MinecraftServer server) {
+        for (ServerLevel level : server.getAllLevels()) {
+            levelAccess(level).rewind$entityManager().tick();
+        }
+    }
+
+    /**
+     * 把实体区块的卸载彻底排空。
+     *
+     * <p>卸载请求落在 {@code chunksToUnload} 上，只有 {@code entityManager.tick()} 会推进它；而
+     * {@code storeChunkSections} 在实体还没读回来（status 不是 LOADED）时会直接放弃、留到下一 tick。
+     * 所以单跑一次 tick 不够——那些被推迟的卸载会落到回滚窗口之外，把「改世界之后」的实体列表
+     * 写回刚还原的文件。这里一直泵到没有待卸载的区块为止。
+     */
+    private static void drainEntityUnloads(MinecraftServer server) {
         for (int round = 0; round < MAX_DRAIN_ROUNDS; round++) {
             boolean quiet = true;
             for (ServerLevel level : server.getAllLevels()) {
-                ServerChunkCache source = level.getChunkSource();
-                ChunkMapAccess access = mapAccess(source.chunkMap);
-                access.rewind$processUnloads(() -> true);
-                sourceAccess(source).rewind$runDistanceManagerUpdates();
-                access.rewind$processUnloads(() -> true);
-                if (!access.rewind$toDrop().isEmpty()
-                        || !access.rewind$pendingUnloads().isEmpty()
-                        || !access.rewind$unloadQueue().isEmpty()) {
+                levelAccess(level).rewind$entityManager().tick();
+                if (!entityManagerAccess(level).rewind$chunksToUnload().isEmpty()) {
                     quiet = false;
                 }
             }
@@ -335,13 +494,7 @@ public final class InPlaceRollback {
             }
             LockSupport.parkNanos(PARK_NANOS);
         }
-        Rewind.LOGGER.warn("Rewind: in-place rollback could not fully drain chunk unloads");
-    }
-
-    private static void tickEntityManagers(MinecraftServer server) {
-        for (ServerLevel level : server.getAllLevels()) {
-            levelAccess(level).rewind$entityManager().tick();
-        }
+        Rewind.LOGGER.warn("Rewind: in-place rollback could not fully drain entity-chunk unloads");
     }
 
     /**
@@ -445,7 +598,8 @@ public final class InPlaceRollback {
 
     // ------------------------------------------------------------------ 4. 重载
 
-    private static void reload(MinecraftServer server, List<Target> targets, Result result) {
+    /** 重建 holder 并推进流水线：让被卸载掉的区块重新排队，从（已还原的）磁盘读回来。 */
+    private static void recreateHolders(MinecraftServer server, List<Target> targets, Result result) {
         for (Target target : targets) {
             ChunkMap chunkMap = target.level.getChunkSource().chunkMap;
             ChunkMapAccess access = mapAccess(chunkMap);
@@ -475,6 +629,10 @@ public final class InPlaceRollback {
         for (ServerLevel level : server.getAllLevels()) {
             sourceAccess(level.getChunkSource()).rewind$runDistanceManagerUpdates();
         }
+    }
+
+    /** 把重建好的区块同步读回来；这也是原版把新数据重新推给客户端的触发点。 */
+    private static void loadChunks(MinecraftServer server, List<Target> targets, Result result) {
         for (Target target : targets) {
             if (!target.unloaded) {
                 continue;
@@ -483,7 +641,6 @@ public final class InPlaceRollback {
             ChunkMapAccess access = mapAccess(source.chunkMap);
             sourceAccess(source).rewind$clearCache();
             try {
-                // 同步等它从磁盘读回来：这也是把区块重新推给客户端的触发点（原版的发送流水线）
                 source.getChunk(target.pos.x, target.pos.z, ChunkStatus.FULL, true);
                 access.rewind$chunkTypeCache().remove(target.pos.toLong());
                 result.reloadedChunks++;
@@ -504,7 +661,10 @@ public final class InPlaceRollback {
 
     // ------------------------------------------------------------------ 5. 内存状态
 
-    private static void restoreMemoryState(MinecraftServer server, Path slotDir, Result result) {
+    /**
+     * 玩家 / 时间天气。位置见 {@link #run} 里的注释：必须排在 holder 重建之后、区块成批重发之前。
+     */
+    private static void restoreWorldAndPlayers(MinecraftServer server, Path slotDir, Result result) {
         try {
             result.restoredWorldData = restoreWorldData(server, slotDir);
         } catch (Throwable t) {
@@ -514,11 +674,6 @@ public final class InPlaceRollback {
             result.restoredPlayers = restorePlayers(server, slotDir);
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: failed to restore players in place", t);
-        }
-        try {
-            restoreSavedData(server, slotDir);
-        } catch (Throwable t) {
-            Rewind.LOGGER.error("Rewind: failed to reload saved data in place", t);
         }
     }
 
@@ -703,10 +858,5 @@ public final class InPlaceRollback {
 
     private static DimensionDataStorageAccess dimensionStorageAccess(DimensionDataStorage storage) {
         return (DimensionDataStorageAccess) (Object) storage;
-    }
-
-    private static Path regionFolder(ChunkMap chunkMap) {
-        RegionFileStorage storage = ioWorkerAccess(chunkStorageAccess(chunkMap).rewind$worker()).rewind$storage();
-        return regionFileStorageAccess(storage).rewind$folder();
     }
 }

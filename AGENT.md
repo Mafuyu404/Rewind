@@ -90,19 +90,26 @@ F8 默认走**原地回滚**（`cc.sighs.rewind.server.InPlaceRollback`）：世
 
 顺序（每一步都有非它不可的理由，改之前先读 `InPlaceRollback` 的类注释）：
 
-0. **先排空排队中的写入**：`Rewind.endDiscard()` → 三条存储链 `synchronize(false)` → `beginDiscard()`。已经排队但还没落盘的写入如果被跳过，这些区块在内存里已经不是 `isUnsaved()`、磁盘上又还没变，下面两个判据都会漏掉它。这段时间世界不会 tick（我们就在服务端线程上），所以不会有新的写入插进来。
-1. **找受影响区块**：遍历已加载的 `ChunkHolder`，判据是 `isUnsaved()` 或「所在 region 文件的 per-chunk 偏移/时间戳与快照不一致」（读 .mca 头部那 8 KiB）。所以代价与「真正改了多少区块」成正比，与视距无关；已在下沉路上的区块（ticket level > `ChunkLevel.MAX_LEVEL`）直接跳过。
+0. **先排空排队中的写入**：`Rewind.endDiscard()` → 三条存储链 `synchronize(false)` → `beginDiscard()`。已经排队但还没落盘的写入如果被跳过，这些区块在内存里已经不是 `isUnsaved()`、磁盘上又还没变，下面的文件判据都会漏掉它。这段时间世界不会 tick（我们就在服务端线程上），所以不会有新的写入插进来。
+1. **找受影响区块**：遍历已加载的 `ChunkHolder`，四条判据任一成立就算受影响——`isUnsaved()`；**区块 / 实体 / POI** 三个 region 文件的 per-chunk 偏移/时间戳与快照不一致（读 .mca 头部那 8 KiB）；内存里还有会被保存的实体；快照里这个区块本来有实体。所以代价与「真正改了多少区块」成正比，与视距无关；已在下沉路上的区块（ticket level > `ChunkLevel.MAX_LEVEL`）直接跳过。
+   > 实体那两条判据是必须的：`EntityStorage` 是**另一套**文件（`<维度>/entities/r.x.z.mca`），而且实体存储**没有 per-chunk 脏标记**、只在自动保存时才整体重写，所以「建点之后新放的实体」在落盘之前磁盘上完全看不出来，`isUnsaved()` 也不会被置位（`setUnsaved(true)` 的来源只有方块 / 方块实体 / 光照 / 计划刻 / 结构）。
 2. **强制卸载**：把 ticket level 顶到 `ChunkLevel.MAX_LEVEL + 1`，挂进 `DistanceManager.chunksToUpdateFutures`，再反复推进 `ChunkMap.processUnloads` / `ServerChunkCache.runDistanceManagerUpdates`。回滚窗口开着，卸载触发的落盘被跳过。
-3. **实体卸载**：由区块状态驱动，落在下一次 `PersistentEntitySectionManager.tick()`；必须在回拷文件之前跑完，否则会把「改世界之后」的实体写回刚还原的文件。
-4. **作废按区块缓存**：`EntityStorage.emptyChunks`（否则快照里本来有实体的区块会被当成空区块）与 POI 的分段缓存（否则留下幻影兴趣点）。
+   > 必须同时挡掉**重建**：玩家 ticket 一直认为这些区块该加载，ticket 图的邻居传播会把 `ChunkMap.updateChunkScheduling` 又叫回来把 holder 重建出来，重建的 holder 会走一遍晋升流水线、拉起 worldgen 任务，把 `generationRefCount` 钉在正被卸载的区块上——`processUnloads` 遇到 refCount 非 0 的 holder 直接跳过，卸载就永远跑不完（现象是 `stuck=` 一大堆、`unloadMs` 上千毫秒）。`InPlaceGuardMixins` 只在 `Rewind.beginUnloadGuard` 登记过的位置、且是「重建」这一种情形下拦掉，降级 / 卸载不受影响；名单在重建 holder 之前 `Rewind.clearUnloadGuards()` 清掉。卸载流水线连续 `STALL_ROUNDS` 轮没进展就放弃并记日志，不再空转。
+3. **实体卸载排空**：由区块状态驱动、靠 `PersistentEntitySectionManager.tick()` 推进，而且实体还没读回来（status 不是 LOADED）时 `storeChunkSections` 会直接放弃、留到下一 tick。所以必须在这一段里泵到 `chunksToUnload` 空——否则那些被推迟的卸载会落到回滚窗口之外，把「改世界之后」的实体列表写回刚还原的文件。
+4. **作废按区块缓存**：`EntityStorage.emptyChunks`（否则快照里本来有实体的区块会被当成空区块）与 POI 的分段缓存（否则留下幻影兴趣点）。必须在第 3 步之后做。
 5. **释放 region 句柄**：Windows 上打开着的 .mca 会锁住文件。关之前先 `IOWorker.synchronize(false)` 排空排队中的写入，然后关掉 `RegionFile` 并**清空 `RegionFileStorage.regionCache`**——原版 `close()` 只关不清，不清的话下一次访问会拿到已关闭的句柄。
 6. **回拷文件**：`SnapshotMirror` 反向增量，逻辑与老路共用。
-7. **重载**：给卸载掉的区块重建 holder，`ServerChunkCache.getChunk(..., FULL, true)` 同步等它读回来；原版的发送流水线会把新数据推给客户端（客户端 `replaceWithPacketData` 对已存在的区块是原地替换，不需要重连）。
-8. **内存状态**：玩家（`playerdata` NBT → `player.load` + 手动补齐客户端同步）、时间天气出生点（level.dat 的值写进活着的 `WorldData`，不动磁盘文件）、被强引用的 SavedData（记分板、袭击——必须换掉实例，否则回滚不了）。
+7. **玩家 / 时间天气**：`playerdata` NBT → `player.load` + 手动补齐客户端同步；level.dat 的值写进活着的 `WorldData`（不动磁盘文件）。位置很讲究——**必须排在 holder 重建之后、区块成批重发之前**：
+   - 不能更晚：恢复位置会走 `ServerGamePacketListenerImpl.teleport`，它设的 `awaitingPositionFromClient` 会让服务端**整段跳过右键方块交互**（`handleUseItemOn` 里那道 `awaitingPositionFromClient == null` 的门），而清掉它的客户端 ack 要排在几百个区块包后面；先发位置包，ack 就只要一个客户端 tick。
+   - 不能更早：`player.load` 会走 `Entity.setPosRaw`，NeoForge 在那里加了 `level.getChunk(...)`（"ensure target chunk is loaded"），holder 不在就会在 `ChunkMap.acquireGeneration` 上 NPE，或者抛 `Chunk not there when requested`。
+8. **重载**：给卸载掉的区块重建 holder，`ServerChunkCache.getChunk(..., FULL, true)` 同步等它读回来；原版的发送流水线会把新数据推给客户端（客户端 `replaceWithPacketData` 对已存在的区块是原地替换，不需要重连）。
+9. **被强引用的 SavedData**：记分板、袭击——必须换掉实例 / 重灌内容，否则回滚不了。
+
+回滚窗口**一直开到整段结束**（`run` 的 `finally` 才 `endDiscard()`）：这期间任何落盘都是要被丢弃的，第 3 步那些卸载收尾写入尤其危险。
 
 需要的原版内部入口全部集中在 `cc.sighs.mixin.RollbackAccessMixins`（`@Accessor` / `@Invoker`），业务代码不直接碰反射。`RollbackDiscardMixins` 另外挡掉了 `ChunkMap.save(ChunkAccess)`——卸载路径本身会调它，回滚窗口内整段跳过（省掉 `ChunkSerializer.write`）。
 
-**已知边界**：只还原记分板与袭击这两类 SavedData，其它 `<维度>/data/*.dat`（地图、自定义 boss 条等）只还原了磁盘文件，内存里的实例保持不变，会在下一次自动保存时把旧内容写回去；卸载时还有生成任务在飞的少数区块会被跳过（日志里以 `stuck=` 计数出现）。记分板不能走 `DimensionDataStorage.computeIfAbsent`：服务端建服时另建了一个只指向同一目录的存储实例，`ServerLevel` 手里拿不到那个；而且 `Scoreboard.addObjective` 对重名会抛异常，所以要先清掉现有 objective / team 再用 `dataFactory().deserializer()` 把快照内容灌回同一个记分板对象。
+**已知边界**：只还原记分板与袭击这两类 SavedData，其它 `<维度>/data/*.dat`（地图、自定义 boss 条等）只还原了磁盘文件，内存里的实例保持不变，会在下一次自动保存时把旧内容写回去；卸载时还有生成任务在飞的少数区块会被跳过（日志里以 `stuck=` 计数出现）。记分板不能走 `DimensionDataStorage.computeIfAbsent`：服务端建服时另建了一个只指向同一目录的存储实例，`ServerLevel` 手里拿不到那个；而且 `Scoreboard.addObjective` 对重名会抛异常，所以要先清掉现有 objective / team 再用 `dataFactory().deserializer()` 把快照内容灌回同一个记分板对象。另外，只要区块内存里还有会被保存的实体，它就会被判成受影响并重载——实体回滚的代价与「视野内有多少带实体的区块」相关，这是实体存储没有脏标记的直接后果。
 
 自测里的耗时口径是「过渡淡入完成、真正开始动世界」到回溯结束，不含前面的淡入，两条路径用同一把尺子（`Rewind: rewind body finished in N ms`）。
 

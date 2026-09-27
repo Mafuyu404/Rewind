@@ -24,6 +24,7 @@ import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 import net.minecraft.world.level.chunk.storage.SectionStorage;
 import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
 import net.minecraft.world.level.entity.EntityPersistentStorage;
+import net.minecraft.world.level.entity.EntitySectionStorage;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.storage.DimensionDataStorage;
@@ -172,6 +173,14 @@ public final class RollbackAccessMixins {
     public interface EntitySectionManagerAccess {
         @Accessor("permanentStorage")
         EntityPersistentStorage<Entity> rewind$permanentStorage();
+
+        /** 按区块缓存的实体分段：用来判断某个区块内存里还有没有「会被保存的实体」。 */
+        @Accessor("sectionStorage")
+        EntitySectionStorage<Entity> rewind$sectionStorage();
+
+        /** 等待实体区块卸载完成的判据（原版只在自己的 tick() 里推进它）。 */
+        @Accessor("chunksToUnload")
+        LongSet rewind$chunksToUnload();
     }
 
     /** 存档数据缓存：回滚后清掉对应条目，下一次 {@code computeIfAbsent} 会重新读盘。 */

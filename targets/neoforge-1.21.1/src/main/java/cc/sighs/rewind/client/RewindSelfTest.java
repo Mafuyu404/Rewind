@@ -45,6 +45,8 @@ public final class RewindSelfTest {
     private static final String OBJECTIVE = "rewind_test";
     private static final String SCORE_HOLDER = "rewind_marker";
     private static final String ENTITY_TAG = "rewind_test";
+    /** 建点之后才召唤的实体用的 tag：用来验证「只放实体、没动方块」的区块也会被回滚。 */
+    private static final String EXTRA_TAG = "rewind_test_extra";
     private static final int STAGE_TIMEOUT_TICKS = 12000;
 
     private enum Stage {
@@ -160,6 +162,7 @@ public final class RewindSelfTest {
                 check(state.block == Blocks.GOLD_BLOCK, "fixture should be gold_block before snapshot, got " + state.block);
                 check(state.score == 1, "score should be 1 before snapshot, got " + state.score);
                 check(state.stands >= 1, "fixture armour stand missing before snapshot, got " + state.stands);
+                check(state.extra == 0, "extra entity should not exist before the snapshot, got " + state.extra);
                 if (failures.isEmpty()) {
                     goTo(Stage.TRIGGER_SNAPSHOT);
                 } else {
@@ -225,6 +228,7 @@ public final class RewindSelfTest {
                 Rewind.LOGGER.info("Rewind self-test: after mutation {}", state.describe());
                 check(state.block == Blocks.DIAMOND_BLOCK, "mutation should swap the fixture to diamond_block, got " + state.block);
                 check(state.score == 2, "mutation should set the score to 2, got " + state.score);
+                check(state.extra == 1, "mutation should have summoned one extra entity, got " + state.extra);
                 check(state.diamonds == baseline.diamonds + 5,
                         "mutation should add 5 diamonds (" + baseline.diamonds + " -> " + state.diamonds + ")");
                 check(Math.abs(state.px - baseline.px) > 5.0D || Math.abs(state.pz - baseline.pz) > 5.0D,
@@ -308,6 +312,14 @@ public final class RewindSelfTest {
                         "restored score mismatch: " + state.score + " != " + baseline.score);
                 check(state.stands == baseline.stands,
                         "restored armour stand count mismatch: " + state.stands + " != " + baseline.stands);
+                // 实体回滚的关键断言：位置要回去，而且建点之后才召唤的实体必须消失。
+                // 只数个数是不够的——把盔甲架传送到别处、个数照样是 1，之前那轮 PASS 就是这么空过的。
+                check(Math.abs(state.standX - baseline.standX) < 0.5D
+                                && Math.abs(state.standY - baseline.standY) < 0.5D
+                                && Math.abs(state.standZ - baseline.standZ) < 0.5D,
+                        "restored armour stand position mismatch: " + state.describe() + " vs " + baseline.describe());
+                check(state.extra == 0,
+                        "entities summoned after the checkpoint must be gone after the restore, got " + state.extra);
                 check(state.diamonds == baseline.diamonds,
                         "restored inventory mismatch: diamonds " + state.diamonds + " != " + baseline.diamonds);
                 check(Math.abs(state.px - baseline.px) < 2.5D && Math.abs(state.pz - baseline.pz) < 2.5D,
@@ -456,12 +468,20 @@ public final class RewindSelfTest {
             }
         }
         int stands = 0;
+        int extra = 0;
         for (Entity entity : level.getAllEntities()) {
             if (entity.getTags().contains(ENTITY_TAG)) {
                 stands++;
+                state.standX = entity.getX();
+                state.standY = entity.getY();
+                state.standZ = entity.getZ();
+            }
+            if (entity.getTags().contains(EXTRA_TAG)) {
+                extra++;
             }
         }
         state.stands = stands;
+        state.extra = extra;
         return state;
     }
 
@@ -523,6 +543,11 @@ public final class RewindSelfTest {
         private Block block = Blocks.AIR;
         private int score = Integer.MIN_VALUE;
         private int stands = -1;
+        /** 建点之后才召唤的实体数量，回档后必须是 0。 */
+        private int extra = -1;
+        private double standX;
+        private double standY;
+        private double standZ;
         private double px;
         private double py;
         private double pz;
@@ -533,6 +558,8 @@ public final class RewindSelfTest {
             return "block=" + block
                     + " score=" + score
                     + " stands=" + stands
+                    + " standPos=" + String.format(Locale.ROOT, "%.2f/%.2f/%.2f", standX, standY, standZ)
+                    + " extra=" + extra
                     + " player=" + String.format(Locale.ROOT, "%.2f/%.2f/%.2f", px, py, pz)
                     + " diamonds=" + diamonds
                     + " dayTime=" + dayTime;

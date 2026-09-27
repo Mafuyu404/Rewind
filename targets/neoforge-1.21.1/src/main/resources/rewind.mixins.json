@@ -24,7 +24,8 @@
     "RollbackAccessMixins$EntityStorageAccess",
     "RollbackAccessMixins$ServerLevelAccess",
     "RollbackAccessMixins$EntitySectionManagerAccess",
-    "RollbackAccessMixins$DimensionDataStorageAccess"
+    "RollbackAccessMixins$DimensionDataStorageAccess",
+    "InPlaceGuardMixins$ChunkMapRecreationGuard"
   ],
   "injectors": {
     "defaultRequire": 1
