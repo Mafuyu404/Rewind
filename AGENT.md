@@ -117,13 +117,17 @@ F8 默认走**原地回滚**（`cc.sighs.rewind.server.InPlaceRollback`）：世
 
 F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（只写日志；`/rewind status` 是显式查询命令，保留输出）。观感由两种过渡承担：
 
-- **过渡包络**：`RewindTransition` 用真实时间推进 0 → 1 → 0（存档 = 广角，读档 = 高斯模糊）。`isFadeInDone()` 用来卡「等画面拉宽 / 糊住之后再动手」，这样真正危险的动作玩家看不到。
-- **存档的广角不做后处理**：直接在 `ViewportEvent.ComputeFov` 里把摄像机 FOV 拉满（`RewindScreens.FOV_MAX` = 120°，比原版滑块上限 110 更大，保证「拉到最大」一定看得出来；例如 70° → 120°），随强度淡入淡出。改的是每帧算出来的 FOV、不动玩家设置，所以效果结束自动恢复。
-- **读档的高斯模糊是后处理**：`RewindTransitionRenderer` 在 `RenderFrameEvent.Post` 把画面重画一遍。两个必须记住的点：那一刻这一帧**还没** blit 到屏幕，所以要画进**主渲染目标**而不是帧缓冲 0；并且必须「读副本、写主目标」，所以每帧先把当前帧拷进自己的 `TextureTarget`——世界被拆掉之后，这张副本同时就是唯一还能显示的遮罩内容。着色器在 `assets/rewind/shaders/core/rewind_transition.{json,vsh,fsh}`，**JSON 里的 `vertex`/`fragment` 必须带命名空间**（`rewind:rewind_transition`，否则会去 `minecraft:` 找）。
+- **热键在世界内任何地方都生效，包括 GUI 里**：`RewindClient` 监听 NeoForge 的 `InputEvent.Key`（原始按键），不用 `KeyMapping.consumeClick()`——原版只在 `screen == null` 时才给 KeyMapping 累计点击（`KeyboardHandler` 里 `flag4 = screen == null`），界面开着永远收不到。判定用 `KeyMapping.matches(key, scanCode)`，所以玩家在按键设置里改绑依然有效；F7/F8 仍然注册成 KeyMapping，只是不再靠它的点击计数。按下的时机如果撞上过渡或上一次没结束的操作，就记进 `pendingRequest` 等空下来再执行（等价于原版点击计数「攒着」的语义，而不是丢掉按键）。
+- **按下 F7/F8 会先把当前界面摘掉**（`CheckpointController.closeScreen`）：过渡是整帧后处理（重采样整幅画面），界面开着既会挡在效果上面，也违反上面那条「过渡期间不得出现界面」。摘屏用的是 `setScreen(null)`，容器界面走原版 `removed()` 的正常关闭路径，不会丢东西。
+- **「没有存档点」不是失败路径**：F8 在没建过存档点时只写一条日志，不动玩家当前的界面（原来会走 `fail()` 把界面关掉）。
+
+- **过渡包络**：`RewindTransition` 用真实时间推进 0 → 1 → 0（存档 = 饱和度提高，读档 = 高斯模糊）。`isFadeInDone()` 用来卡「等效果满强度之后再动手」，这样真正危险的动作玩家看不到。
+- **两种效果都是后处理**：`RewindTransitionRenderer` 在 `RenderFrameEvent.Post` 把画面重画一遍，`EffectMode` uniform 选效果（`1` = 饱和度，其它 = 高斯模糊），强度从 `RewindTransition.strength()` 来。三个必须记住的点：那一刻这一帧**还没** blit 到屏幕，所以要画进**主渲染目标**而不是帧缓冲 0；必须「读副本、写主目标」，所以每帧先把当前帧拷进自己的 `TextureTarget`——世界被拆掉之后，这张副本同时就是唯一还能显示的遮罩内容；强度为 0 时着色器要逐位还原原画面（饱和度那条靠 `mix(vec3(luma), rgb, 1.0 + 0.0)`）。着色器在 `assets/rewind/shaders/core/rewind_transition.{json,vsh,fsh}`，**JSON 里的 `vertex`/`fragment` 必须带命名空间**（`rewind:rewind_transition`，否则会去 `minecraft:` 找）。
+- **存档不再动摄像机 FOV**：原来的广角是靠 `ViewportEvent.ComputeFov` 把 FOV 拉到 120°，已经整段删掉（连带 `RewindScreens.onComputeFov` / `FOV_MAX`）；现在改的是像素，玩家设置一概不动。
 - **世界还在时不挂屏**（F7）：改成在服务器线程上 `await` 一个 latch 冻结世界（落盘完成后摁住，快照写完放行，服务端侧 20s 超时兜底），等价于原来的「暂停世界」但不产生任何界面。
 - **世界不在时必须挂一个「逻辑屏」**（F8 重载期间）：`RewindBlankScreen` 不画任何东西，但必须存在——原版假设「没有世界就一定有界面」（`Minecraft.tick()` 里 `handleKeybinds` 直接访问 `player`），不挂会 NPE 崩客户端。世界回来后立刻摘掉。
 - **拦掉原版加载屏**：`RewindScreens` 只在过渡进行期间取消 `GenericMessageScreen` / `LevelLoadingScreen` / `ProgressScreen` / `ReceivingLevelScreen` 的打开。过渡期间不碰 `Options.hideGui`（HUD/手持物保持原样，只是在「世界已拆、新世界未到」的那一小段里画面来自冻结帧，本身就没有活的 HUD 可画）。后处理不可用时（着色器加载失败）不再拦截，让原版加载屏兜底，避免黑屏空档。
-- **验证**：`-PrwSelfTest=true` 会断言「过渡期间除逻辑屏外不得出现任何界面」，并在满强度存一张 `run/screenshots/rewind-<效果>.png`——过渡是视觉效果，日志看不出对错，需要人眼（或视觉模型）确认；FOV 变化另有一条 `wide-angle fov A -> B` 日志。
+- **验证**：`-PrwSelfTest=true` 会断言「过渡期间除逻辑屏外不得出现任何界面」，并在满强度存一张 `run/screenshots/rewind-<效果>.png`（`rewind-SATURATION.png` / `rewind-GAUSSIAN_BLUR.png`）——过渡是视觉效果，日志看不出对错，需要人眼（或视觉模型）确认。
 
 ### 发布
 

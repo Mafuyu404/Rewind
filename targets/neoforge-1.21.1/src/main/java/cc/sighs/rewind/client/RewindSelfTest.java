@@ -13,6 +13,7 @@ import cc.sighs.rewind.snapshot.SnapshotMeta;
 import cc.sighs.rewind.snapshot.SnapshotMirror;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
@@ -29,6 +30,8 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.ReadOnlyScoreInfo;
 import net.minecraft.world.scores.ScoreHolder;
+import net.neoforged.neoforge.client.event.InputEvent;
+import net.neoforged.neoforge.common.NeoForge;
 
 /**
  * 端到端自测：在单人世界里按「建立存档点 → 改世界 → 回溯 → 校验」跑一遍真实流程。
@@ -76,6 +79,8 @@ public final class RewindSelfTest {
     private static final List<String> failures = new ArrayList<>();
     private static WorldState baseline;
     private static boolean screenLeakReported;
+    /** 「从界面里按下的热键会把界面收掉」这条断言每轮只查一次。 */
+    private static boolean guiCloseChecked;
     /** 本轮是不是走原地回滚（第 1 轮走原地，第 2 轮走「关世界重开」做 A/B）。 */
     private static boolean expectInPlace;
     /** 本轮回溯期间世界有没有被关掉——原地回滚的核心断言就是「没关」。 */
@@ -172,12 +177,17 @@ public final class RewindSelfTest {
             }
             case TRIGGER_SNAPSHOT: {
                 if (stageTicks == 1) {
-                    Rewind.LOGGER.info("Rewind self-test: simulating F7 via KeyMapping.click({})",
-                            InputConstants.KEY_F7);
-                    KeyMapping.click(InputConstants.Type.KEYSYM.getOrCreate(InputConstants.KEY_F7));
+                    // 等上一次过渡彻底结束再开界面：界面出现在过渡上面是玩家自己开的，不属于
+                    // 「过渡期间不得出现界面」要管的事，但会误伤那条断言
+                    if (RewindTransition.isActive()) {
+                        stageTicks = 0;
+                        return;
+                    }
+                    pressKeyFromGui(minecraft, InputConstants.KEY_F7, "F7");
                     return;
                 }
                 if (CheckpointController.isBusy()) {
+                    checkGuiClosed(minecraft, "F7");
                     return;
                 }
                 if (CheckpointController.lastOutcome() == CheckpointController.Outcome.NONE) {
@@ -245,6 +255,10 @@ public final class RewindSelfTest {
             }
             case TRIGGER_RESTORE: {
                 if (stageTicks == 1) {
+                    if (RewindTransition.isActive()) {
+                        stageTicks = 0;
+                        return;
+                    }
                     // A/B：第 1 轮走原地回滚，第 2 轮走「关世界 → 重开」，好在同一份世界上比耗时
                     expectInPlace = cycle == 1;
                     worldWasClosed = false;
@@ -252,13 +266,12 @@ public final class RewindSelfTest {
                     CheckpointController.setFastRestartEnabled(cycle == 1);
                     Rewind.LOGGER.info("Rewind self-test: cycle {} will restore via the {} path", cycle,
                             expectInPlace ? "in-place" : "close-and-reopen");
-                    Rewind.LOGGER.info("Rewind self-test: simulating F8 via KeyMapping.click({})",
-                            InputConstants.KEY_F8);
-                    KeyMapping.click(InputConstants.Type.KEYSYM.getOrCreate(InputConstants.KEY_F8));
+                    pressKeyFromGui(minecraft, InputConstants.KEY_F8, "F8");
                     return;
                 }
                 // F8 不再要确认屏：点下去就应该直接开始回溯
                 if (CheckpointController.isBusy() || minecraft.level == null) {
+                    checkGuiClosed(minecraft, "F8");
                     goTo(Stage.WAIT_WORLD_CLOSED);
                     return;
                 }
@@ -487,6 +500,32 @@ public final class RewindSelfTest {
 
     // ------------------------------------------------------------------ 基础设施
 
+    /** 操作真的开跑之后确认一下：从界面里按下去的那一下，界面已经被收掉了。 */
+    private static void checkGuiClosed(Minecraft minecraft, String what) {
+        if (guiCloseChecked) {
+            return;
+        }
+        guiCloseChecked = true;
+        check(minecraft.screen == null,
+                "pressing " + what + " from a GUI should close that GUI, but " + minecraft.screen + " is still open");
+    }
+
+    /**
+     * 模拟一次真实按键：**先打开一个界面**，再投递 NeoForge 的原始按键事件。
+     *
+     * <p>走这条路的理由：原版只在没有界面时才累计 {@code KeyMapping} 的点击
+     * （{@code KeyboardHandler} 里 {@code flag4 = screen == null}），所以「GUI 里也能生效」这件事
+     * 必须靠原始输入事件来验证。用 {@code NeoForge.EVENT_BUS.post} 投递，走的就是真实注册的那个监听器。
+     */
+    private static void pressKeyFromGui(Minecraft minecraft, int keyCode, String what) {
+        if (minecraft.player != null) {
+            minecraft.setScreen(new InventoryScreen(minecraft.player));
+        }
+        Rewind.LOGGER.info("Rewind self-test: opened a GUI, then pressing {} via InputEvent.Key (screen={})",
+                what, minecraft.screen == null ? "none" : minecraft.screen.getClass().getSimpleName());
+        NeoForge.EVENT_BUS.post(new InputEvent.Key(keyCode, 0, InputConstants.PRESS, 0));
+    }
+
     private static void runServerCommand(String command) {
         IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
         if (server == null) {
@@ -516,6 +555,7 @@ public final class RewindSelfTest {
         Rewind.LOGGER.info("Rewind self-test: stage {} -> {}", stage, next);
         stage = next;
         stageTicks = 0;
+        guiCloseChecked = false;
     }
 
     private static void check(boolean ok, String message) {

@@ -6,12 +6,12 @@ import net.minecraft.util.Mth;
  * 存档 / 回溯的屏幕过渡：一个纯粹的「效果强度」包络，0 → 1 → 0。
  *
  * <p>没有任何界面参与：强度只由 {@link RewindTransitionRenderer} 每帧读一次，用来驱动后处理
- * （存档是广角畸变，回溯是高斯模糊）。用真实时间推进而不是游戏 tick，这样服务端被冻结时
+ * （存档是饱和度提高，回溯是高斯模糊）。用真实时间推进而不是游戏 tick，这样服务端被冻结时
  * 包络仍然按墙钟时间走完。
  *
  * <p>使用方式：
  * <pre>
- * start(WIDE_ANGLE)   → 淡入
+ * start(SATURATION)   → 淡入
  * （在淡入结束时做事；真正的等待用 hold()/keepAlive() 撑住强度）
  * finish()            → 淡出，结束后自动回到 NONE
  * </pre>
@@ -19,8 +19,8 @@ import net.minecraft.util.Mth;
 public final class RewindTransition {
     public enum Effect {
         NONE,
-        /** 存档：广角畸变。 */
-        WIDE_ANGLE,
+        /** 存档：饱和度提高。 */
+        SATURATION,
         /** 读档：高斯模糊。 */
         GAUSSIAN_BLUR
     }

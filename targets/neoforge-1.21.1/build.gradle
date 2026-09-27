@@ -57,6 +57,13 @@ repositories {
     maven {
         url = 'https://maven.sighs.cc/repository/maven-public/'
     }
+    maven {
+        name = "Curse Maven"
+        url = "https://www.cursemaven.com"
+        content {
+            includeGroup "curse.maven"
+        }
+    }
 }
 
 dependencies {
@@ -66,6 +73,7 @@ dependencies {
     // 所以必须显式挂进后者，否则 dev 下会 NoClassDefFoundError（发行 jar 里 common 的类本来就是打进去的）。
     additionalRuntimeClasspath project(':common')
     implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.2.5.1'
+//    implementation "curse.maven:smart-key-prompts-1300195:7450380"
 }
 
 tasks.named('processResources', ProcessResources).configure {

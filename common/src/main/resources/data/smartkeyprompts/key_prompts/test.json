@@ -1,0 +1,17 @@
+{
+  "modid": "rewind",
+  "vars": {
+    "qqq": "true"
+  },
+  "entries": [
+    {
+      "when": {
+        "qqq": "true"
+      },
+      "then": [
+        "custom('rewind', 'key.keyboard.f7', '更新存档点')",
+        "custom('rewind', 'key.keyboard.f8', '回到存档点')"
+      ]
+    }
+  ]
+}

@@ -213,13 +213,14 @@ public final class CheckpointController {
         if (!ensureUsable(minecraft)) {
             return;
         }
+        closeScreen(minecraft);
         requestSource = source;
         lastOutcome = Outcome.NONE;
         lastMessage = "";
         phase = Phase.PAUSING;
         phaseTicks = 0;
         // 先让画面开始广角畸变；等淡入到满强度再动手，视觉上就是「世界被拉宽、静止、然后恢复」
-        RewindTransition.start(RewindTransition.Effect.WIDE_ANGLE);
+        RewindTransition.start(RewindTransition.Effect.SATURATION);
     }
 
     // ------------------------------------------------------------------ F8
@@ -233,9 +234,13 @@ public final class CheckpointController {
         Path world = minecraft.getSingleplayerServer().getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
         SnapshotMeta meta = loadMeta(world, slot);
         if (meta == null || !meta.isComplete()) {
-            fail(minecraft, "rewind.error.no_snapshot", String.valueOf(world));
+            // 没有存档点不是「操作失败」，只是一个空动作：不动玩家当前的界面
+            lastOutcome = Outcome.FAILED;
+            lastMessage = describe("rewind.error.no_snapshot", String.valueOf(world));
+            Rewind.LOGGER.warn("Rewind: {}", lastMessage);
             return;
         }
+        closeScreen(minecraft);
         requestSource = source;
         lastOutcome = Outcome.NONE;
         lastMessage = "";
@@ -714,6 +719,17 @@ public final class CheckpointController {
             return false;
         }
         return true;
+    }
+
+    /**
+     * 动手之前先把界面摘掉：过渡是整帧后处理（重采样整幅画面），界面开着既会挡在效果上面，
+     * 也违反「过渡期间不得出现界面」那条约定。F7/F8 因此可以在任何界面里按——
+     * 按下去界面会被收起，然后就是纯粹的世界过渡。
+     */
+    private static void closeScreen(Minecraft minecraft) {
+        if (minecraft.screen != null) {
+            minecraft.setScreen(null);
+        }
     }
 
     private static SnapshotMeta loadMeta(Path world, String slot) {

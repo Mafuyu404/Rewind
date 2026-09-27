@@ -21,7 +21,7 @@ import org.lwjgl.opengl.GL30;
 
 /**
  * 存档点 / 回溯的过渡后处理。每帧结束时把整幅画面（或它的冻结副本）重新采样一遍画回屏幕：
- * 存档是广角畸变，读档是高斯模糊，强度由 {@link RewindTransition} 的包络给出。
+ * 存档是饱和度提高，读档是高斯模糊，强度由 {@link RewindTransition} 的包络给出。
  *
  * <p>为什么要有「冻结副本」：回溯要走原版那条「关世界 → 换文件 → 重开世界」的路，
  * 中间有一段客户端根本没有 {@code ClientLevel} 的时间（原版用加载界面盖住它）。
@@ -34,6 +34,8 @@ import org.lwjgl.opengl.GL30;
 public final class RewindTransitionRenderer {
     /** 单帧最多按多少秒推进包络，避免卡顿后效果跳变。 */
     private static final float MAX_FRAME_SECONDS = 0.1F;
+    /** 着色器里的效果编号，必须和 rewind_transition.fsh 保持一致。 */
+    private static final int MODE_SATURATION = 1;
 
     private static ShaderInstance shader;
     private static boolean shaderFailed;
@@ -60,13 +62,9 @@ public final class RewindTransitionRenderer {
             }
         }
         if (active) {
-            if (RewindTransition.effect() == RewindTransition.Effect.GAUSSIAN_BLUR) {
-                // 读档：世界中间会消失，必须靠后处理（模糊 + 最后一帧遮罩）把这段盖过去
-                renderTransition(minecraft);
-            } else {
-                // 存档的广角不走后处理，只把摄像机 FOV 拉到最大（见 RewindScreens.onComputeFov）
-                maybeScreenshot(minecraft);
-            }
+            // 两种效果都是后处理：存档提高饱和度，读档高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
+            // 遮罩」把那段盖过去）
+            renderTransition(minecraft);
         }
     }
 
@@ -107,6 +105,8 @@ public final class RewindTransitionRenderer {
         RenderSystem.setShaderTexture(0, capturedFrame.getColorTextureId());
         RenderSystem.setShader(() -> instance);
         setFloat(instance, "EffectStrength", RewindTransition.strength());
+        setInt(instance, "EffectMode",
+                RewindTransition.effect() == RewindTransition.Effect.SATURATION ? MODE_SATURATION : 0);
         setVec2(instance, "TexelSize", 1.0F / width, 1.0F / height);
 
         BufferBuilder builder = RenderSystem.renderThreadTesselator()
@@ -176,6 +176,13 @@ public final class RewindTransitionRenderer {
     }
 
     private static void setFloat(ShaderInstance instance, String name, float value) {
+        Uniform uniform = instance.getUniform(name);
+        if (uniform != null) {
+            uniform.set(value);
+        }
+    }
+
+    private static void setInt(ShaderInstance instance, String name, int value) {
         Uniform uniform = instance.getUniform(name);
         if (uniform != null) {
             uniform.set(value);
