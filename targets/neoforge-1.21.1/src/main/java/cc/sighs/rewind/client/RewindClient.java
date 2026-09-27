@@ -5,6 +5,7 @@ import cc.sighs.rewind.Rewind;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.InputEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
@@ -31,6 +32,8 @@ public final class RewindClient {
     }
 
     public static void setup(IEventBus modBus) {
+        // 过渡参数（两种效果的所有可调项）落在 run/config/rewind-client.toml
+        ModList.get().getModContainerById(Rewind.MOD_ID).ifPresent(container -> RewindClientConfig.register(container, modBus));
         modBus.addListener(RegisterKeyMappingsEvent.class, RewindClient::onRegisterKeyMappings);
         NeoForge.EVENT_BUS.addListener(ClientTickEvent.Post.class, RewindClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class, RewindCommands::register);

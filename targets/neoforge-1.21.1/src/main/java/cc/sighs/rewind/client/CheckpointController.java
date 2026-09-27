@@ -87,8 +87,6 @@ public final class CheckpointController {
     private static final int IN_PLACE_WARN_INTERVAL_TICKS = 6000;
     /** 服务端线程最多冻结多久（秒）。客户端的 keep-alive 超时远大于这个值，超了也只是提前放行。 */
     private static final long SERVER_FREEZE_SECONDS = 20L;
-    /** 新世界回来了之后再等几 tick 才收起模糊，避免露出还没收到区块的空画面。 */
-    private static final int REVEAL_SETTLE_TICKS = 10;
 
     /**
      * 操作期间显示的提示屏：用原版自己的 {@link GenericMessageScreen}（原版「保存并退出」用的就是它），
@@ -468,7 +466,7 @@ public final class CheckpointController {
                     }
                     return;
                 }
-                if (phaseTicks < REVEAL_SETTLE_TICKS) {
+                if (phaseTicks < RewindClientConfig.restoreSettleTicks()) {
                     return;
                 }
                 // 世界真的回来了：摘掉逻辑屏，让模糊淡出去露出新世界

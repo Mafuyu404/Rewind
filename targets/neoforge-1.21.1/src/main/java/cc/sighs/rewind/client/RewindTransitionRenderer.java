@@ -107,6 +107,9 @@ public final class RewindTransitionRenderer {
         setFloat(instance, "EffectStrength", RewindTransition.strength());
         setInt(instance, "EffectMode",
                 RewindTransition.effect() == RewindTransition.Effect.SATURATION ? MODE_SATURATION : 0);
+        // 效果的浓度/半径都来自 run/config/rewind-client.toml
+        setFloat(instance, "SaturationBoost", RewindClientConfig.saturationBoost());
+        setFloat(instance, "BlurRadius", RewindClientConfig.blurRadius());
         setVec2(instance, "TexelSize", 1.0F / width, 1.0F / height);
 
         BufferBuilder builder = RenderSystem.renderThreadTesselator()

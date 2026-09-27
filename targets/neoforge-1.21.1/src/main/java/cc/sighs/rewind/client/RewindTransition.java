@@ -9,6 +9,8 @@ import net.minecraft.util.Mth;
  * （存档是饱和度提高，回溯是高斯模糊）。用真实时间推进而不是游戏 tick，这样服务端被冻结时
  * 包络仍然按墙钟时间走完。
  *
+ * <p>各段时长按效果区分，全部来自 {@link RewindClientConfig}（{@code run/config/rewind-client.toml}）。
+ *
  * <p>使用方式：
  * <pre>
  * start(SATURATION)   → 淡入
@@ -32,9 +34,7 @@ public final class RewindTransition {
         FADE_OUT
     }
 
-    private static final float FADE_IN_SECONDS = 0.22F;
-    private static final float FADE_OUT_SECONDS = 0.35F;
-    /** 保持阶段的安全上限：任何异常路径都不该让屏幕一直保持过渡效果。 */
+    /** 保持阶段的安全上限：任何异常路径都不该让屏幕一直保持过渡效果。这不是可调项。 */
     private static final float HOLD_LIMIT_SECONDS = 25.0F;
 
     private static Effect effect = Effect.NONE;
@@ -97,7 +97,7 @@ public final class RewindTransition {
         elapsedSeconds += deltaSeconds;
         switch (stage) {
             case FADE_IN: {
-                float progress = Mth.clamp(elapsedSeconds / FADE_IN_SECONDS, 0.0F, 1.0F);
+                float progress = Mth.clamp(elapsedSeconds / RewindClientConfig.fadeInSeconds(), 0.0F, 1.0F);
                 strength = ease(progress);
                 if (progress >= 1.0F) {
                     stage = Stage.HOLD;
@@ -115,7 +115,10 @@ public final class RewindTransition {
                 return;
             }
             case FADE_OUT: {
-                float progress = Mth.clamp(elapsedSeconds / FADE_OUT_SECONDS, 0.0F, 1.0F);
+                float fadeOut = effect == Effect.GAUSSIAN_BLUR
+                        ? RewindClientConfig.blurFadeOutSeconds()
+                        : RewindClientConfig.saturationFadeOutSeconds();
+                float progress = Mth.clamp(elapsedSeconds / fadeOut, 0.0F, 1.0F);
                 strength = 1.0F - ease(progress);
                 if (progress >= 1.0F) {
                     abort();
