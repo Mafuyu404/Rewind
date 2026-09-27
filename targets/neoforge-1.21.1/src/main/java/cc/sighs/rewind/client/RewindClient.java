@@ -2,6 +2,7 @@ package cc.sighs.rewind.client;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.api.RewindApi;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.neoforged.bus.api.IEventBus;
@@ -34,6 +35,8 @@ public final class RewindClient {
     public static void setup(IEventBus modBus) {
         // 过渡参数（两种效果的所有可调项）落在 run/config/rewind-client.toml
         ModList.get().getModContainerById(Rewind.MOD_ID).ifPresent(container -> RewindClientConfig.register(container, modBus));
+        // 把「带过渡的异步入口」接到状态机上：RewindApi.requestCheckpoint/requestRollback 从此等价于按 F7/F8
+        CheckpointController.installApiBridge();
         modBus.addListener(RegisterKeyMappingsEvent.class, RewindClient::onRegisterKeyMappings);
         NeoForge.EVENT_BUS.addListener(ClientTickEvent.Post.class, RewindClient::onClientTick);
         NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class, RewindCommands::register);
@@ -72,7 +75,6 @@ public final class RewindClient {
         RewindSelfTest.tick(minecraft);
         flushPendingRequest();
     }
-
     /**
      * 原始按键：无论有没有界面都会走到这里（原版只在 {@code screen == null} 时给 KeyMapping 累计点击），
      * 所以 F7 / F8 在世界内任何地方都能生效，包括 GUI 里。
@@ -93,15 +95,15 @@ public final class RewindClient {
     }
 
     private static void flushPendingRequest() {
-        if (pendingRequest == 0 || RewindTransition.isActive() || CheckpointController.isBusy()) {
+        if (pendingRequest == 0 || RewindTransition.isActive() || RewindApi.isBusy()) {
             return;
         }
         int request = pendingRequest;
         pendingRequest = 0;
         if (request == SNAPSHOT_REQUEST) {
-            CheckpointController.requestSnapshot("key");
+            RewindApi.requestCheckpoint("key");
         } else {
-            CheckpointController.requestRestore("key");
+            RewindApi.requestRollback("key");
         }
     }
 }

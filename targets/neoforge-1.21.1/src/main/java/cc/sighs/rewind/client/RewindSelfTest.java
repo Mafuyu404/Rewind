@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.api.RewindApi;
+import cc.sighs.rewind.api.RewindResult;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
@@ -81,6 +83,8 @@ public final class RewindSelfTest {
     private static boolean screenLeakReported;
     /** 「从界面里按下的热键会把界面收掉」这条断言每轮只查一次。 */
     private static boolean guiCloseChecked;
+    /** 开局时玩家已经死了多久（用来每 20 tick 求一次复活）。 */
+    private static int deadTicks;
     /** 本轮是不是走原地回滚（第 1 轮走原地，第 2 轮走「关世界重开」做 A/B）。 */
     private static boolean expectInPlace;
     /** 本轮回溯期间世界有没有被关掉——原地回滚的核心断言就是「没关」。 */
@@ -128,6 +132,27 @@ public final class RewindSelfTest {
         switch (stage) {
             case WAIT_WORLD: {
                 if (minecraft.level == null || minecraft.player == null || !minecraft.hasSingleplayerServer()) {
+                    stageTicks = 0;
+                    return;
+                }
+                // 测试世界是反复复用的，玩家可能已经死了：死亡屏会挡掉一切，先复活再开跑。
+                // （玩家位置/背包在自测里是相对 baseline 比对的，所以复活不会影响断言。）
+                if (minecraft.player.isDeadOrDying()) {
+                    deadTicks++;
+                    if (deadTicks % 20 == 1) {
+                        Rewind.LOGGER.info("Rewind self-test: player is dead; requesting respawn (attempt {})",
+                                deadTicks / 20 + 1);
+                        minecraft.player.respawn();
+                    }
+                    stageTicks = 0;
+                    return;
+                }
+                deadTicks = 0;
+                if (minecraft.screen != null) {
+                    // 死亡屏 / 暂停屏之类：自测要在「世界里」跑，先摘掉
+                    Rewind.LOGGER.info("Rewind self-test: closing {} before the run",
+                            minecraft.screen.getClass().getSimpleName());
+                    minecraft.setScreen(null);
                     stageTicks = 0;
                     return;
                 }
@@ -352,8 +377,11 @@ public final class RewindSelfTest {
                 Rewind.LOGGER.info("Rewind self-test: cycle {} incremental restore copied={} skipped={} total={}",
                         cycle, copiedFiles, skippedFiles, totalFiles);
                 if (expectInPlace) {
-                    var inPlace = CheckpointController.lastInPlaceResult();
-                    Rewind.LOGGER.info("Rewind self-test: in-place rollback detail {}", inPlace == null ? "n/a" : inPlace.summary());
+                    RewindResult result = CheckpointController.lastResult();
+                    Rewind.LOGGER.info("Rewind self-test: in-place rollback detail {}",
+                            result == null ? "n/a" : result.describe());
+                    check(result != null && result.success && result.inPlace,
+                            "the in-place rollback should report success through the API, got " + result);
                     check(inPlaceMillis > 0L && inPlaceMillis < 1500L,
                             "in-place restore should finish well under 1.5s, took " + inPlaceMillis + " ms");
                 }
@@ -402,6 +430,17 @@ public final class RewindSelfTest {
             Path world = server.getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
             Path slotDir = SnapshotLayout.slotDir(world, Rewind.SLOT);
             SnapshotMeta meta = SnapshotIndex.load(SnapshotLayout.indexFile(world)).get(Rewind.SLOT);
+
+            // 顺带把抽出来的 API 查一遍：命令和别的模组读的就是这几个入口
+            check(RewindApi.worldRoot(server).equals(world), "RewindApi.worldRoot() disagrees with the server's world path");
+            check(RewindApi.hasCheckpoint(world, Rewind.SLOT), "RewindApi.hasCheckpoint() should see the checkpoint we just wrote");
+            SnapshotMeta described = RewindApi.describe(world, Rewind.SLOT);
+            check(described != null && described.isComplete(),
+                    "RewindApi.describe() should return a complete checkpoint, got " + described);
+            check(RewindApi.listCheckpoints(world).stream().anyMatch(entry -> Rewind.SLOT.equals(entry.slot)),
+                    "RewindApi.listCheckpoints() should contain slot " + Rewind.SLOT);
+            check(!RewindApi.hasCheckpoint(world, "rewind_selftest_absent_slot"),
+                    "RewindApi.hasCheckpoint() should be false for a slot that was never written");
 
             check(meta != null && meta.isComplete(), "snapshot index status is not complete: " + (meta == null ? "absent" : meta.status));
             check(Files.isRegularFile(slotDir.resolve("level.dat")), "snapshot is missing level.dat");

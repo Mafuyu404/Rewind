@@ -76,6 +76,25 @@ cd targets\neoforge-1.21.1
 - **common 的类进不了 MOD_CLASSES**：ModDevGradle 只把 `neoForge { mods { ... } }` 里声明的 sourceSet 输出交给 FML，`implementation project(':common')` 不会进入游戏真正使用的 legacy classpath。target 需要额外声明 `additionalRuntimeClasspath project(':common')`（见 `targets/neoforge-1.21.1/build.gradle`），否则 dev 下会 `NoClassDefFoundError`。
 - **包名不能与 target 重叠**：dev 下 common 的 jar 是独立自动模块，若它的包与 target 模组模块的包同名（例如都在 `cc.sighs`），ModLauncher 会以 `ResolutionException: Modules ... export package ...` 启动失败。
 
+### 存档 / 读档 API（neoforge-1.21.1）
+
+对外入口是 `cc.sighs.rewind.api.RewindApi`，结果类型是 `cc.sighs.rewind.api.RewindResult`。分层：
+
+```
+api       RewindApi / RewindResult        对外门面；不引用任何 net.minecraft.client.* 类
+server    CheckpointWriter / WorldFlush   纯机制：落盘、镜像、索引
+          InPlaceRollback                 原地回滚引擎
+client    CheckpointController            客户端策略：过渡、界面、失败回退、状态机
+          RewindClient / RewindCommands   热键与命令，只做转交
+```
+
+- **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
+- **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。
+- **查询**：`worldRoot(server)` / `hasCheckpoint(worldRoot, slot)` / `describe(...)` / `listCheckpoints(worldRoot)`，只读存档目录。命令层的 `/rewind status` 读的就是它们。
+- **结果**：`RewindResult` 是只读的（final 字段 + 静态工厂），`success` / `failure` / `millis` / `copiedFiles` / `skippedFiles` / `totalFiles` / `inPlace` / `summary`；`RewindApi.lastResult()` 给最近一次结果。`CheckpointController.lastRestore*()` 那几个给自测看的统计现在是它的转发。
+
+`CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
+
 ### 回滚窗口与快速重启（neoforge-1.21.1）
 
 F8 回溯分三步：关世界 → 用快照覆盖存档文件 → 重新开世界。前两步之间那段「世界马上要被整体覆盖」的时间叫**回滚窗口**，由 `Rewind.beginDiscard()` / `endDiscard()` 标记（`CheckpointController` 在按下 F8 时打开、快照写完后关闭，失败路径也会关）：

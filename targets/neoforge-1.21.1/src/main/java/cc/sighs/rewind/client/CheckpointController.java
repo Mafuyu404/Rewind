@@ -1,21 +1,14 @@
 package cc.sighs.rewind.client;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import com.mojang.serialization.Dynamic;
 import cc.sighs.rewind.Rewind;
-import cc.sighs.rewind.server.InPlaceRollback;
-import cc.sighs.rewind.server.WorldFlush;
+import cc.sighs.rewind.api.RewindApi;
+import cc.sighs.rewind.api.RewindResult;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
-import cc.sighs.rewind.snapshot.SnapshotManifest;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
-import cc.sighs.rewind.snapshot.SnapshotMirror;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.GenericMessageScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
@@ -40,30 +33,28 @@ import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.world.level.storage.WorldData;
 
 /**
- * 存档点（F7 建立 / 覆盖，F8 回溯）的客户端状态机。
+ * 存档点操作的客户端策略层：热键 / 命令 → 过渡 → {@link RewindApi} → 状态机收尾。
  *
- * <p>F7：弹一个会暂停世界的进度屏 → 等集成服务器真的停了 → 服务器线程强同步落盘 →
- * 后台线程把存档目录镜像进 {@code rewind_snapshots/quick/} → 关屏回到游戏。
+ * <p>真正的存档 / 读档机制在 {@link RewindApi}（同步入口）和
+ * {@code cc.sighs.rewind.server.CheckpointWriter} / {@code InPlaceRollback}（引擎）里，
+ * 本类只负责「怎么让玩家看到这件事发生」：过渡包络、界面收放、失败回退、以及把结果记下来给命令和自测看。
  *
- * <p>F8：默认走<b>原地回滚</b>（{@link InPlaceRollback}）——世界不关、客户端不重登，在活着的集成服务器里
- * 把受影响的区块丢掉（不落盘）、释放 region 句柄、用快照覆盖文件、再从磁盘读回来。原地回滚失败时
- * 自动退回下面这条已知能成的老路。
+ * <p>F7：广角过渡淡入 → 服务端线程上 {@link RewindApi#createCheckpoint} → 过渡淡出。
+ *
+ * <p>F8：高斯模糊淡入 → 服务端线程上 {@link RewindApi#rollbackInPlace}（世界不关、客户端不重登）
+ * → 过渡淡出。原地回滚失败时自动退回下面这条已知能成的老路。
  *
  * <p>F8（回退路径）：走原版「保存并退出」同一条路（{@code Minecraft.disconnect}），返回时
  * 服务器线程已结束、{@code session.lock} 已释放、所有 region 文件句柄已关闭，
  * 此时才能安全覆盖 .mca；覆盖完走快速重启重新进世界。
  *
- * <p>整个流程不阻塞客户端线程（除了 disconnect 自身，它的忙等由原版负责）。
+ * <p>除了 disconnect 自身（它的忙等由原版负责），客户端线程不会被阻塞。
  */
 public final class CheckpointController {
     public enum Phase {
         IDLE,
-        /** F7：等过渡淡入完成，然后开始落盘。 */
-        PAUSING,
-        FLUSHING,
-        SNAPSHOTTING,
-        /** F8（原地回滚）：等过渡淡入完成，然后在活着的服务端上回滚，世界不关。 */
-        ROLLING_BACK,
+        /** 过渡淡入完成之后，在服务端线程上跑 {@link RewindApi} 的同步入口，客户端这边轮询。 */
+        WORKING,
         /** F8（回退路径）：等过渡淡入完成，然后关世界。 */
         CLOSING_WORLD,
         REWRITING,
@@ -79,38 +70,42 @@ public final class CheckpointController {
         FAILED
     }
 
+    /** 本轮在服务端线程上跑哪个同步入口。 */
+    private enum Work {
+        NONE,
+        CHECKPOINT,
+        ROLLBACK
+    }
+
     private static final int TIMEOUT_PAUSE_TICKS = 200;
-    private static final int TIMEOUT_FLUSH_TICKS = 1200;
-    private static final int TIMEOUT_SNAPSHOT_TICKS = 24000;
     private static final int TIMEOUT_REWRITE_TICKS = 24000;
-    /** 原地回滚整段（含区块重载）跑在服务端线程上；等太久只发一次警告，不硬超时。 */
-    private static final int IN_PLACE_WARN_INTERVAL_TICKS = 6000;
-    /** 服务端线程最多冻结多久（秒）。客户端的 keep-alive 超时远大于这个值，超了也只是提前放行。 */
-    private static final long SERVER_FREEZE_SECONDS = 20L;
+    /** 服务端线程上的活干得异常久时，每隔这么多 tick 记一条警告（不硬超时）。 */
+    private static final int WORK_WARN_INTERVAL_TICKS = 6000;
 
     /**
-     * 操作期间显示的提示屏：用原版自己的 {@link GenericMessageScreen}（原版「保存并退出」用的就是它），
-     * 不自己造界面。它还承担一个功能职责——{@code Screen.isPauseScreen()} 默认为 true，
-     * 屏幕一挂上集成服务器就会暂停，世界不再 tick、不再产生新写入。
+     * 回退路径关世界期间用的提示屏：用原版自己的 {@link GenericMessageScreen}（原版「保存并退出」用的就是它），
+     * 不自己造界面。它还会被 {@code RewindScreens} 拦掉——过渡期间不开任何界面。
      */
     private static final Component SAVING_SCREEN = Component.translatable("menu.savingLevel");
 
     private static Phase phase = Phase.IDLE;
     private static String requestSource = "";
     private static int phaseTicks;
+    private static String slot = Rewind.SLOT;
 
-    private static CompletableFuture<Void> flushFuture;
-    /**
-     * 存档时用来冻结服务端线程：落盘做完之后让服务端线程停在这里，直到快照写完才放行。
-     * 没有界面就没有「暂停世界」这个手段，只能靠把线程摁住来保证拷贝期间没人写盘。
-     */
-    private static CountDownLatch releaseServerLatch;
-    private static WorldFlush.Result flushed;
+    /** 本轮要跑的活 + 服务端线程回填的结果。 */
+    private static Work work = Work.NONE;
+    /** 本轮是否已经把活提交给服务端线程（只在客户端线程读写，避免同一轮反复提交）。 */
+    private static boolean workStarted;
+    private static volatile boolean workDone;
+    private static volatile RewindResult workResult;
+    private static volatile Throwable workFailure;
+
     private static Path worldRoot;
     private static String levelId = "";
-    private static String slot = Rewind.SLOT;
-    /** 回溯起始时刻（nanoTime），用于统计「按下 F8 → 玩家回到世界」的耗时；0 表示当前没有回溯在进行。 */
+    /** 回退路径的耗时起点（nanoTime）；0 表示当前没有回退在进行。 */
     private static long restoreStartedNanos;
+
     /**
      * 快速重启要复用的东西：注册表层 + 数据包资源（配方/战利品/标签/函数编译都在里面）+ 上一轮的 WorldData。
      * 它们在 {@code MinecraftServer.stopServer} 里都不会被关闭，所以跨世界生命周期可复用。
@@ -123,20 +118,14 @@ public final class CheckpointController {
     /** 是否走原地回滚；留个开关给 A/B 测量（默认开）。关掉就退回「关世界 → 重开」那条路。 */
     private static boolean inPlaceEnabled = true;
 
-    /** 原地回滚跑在服务端线程上，客户端这边只轮询这几个标记。 */
-    private static volatile boolean inPlaceDone;
-    private static volatile Throwable inPlaceFailure;
-    private static volatile InPlaceRollback.Result inPlaceResult;
-    /** 本轮是否已经提交过回滚任务（只在客户端线程读写，避免同一轮反复提交）。 */
-    private static boolean inPlaceStarted;
-    /** 最近一次回溯是不是原地回滚、整段耗时（F8 → 玩家可动）。 */
-    private static boolean lastRestoreInPlace;
-    private static long lastRestoreMillis = -1L;
-
+    /** 回退路径里在后台线程上做文件回拷。 */
     private static volatile boolean workerFinished;
     private static volatile Throwable workerFailure;
     private static volatile String workerSummary = "";
-    /** 最近一次回溯的回拷统计：给自测 / 命令看增量还原到底省了多少。 */
+
+    /** 最近一次回溯是不是原地回滚、整段耗时、回拷统计。 */
+    private static boolean lastRestoreInPlace;
+    private static long lastRestoreMillis = -1L;
     private static int lastRestoreCopied = -1;
     private static int lastRestoreSkipped = -1;
     private static int lastRestoreFiles = -1;
@@ -161,6 +150,11 @@ public final class CheckpointController {
 
     public static String lastMessage() {
         return lastMessage;
+    }
+
+    /** 最近一次操作的结果（同步入口自己记，异步入口完成后回填）；还没做过任何操作时为 null。 */
+    public static RewindResult lastResult() {
+        return RewindApi.lastResult();
     }
 
     /** 最近一次回溯真正回拷的文件数（-1 表示还没回溯过）。 */
@@ -193,19 +187,37 @@ public final class CheckpointController {
         return lastRestoreInPlace;
     }
 
-    /** 最近一次回溯从按下 F8 到玩家可动的耗时（毫秒，-1 表示还没回溯过）。 */
+    /** 最近一次回溯主体（不含过渡淡入）的耗时（毫秒，-1 表示还没回溯过）。 */
     public static long lastRestoreMillis() {
         return lastRestoreMillis;
     }
 
-    /** 最近一次原地回滚的分项统计（没走过原地回滚时为 null）。 */
-    public static InPlaceRollback.Result lastInPlaceResult() {
-        return inPlaceResult;
+    /**
+     * 把本状态机接到 {@link RewindApi} 的异步入口上——{@code RewindApi.requestCheckpoint/requestRollback}
+     * 等价于按 F7 / F8。客户端 setup 时调用一次。
+     */
+    public static void installApiBridge() {
+        RewindApi.installClientBridge(new RewindApi.ClientBridge() {
+            @Override
+            public void requestCheckpoint(String source) {
+                requestSnapshot(source);
+            }
+
+            @Override
+            public void requestRollback(String source) {
+                requestRestore(source);
+            }
+
+            @Override
+            public boolean isBusy() {
+                return CheckpointController.isBusy();
+            }
+        });
     }
 
     // ------------------------------------------------------------------ F7
 
-    /** F7：建立/覆盖存档点。没有界面，靠「广角过渡 + 冻结服务端线程」完成。 */
+    /** F7：建立/覆盖存档点。没有界面，靠「广角过渡 + 服务端线程上同步落盘」完成。 */
     public static void requestSnapshot(String source) {
         Minecraft minecraft = Minecraft.getInstance();
         if (!ensureUsable(minecraft)) {
@@ -215,9 +227,8 @@ public final class CheckpointController {
         requestSource = source;
         lastOutcome = Outcome.NONE;
         lastMessage = "";
-        phase = Phase.PAUSING;
-        phaseTicks = 0;
-        // 先让画面开始广角畸变；等淡入到满强度再动手，视觉上就是「世界被拉宽、静止、然后恢复」
+        startWork(Work.CHECKPOINT);
+        // 先让画面开始畸变；等淡入到满强度再动手，视觉上就是「世界被拉宽、静止、然后恢复」
         RewindTransition.start(RewindTransition.Effect.SATURATION);
     }
 
@@ -229,9 +240,8 @@ public final class CheckpointController {
         if (!ensureUsable(minecraft)) {
             return;
         }
-        Path world = minecraft.getSingleplayerServer().getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
-        SnapshotMeta meta = loadMeta(world, slot);
-        if (meta == null || !meta.isComplete()) {
+        Path world = RewindApi.worldRoot(minecraft.getSingleplayerServer());
+        if (!RewindApi.hasCheckpoint(world, slot)) {
             // 没有存档点不是「操作失败」，只是一个空动作：不动玩家当前的界面
             lastOutcome = Outcome.FAILED;
             lastMessage = describe("rewind.error.no_snapshot", String.valueOf(world));
@@ -244,81 +254,19 @@ public final class CheckpointController {
         lastMessage = "";
         lastRestoreInPlace = false;
         lastRestoreMillis = -1L;
-        inPlaceResult = null;
-        inPlaceDone = false;
-        inPlaceFailure = null;
-        inPlaceStarted = false;
-        phase = inPlaceEnabled ? Phase.ROLLING_BACK : Phase.CLOSING_WORLD;
-        phaseTicks = 0;
+        lastRestoreCopied = -1;
+        lastRestoreSkipped = -1;
+        lastRestoreFiles = -1;
+        if (inPlaceEnabled) {
+            startWork(Work.ROLLBACK);
+        } else {
+            startWork(Work.NONE);
+            phase = Phase.CLOSING_WORLD;
+        }
         // 回滚窗口在这一刻就打开：从淡入开始，任何世界落盘都是马上要被覆盖掉的
         Rewind.beginDiscard();
         // 先让画面开始高斯模糊；等淡入到满强度（世界在视觉上已经糊住）再真正回滚
         RewindTransition.start(RewindTransition.Effect.GAUSSIAN_BLUR);
-    }
-
-    /**
-     * 原地回滚：把整段活交给服务端线程，客户端这边只轮询标记。
-     *
-     * <p>世界始终是活着的——不关服、不重登客户端，所以过渡期间也不需要任何逻辑屏来维持
-     * 「没有界面就一定有玩家」那条不变量（玩家一直没离开过）。
-     */
-    private static void startInPlaceRollback(Minecraft minecraft) {
-        IntegratedServer server = minecraft.getSingleplayerServer();
-        if (server == null || minecraft.level == null) {
-            inPlaceFailure = new IllegalStateException("integrated server is gone");
-            inPlaceDone = true;
-            return;
-        }
-        worldRoot = server.getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
-        levelId = String.valueOf(worldRoot.getFileName());
-        restoreStartedNanos = System.nanoTime();
-        Rewind.LOGGER.info("Rewind: in-place rollback starting on {} for slot {}", levelId, slot);
-        server.execute(() -> {
-            try {
-                inPlaceResult = InPlaceRollback.run(server, worldRoot, slot);
-                Rewind.LOGGER.info("Rewind: in-place rollback done: {}", inPlaceResult.summary());
-            } catch (Throwable t) {
-                inPlaceFailure = t;
-                Rewind.LOGGER.error("Rewind: in-place rollback threw", t);
-            } finally {
-                inPlaceDone = true;
-            }
-        });
-    }
-
-    private static void startRestore(Minecraft minecraft) {
-        if (minecraft.level == null || !minecraft.hasSingleplayerServer()) {
-            fail(minecraft, "rewind.error.no_world", "");
-            return;
-        }
-        lastOutcome = Outcome.NONE;
-        lastMessage = "";
-        phase = Phase.CLOSING_WORLD;
-        phaseTicks = 0;
-
-        IntegratedServer server = minecraft.getSingleplayerServer();
-        worldRoot = server.getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
-        levelId = String.valueOf(worldRoot.getFileName());
-        restoreStartedNanos = System.nanoTime();
-        captureReusableResources(server);
-
-        Rewind.LOGGER.info("Rewind: closing world {} to restore slot {}", levelId, slot);
-        // 挂一个什么都不画的逻辑屏：接下来的重载期间客户端会短暂没有 ClientLevel，
-        // 而原版假设「没有界面就一定有玩家」，这里用它维持那条不变量（画面交给后处理）。
-        minecraft.setScreen(new RewindBlankScreen());
-        // 从这里到快照写回结束，磁盘上的世界状态都会被覆盖：置位标记让 Mixin 跳过这段期间的落盘
-        Rewind.beginDiscard();
-        minecraft.level.disconnect();
-        // 阻塞直到集成服务器线程结束：MinecraftServer.stopServer → ServerLevel.close → RegionFile.close，
-        // 之后 session.lock 与所有 .mca 句柄都已释放，可以安全覆盖文件。
-        // 传进去的屏会被 RewindScreens 取消掉（过渡期间不开任何界面），这里只是需要一个非 null 参数。
-        minecraft.disconnect(new GenericMessageScreen(SAVING_SCREEN));
-
-        if (minecraft.level != null) {
-            fail(minecraft, "rewind.error.close_failed", "");
-            return;
-        }
-        beginRewrite(minecraft);
     }
 
     // ------------------------------------------------------------------ tick
@@ -330,104 +278,31 @@ public final class CheckpointController {
         phaseTicks++;
 
         switch (phase) {
-            case PAUSING: {
-                IntegratedServer server = minecraft.getSingleplayerServer();
-                if (server == null || minecraft.level == null) {
-                    fail(minecraft, "rewind.error.server_gone", "");
-                    return;
-                }
-                // 等广角过渡淡入到位再动手：画面上就是「世界被拉宽之后静止住」
+            case WORKING: {
+                // 等过渡淡入到位再动手，这样真正危险的动作玩家看不到
                 if (!RewindTransition.isFadeInDone()) {
                     if (phaseTicks > TIMEOUT_PAUSE_TICKS) {
                         fail(minecraft, "rewind.error.pause_timeout", "");
                     }
                     return;
                 }
-                beginFlush(server);
-                return;
-            }
-            case FLUSHING: {
-                if (flushFuture == null) {
-                    fail(minecraft, "rewind.error.flush_failed", "no future");
+                if (!workStarted) {
+                    submitWork(minecraft);
                     return;
                 }
-                if (!flushFuture.isDone()) {
-                    if (phaseTicks > TIMEOUT_FLUSH_TICKS) {
-                        fail(minecraft, "rewind.error.flush_timeout", "");
+                if (!workDone) {
+                    // 服务端线程还在干活。这里只能等：它正在改世界，任何并发的关世界/重开都会撞上它。
+                    // 视觉上的兜底由 RewindTransition 自己的超时守卫负责。
+                    if (phaseTicks % WORK_WARN_INTERVAL_TICKS == 0) {
+                        Rewind.LOGGER.warn("Rewind: {} is taking unusually long ({} ticks)", work, phaseTicks);
                     }
                     return;
                 }
-                try {
-                    flushFuture.join();
-                } catch (CompletionException e) {
-                    fail(minecraft, "rewind.error.flush_failed", String.valueOf(e.getCause()));
+                if (work == Work.CHECKPOINT) {
+                    finishCheckpoint(minecraft);
                     return;
                 }
-                beginSnapshotCopy();
-                return;
-            }
-            case SNAPSHOTTING: {
-                if (!workerFinished) {
-                    if (phaseTicks > TIMEOUT_SNAPSHOT_TICKS) {
-                        fail(minecraft, "rewind.error.copy_timeout", "");
-                    }
-                    return;
-                }
-                if (workerFailure != null) {
-                    fail(minecraft, "rewind.error.copy_failed", workerFailure.toString());
-                    return;
-                }
-                SnapshotMeta meta = flushed == null ? null : flushed.meta;
-                String summary = workerSummary;
-                releaseServer();
-                // 快照写完了：放开服务端线程，同时让广角效果淡出
-                RewindTransition.finish();
-                phase = Phase.IDLE;
-                succeed(minecraft, "rewind.msg.snapshot_done",
-                        summary + (meta == null ? "" : " | " + describeGameTime(meta.gameTime)));
-                return;
-            }
-            case ROLLING_BACK: {
-                // 等模糊淡入到位（画面已经糊住）再动手，回滚过程玩家看不到
-                if (!RewindTransition.isFadeInDone()) {
-                    if (phaseTicks > TIMEOUT_PAUSE_TICKS) {
-                        fail(minecraft, "rewind.error.pause_timeout", "");
-                    }
-                    return;
-                }
-                if (!inPlaceStarted) {
-                    // 还没启动：在服务端线程上跑整段原地回滚，客户端这边继续出帧
-                    inPlaceStarted = true;
-                    startInPlaceRollback(minecraft);
-                    return;
-                }
-                if (!inPlaceDone) {
-                    // 服务端线程还在回滚里。这里只能等：它正在改世界，任何并发的关世界/重开都会撞上它。
-                    // 视觉上的兜底由 RewindTransition 自己的超时守卫负责，模糊不会一直挂着。
-                    if (phaseTicks % IN_PLACE_WARN_INTERVAL_TICKS == 0) {
-                        Rewind.LOGGER.warn("Rewind: in-place rollback is taking unusually long ({} ticks)", phaseTicks);
-                    }
-                    return;
-                }
-                if (inPlaceFailure != null) {
-                    // 原地回滚没做成：退回「关世界 → 覆盖 → 重开」那条已知能成的路
-                    Rewind.LOGGER.warn("Rewind: in-place rollback failed, falling back to close-and-reopen",
-                            inPlaceFailure);
-                    inPlaceFailure = null;
-                    inPlaceResult = null;
-                    phase = Phase.CLOSING_WORLD;
-                    phaseTicks = 0;
-                    return;
-                }
-                lastRestoreInPlace = true;
-                if (inPlaceResult != null) {
-                    lastRestoreCopied = inPlaceResult.mirrorCopied;
-                    lastRestoreSkipped = inPlaceResult.mirrorSkipped;
-                    lastRestoreFiles = inPlaceResult.mirrorFiles;
-                }
-                phase = Phase.REVEALING;
-                phaseTicks = 0;
-                succeed(minecraft, "rewind.msg.restored", inPlaceResult == null ? "" : inPlaceResult.summary());
+                finishRollback(minecraft);
                 return;
             }
             case CLOSING_WORLD: {
@@ -480,94 +355,139 @@ public final class CheckpointController {
         }
     }
 
-    // ------------------------------------------------------------------ 各阶段实现
+    // ------------------------------------------------------------------ 服务端线程上的活
 
-    private static void beginFlush(IntegratedServer server) {
-        phase = Phase.FLUSHING;
+    private static void startWork(Work kind) {
+        work = kind;
+        workStarted = false;
+        workDone = false;
+        workResult = null;
+        workFailure = null;
+        phase = Phase.WORKING;
         phaseTicks = 0;
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        flushFuture = future;
-        CountDownLatch release = new CountDownLatch(1);
-        releaseServerLatch = release;
+    }
+
+    /**
+     * 把活提交给服务端线程。客户端这边继续出帧（过渡还盖着），只轮询 {@code workDone}。
+     *
+     * <p>没界面就没法靠「暂停世界」保证拷贝期间没人写盘；让服务端线程忙在落盘和拷贝上等价于把它冻结，
+     * 这也是 {@link RewindApi} 那两个同步入口要求「必须在服务端线程上调用」的原因。
+     */
+    private static void submitWork(Minecraft minecraft) {
+        workStarted = true;
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null || minecraft.level == null) {
+            workFailure = new IllegalStateException("integrated server is gone");
+            workDone = true;
+            return;
+        }
+        worldRoot = RewindApi.worldRoot(server);
+        levelId = String.valueOf(worldRoot.getFileName());
+        String source = requestSource;
+        Rewind.LOGGER.info("Rewind: {} starting on {} for slot {}", work, levelId, slot);
         server.execute(() -> {
             try {
-                flushed = WorldFlush.flush(server, slot, requestSource);
-                future.complete(null);
-                // 落盘完成：把服务端线程摁在这里，直到快照写完再放行。
-                // 没有界面就没法靠「暂停世界」保证一致性，冻结线程是等价手段。
-                if (!release.await(SERVER_FREEZE_SECONDS, TimeUnit.SECONDS)) {
-                    Rewind.LOGGER.warn("Rewind: server freeze timed out, resuming the world");
-                }
+                workResult = work == Work.CHECKPOINT
+                        ? RewindApi.createCheckpoint(server, slot, source)
+                        : RewindApi.rollbackInPlace(server, slot);
             } catch (Throwable t) {
-                Rewind.LOGGER.error("Rewind: flush failed", t);
-                future.completeExceptionally(t);
+                workFailure = t;
+                Rewind.LOGGER.error("Rewind: {} threw", work, t);
+            } finally {
+                workDone = true;
             }
         });
     }
 
-    private static void beginSnapshotCopy() {
-        phase = Phase.SNAPSHOTTING;
-        phaseTicks = 0;
-
-        if (flushed == null) {
-            fail(Minecraft.getInstance(), "rewind.error.copy_failed", "flush result missing");
+    private static void finishCheckpoint(Minecraft minecraft) {
+        if (workFailure != null) {
+            fail(minecraft, "rewind.error.copy_failed", workFailure.toString());
             return;
         }
-        final Path world = flushed.worldRoot;
-        final SnapshotMeta base = flushed.meta.copy();
-        startWorker("rewind-snapshot", () -> {
-            Path snapshotRoot = SnapshotLayout.snapshotRoot(world);
-            Files.createDirectories(snapshotRoot);
-            Path indexFile = SnapshotLayout.indexFile(world);
-            Path manifestFile = SnapshotLayout.manifestFile(world, slot);
-
-            SnapshotMeta incomplete = base.copy();
-            incomplete.status = SnapshotLayout.STATUS_INCOMPLETE;
-            SnapshotIndex index = SnapshotIndex.load(indexFile);
-            index.put(incomplete, slot);
-            index.save(indexFile);
-
-            SnapshotManifest previous = SnapshotManifest.load(manifestFile);
-            long copyStartedNanos = System.nanoTime();
-            SnapshotMirror.Result result = SnapshotMirror.mirror(
-                    world, SnapshotLayout.slotDir(world, slot), SnapshotMirror.Direction.TO_SNAPSHOT, previous, null);
-            result.manifest.save(manifestFile);
-
-            SnapshotMeta complete = base.copy();
-            complete.status = SnapshotLayout.STATUS_COMPLETE;
-            complete.fileCount = result.files.size();
-            complete.totalBytes = result.totalBytes;
-            index = SnapshotIndex.load(indexFile);
-            index.put(complete, slot);
-            index.save(indexFile);
-
-            workerSummary = result.summary();
-            Rewind.LOGGER.info("Rewind: snapshot {} written ({}) in {} ms", slot, result.summary(),
-                    millisSince(copyStartedNanos));
-        });
+        if (workResult == null || !workResult.success) {
+            fail(minecraft, "rewind.error.copy_failed", workResult == null ? "no result" : String.valueOf(workResult.failure));
+            return;
+        }
+        // 存档点写完了：让广角效果淡出
+        RewindTransition.finish();
+        phase = Phase.IDLE;
+        RewindResult result = workResult;
+        succeed("rewind.msg.snapshot_done",
+                result.summary + (result.meta == null ? "" : " | " + describeGameTime(result.meta.gameTime)));
     }
 
-    private static void beginRewrite(Minecraft minecraft) {
+    private static void finishRollback(Minecraft minecraft) {
+        if (workFailure != null || workResult == null || !workResult.success) {
+            // 原地回滚没做成：退回「关世界 → 覆盖 → 重开」那条已知能成的路
+            Rewind.LOGGER.warn("Rewind: in-place rollback failed, falling back to close-and-reopen",
+                    workFailure != null ? workFailure : workResult == null ? null : workResult.failure);
+            workResult = null;
+            workFailure = null;
+            startWork(Work.NONE);
+            phase = Phase.CLOSING_WORLD;
+            return;
+        }
+        lastRestoreInPlace = true;
+        lastRestoreMillis = workResult.millis;
+        lastRestoreCopied = workResult.copiedFiles;
+        lastRestoreSkipped = workResult.skippedFiles;
+        lastRestoreFiles = workResult.totalFiles;
+        phase = Phase.REVEALING;
+        phaseTicks = 0;
+        succeed("rewind.msg.restored", workResult.summary);
+    }
+
+    // ------------------------------------------------------------------ 回退路径：关世界 → 覆盖 → 重开
+
+    private static void startRestore(Minecraft minecraft) {
+        if (minecraft.level == null || !minecraft.hasSingleplayerServer()) {
+            fail(minecraft, "rewind.error.no_world", "");
+            return;
+        }
+        lastOutcome = Outcome.NONE;
+        lastMessage = "";
+        phase = Phase.CLOSING_WORLD;
+        phaseTicks = 0;
+
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        worldRoot = RewindApi.worldRoot(server);
+        levelId = String.valueOf(worldRoot.getFileName());
+        restoreStartedNanos = System.nanoTime();
+        captureReusableResources(server);
+
+        Rewind.LOGGER.info("Rewind: closing world {} to restore slot {}", levelId, slot);
+        // 挂一个什么都不画的逻辑屏：接下来的重载期间客户端会短暂没有 ClientLevel，
+        // 而原版假设「没有界面就一定有玩家」，这里用它维持那条不变量（画面交给后处理）。
+        minecraft.setScreen(new RewindBlankScreen());
+        // 从这里到快照写回结束，磁盘上的世界状态都会被覆盖：置位标记让 Mixin 跳过这段期间的落盘
+        Rewind.beginDiscard();
+        minecraft.level.disconnect();
+        // 阻塞直到集成服务器线程结束：MinecraftServer.stopServer → ServerLevel.close → RegionFile.close，
+        // 之后 session.lock 与所有 .mca 句柄都已释放，可以安全覆盖文件。
+        // 传进去的屏会被 RewindScreens 取消掉（过渡期间不开任何界面），这里只是需要一个非 null 参数。
+        minecraft.disconnect(new GenericMessageScreen(SAVING_SCREEN));
+
+        if (minecraft.level != null) {
+            fail(minecraft, "rewind.error.close_failed", "");
+            return;
+        }
+        beginRewrite();
+    }
+
+    private static void beginRewrite() {
         phase = Phase.REWRITING;
         phaseTicks = 0;
         final Path world = worldRoot;
-        final Path snapshotDir = SnapshotLayout.slotDir(world, slot);
         startWorker("rewind-restore", () -> {
             try {
-                if (!Files.isDirectory(snapshotDir)) {
-                    throw new IOException("snapshot directory missing: " + snapshotDir);
+                RewindResult result = RewindApi.restoreFiles(world, slot);
+                workerSummary = result.summary;
+                lastRestoreCopied = result.copiedFiles;
+                lastRestoreSkipped = result.skippedFiles;
+                lastRestoreFiles = result.totalFiles;
+                if (!result.success) {
+                    throw new IOException(String.valueOf(result.failure));
                 }
-                // 用建点时记录的清单判断活动存档里哪些文件还是原样：没动过的不必回拷
-                SnapshotManifest reference = SnapshotManifest.load(SnapshotLayout.manifestFile(world, slot));
-                long copyStartedNanos = System.nanoTime();
-                SnapshotMirror.Result result = SnapshotMirror.mirror(
-                        snapshotDir, world, SnapshotMirror.Direction.TO_WORLD, reference, null);
-                workerSummary = result.summary() + " copyMs=" + millisSince(copyStartedNanos);
-                lastRestoreCopied = result.copied;
-                lastRestoreSkipped = result.skipped;
-                lastRestoreFiles = result.files.size();
-                Rewind.LOGGER.info("Rewind: restored slot {} into {} ({}) in {} ms", slot, world, result.summary(),
-                        millisSince(copyStartedNanos));
             } finally {
                 // 回滚窗口到此结束：接下来（重新开世界）的落盘都是正常保存，不能再跳过
                 Rewind.endDiscard();
@@ -584,9 +504,7 @@ public final class CheckpointController {
         if (fastRestartEnabled && tryFastRestart(minecraft, levelId)) {
             Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (fast restart)",
                     millisSince(reopenStartedNanos));
-            phase = Phase.REVEALING;
-            phaseTicks = 0;
-            succeed(minecraft, "rewind.msg.restored", workerSummary);
+            finishReopen(minecraft);
             return;
         }
 
@@ -604,9 +522,16 @@ public final class CheckpointController {
         // openWorld 返回时 ClientLevel 可能还没建好——客户端要等后续 tick 处理完登录包才会 setLevel，
         // 所以这里不能拿 level 判成败（真正失败会走上面传入的 onFail 回调）。
         Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (vanilla path)", millisSince(reopenStartedNanos));
+        finishReopen(minecraft);
+    }
+
+    private static void finishReopen(Minecraft minecraft) {
+        lastRestoreInPlace = false;
+        lastRestoreMillis = restoreStartedNanos == 0L ? -1L : millisSince(restoreStartedNanos);
+        restoreStartedNanos = 0L;
         phase = Phase.REVEALING;
         phaseTicks = 0;
-        succeed(minecraft, "rewind.msg.restored", workerSummary);
+        succeed("rewind.msg.restored", workerSummary);
     }
 
     /** 关世界之前把可以复用的注册表 / 数据包资源抓下来（{@code Minecraft.disconnect} 之后 server 引用就没了）。 */
@@ -730,26 +655,10 @@ public final class CheckpointController {
         }
     }
 
-    private static SnapshotMeta loadMeta(Path world, String slot) {
-        try {
-            return SnapshotIndex.load(SnapshotLayout.indexFile(world)).get(slot);
-        } catch (IOException e) {
-            Rewind.LOGGER.error("Rewind: failed to read snapshot index", e);
-            return null;
-        }
-    }
-
-    private static void succeed(Minecraft minecraft, String messageKey, String detailText) {
+    private static void succeed(String messageKey, String detailText) {
         lastOutcome = Outcome.SUCCESS;
         lastMessage = describe(messageKey, detailText);
         Rewind.LOGGER.info("Rewind: {}", lastMessage);
-        if (restoreStartedNanos != 0L) {
-            // 从「过渡淡入完成、真正开始动世界」算起，不含前面的淡入时间；两条路径都是同一个起点，
-            // 所以 A/B 对比是同一把尺子
-            lastRestoreMillis = millisSince(restoreStartedNanos);
-            Rewind.LOGGER.info("Rewind: rewind body finished in {} ms", lastRestoreMillis);
-            restoreStartedNanos = 0L;
-        }
     }
 
     private static void fail(Minecraft minecraft, String messageKey, String detailText) {
@@ -759,9 +668,11 @@ public final class CheckpointController {
         // 任何失败都意味着回滚窗口结束了：标记必须清掉，否则后续正常游玩的世界保存会被跳过
         Rewind.endDiscard();
         restoreStartedNanos = 0L;
-        // 出错时不留过渡效果，也不留被冻结的服务端线程；该出现的提示屏也放行（不再拦截）
+        // 出错时不留过渡效果，也不留没跑完的活；该出现的提示屏也放行（不再拦截）
         RewindTransition.abort();
-        releaseServer();
+        work = Work.NONE;
+        workStarted = false;
+        workDone = true;
         if (minecraft.level != null) {
             minecraft.setScreen(null);
         } else {
@@ -769,15 +680,6 @@ public final class CheckpointController {
             minecraft.setScreen(new TitleScreen());
         }
         phase = Phase.IDLE;
-    }
-
-    /** 放行被冻结的服务端线程（幂等）。 */
-    private static void releaseServer() {
-        CountDownLatch latch = releaseServerLatch;
-        if (latch != null) {
-            releaseServerLatch = null;
-            latch.countDown();
-        }
     }
 
     /** 结果文案只用于日志与 {@code /rewind status}，不再往聊天框里发任何东西。 */
