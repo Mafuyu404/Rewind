@@ -7,7 +7,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -41,9 +40,14 @@ import org.lwjgl.glfw.GLFW;
  * {@code addEventListener} 接交互、{@code classList} 开关弹窗。模板里那些静态卡片只是「没接上数据
  * 时的样子」，每次渲染都会被整体替换。
  *
- * <p>读取 / 覆盖不在这里执行：它们转交 {@link RewindApi#requestRollback}/{@link RewindApi#requestCheckpoint}，
- * 也就是 F7 / F8 那条带过渡的管线。过渡是整帧后处理，界面开着会挡在效果上面，所以
- * {@code CheckpointController} 动手前会先把本界面摘掉——玩家看到的是「点一下 → 界面收起 → 世界糊住 → 换回来」。
+ * <p><b>读取</b>转交 {@link RewindApi#requestRollback}，也就是 F8 那条带过渡的管线。过渡是整帧后处理，
+ * 界面开着会挡在效果上面，所以 {@code CheckpointController} 动手前会先把本界面摘掉——玩家看到的是
+ * 「点一下 → 界面收起 → 世界糊住 → 换回来」。
+ *
+ * <p><b>覆盖不走那条路</b>：它要界面一直开着，所以 {@link #startBackgroundSave} 直接把
+ * {@link RewindApi#createCheckpoint} 丢到服务端线程上跑（一致性保证和 F7 一样：那段时间服务端线程
+ * 被占着，世界不 tick），做完由 {@link #tick()} 把结果收回来刷新界面——不放过渡、不动界面。
+ * 封面照样抓，而且抓帧那一帧会把界面和 HUD 临时摘掉，所以封面里没有界面。
  *
  * <p>只有重命名和删除是就地完成的（纯文件操作，走 {@link RewindApi#renameCheckpoint} /
  * {@link RewindApi#deleteCheckpoint}），做完直接重画当前页。
@@ -61,10 +65,6 @@ public final class RewindTreeScreen extends ApricityScreen {
             "#1d3f5c", "#8f2410",
             "#5b2a63", "#141c26", "#0c4f68", "#2b1b3f", "#d99b5c", "#6b2f8f", "#3f4a24", "#55324a"
     };
-    /** 提示条停留的 tick 数（50 tick ≈ 2.5 秒，和模板里 CSS 的节奏一致）。 */
-    private static final int TOAST_TICKS = 50;
-    private static final int MAX_TOASTS = 4;
-    /** 主背包的栏位数（原版 36 格，9 × 4）。 */
     /** 快捷栏格数（原版物品栏的前 9 格）。折叠状态下只显示这一行。 */
     private static final int HOTBAR_SLOTS = 9;
     /** 主背包的格数（9 × 4，含快捷栏）。 */
@@ -96,19 +96,6 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
     }
 
-    /** 一条提示条：元素 + 还剩多少 tick 撤掉。 */
-    private static final class Toast {
-        private final Element element;
-        private int ticksLeft;
-
-        Toast(Element element) {
-            this.element = element;
-            this.ticksLeft = TOAST_TICKS;
-        }
-    }
-
-    private final List<Toast> toasts = new ArrayList<>();
-
     private String selectedSlot = RewindApi.DEFAULT_SLOT;
     private String filter = "";
     /** 列表排序方式。默认按槽位序号，槽位卡片的顺序默认就是固定的 1..8。 */
@@ -124,6 +111,12 @@ public final class RewindTreeScreen extends ApricityScreen {
     private String savingSlot;
     /** 服务端线程回填的写盘结果。 */
     private volatile RewindResult savingResult;
+    /** 刚写完、还在等封面文件落地的槽位（封面比索引晚几十毫秒，见 {@link #flushWaitingCover}）。 */
+    private String waitingCoverSlot;
+    private long waitingCoverMillis;
+    private int waitingCoverTicks;
+    /** 等封面的上限（封面是抓帧之后异步落盘的，正常 2-6 tick 就好）。 */
+    private static final int COVER_WAIT_TICKS = 20;
 
     public RewindTreeScreen() {
         super(TEMPLATE);
@@ -170,8 +163,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     }
 
     private void bind(Document document) {
-        // 文档是重建出来的，旧文档上的提示条元素已经没意义了
-        toasts.clear();
+        waitingCoverSlot = null;
         document.addEventListener("click", this::onClick);
 
         Element search = document.querySelector("#search");
@@ -207,16 +199,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     public void tick() {
         super.tick();
         flushFinishedSave();
-        if (toasts.isEmpty()) {
-            return;
-        }
-        for (Iterator<Toast> iterator = toasts.iterator(); iterator.hasNext(); ) {
-            Toast toast = iterator.next();
-            if (--toast.ticksLeft <= 0) {
-                toast.element.remove();
-                iterator.remove();
-            }
-        }
+        flushWaitingCover();
     }
 
     /** 后台写盘做完了就收尾：给一条提示条，然后刷新界面（卡片上的时间、大小都会变）。 */
@@ -233,11 +216,42 @@ public final class RewindTreeScreen extends ApricityScreen {
             return;
         }
         if (result.success) {
-            toast(document, "rewind.ui.toast.saved", title(slot, RewindApi.describe(worldRoot(), slot)));
+            log("rewind.ui.log.saved", title(slot, RewindApi.describe(worldRoot(), slot)));
         } else {
-            toast(document, "rewind.ui.toast.save_failed", String.valueOf(result.failure));
+            log("rewind.ui.log.save_failed", String.valueOf(result.failure));
         }
         render(document);
+        if (result.success && result.meta != null) {
+            // 封面是抓帧之后异步落盘的，比索引晚几十毫秒：这一刻卡片会先退回纯色块，
+            // 等文件出现再重画一次（没有这一步，覆盖完之后卡片要等玩家重开页面才有图）。
+            waitingCoverSlot = slot;
+            waitingCoverMillis = result.meta.savedAtMillis;
+            waitingCoverTicks = COVER_WAIT_TICKS;
+        }
+    }
+
+    /** 等封面文件落地，然后重画一次卡片。 */
+    private void flushWaitingCover() {
+        String slot = waitingCoverSlot;
+        if (slot == null) {
+            return;
+        }
+        Document document = getLinkedDocument();
+        String world = worldDirName();
+        if (document == null || world == null) {
+            waitingCoverSlot = null;
+            return;
+        }
+        if (CoverCapture.hasCover(world, slot, waitingCoverMillis)) {
+            waitingCoverSlot = null;
+            Rewind.LOGGER.info("Rewind: cover for {} landed, repainting the tree", slot);
+            render(document);
+            return;
+        }
+        if (--waitingCoverTicks <= 0) {
+            waitingCoverSlot = null;
+            Rewind.LOGGER.warn("Rewind: cover for {} never showed up; the card keeps the plain colour", slot);
+        }
     }
 
     // ------------------------------------------------------------------ 交互
@@ -315,10 +329,10 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
         SnapshotMeta meta = RewindApi.describe(worldRoot(), slot);
         if (meta == null || !meta.isComplete()) {
-            toast(document, "rewind.ui.toast.no_snapshot");
+            log("rewind.ui.log.no_snapshot");
             return;
         }
-        toast(document, "rewind.ui.toast.loading", title(slot, meta));
+        log("rewind.ui.log.loading", title(slot, meta));
         RewindApi.requestRollback(slot, "ui");
     }
 
@@ -360,7 +374,7 @@ public final class RewindTreeScreen extends ApricityScreen {
                 if (worldDir != null) {
                     CoverCapture.deleteCovers(worldDir, slot);
                 }
-                toast(document, "rewind.ui.toast.deleted", name);
+                log("rewind.ui.log.deleted", name);
             }
             render(document);
             return;
@@ -377,16 +391,19 @@ public final class RewindTreeScreen extends ApricityScreen {
      * {@link RewindApi#createCheckpoint}，仍然跑在服务端线程上，所以一致性保证不变。
      * 写盘期间 {@link #isPauseScreen()} 会放行世界（否则服务端线程永远轮不到这个任务），
      * 做完由 {@link #tick()} 把结果收回来、刷新界面。
+     *
+     * <p>封面照抓：{@code CoverCapture} 会在抓帧那一帧把本界面和 HUD 临时摘掉，
+     * 所以「界面一直开着」和「封面里没有界面」这两件事不冲突。
      */
     private void startBackgroundSave(Document document, String slot) {
         IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
         if (server == null) {
-            toast(document, "rewind.ui.toast.no_world");
+            log("rewind.ui.log.no_world");
             return;
         }
         savingSlot = slot;
         savingResult = null;
-        toast(document, "rewind.ui.toast.saving", title(slot, RewindApi.describe(worldRoot(), slot)));
+        log("rewind.ui.log.saving", title(slot, RewindApi.describe(worldRoot(), slot)));
         server.execute(() -> savingResult = RewindApi.createCheckpoint(server, slot, "ui"));
     }
 
@@ -446,7 +463,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     private void toggleAutoCheckpoint(Document document) {
         boolean enabled = !RewindServerConfig.autoCheckpointEnabled();
         RewindServerConfig.setAutoCheckpointEnabled(enabled);
-        toast(document, enabled ? "rewind.ui.toast.auto_on" : "rewind.ui.toast.auto_off");
+        log(enabled ? "rewind.ui.log.auto_on" : "rewind.ui.log.auto_off");
         // 弹窗里那一行（开关状态 + 按钮配色）要跟着变，重开一次最省事
         openSettings(document, SnapshotLayout.SLOT_AUTO);
     }
@@ -457,7 +474,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
         SnapshotMeta meta = RewindApi.describe(worldRoot(), slot);
         if (meta == null) {
-            toast(document, "rewind.ui.toast.no_snapshot");
+            log("rewind.ui.log.no_snapshot");
             return;
         }
         renamingSlot = slot;
@@ -482,11 +499,11 @@ public final class RewindTreeScreen extends ApricityScreen {
             return;
         }
         if (!SnapshotLayout.isValidDisplayName(name)) {
-            toast(document, "rewind.ui.toast.name_invalid");
+            log("rewind.ui.log.name_invalid");
             return;
         }
         if (RewindApi.renameCheckpoint(worldRoot(), slot, name)) {
-            toast(document, "rewind.ui.toast.renamed", name);
+            log("rewind.ui.log.renamed", name);
         }
         render(document);
     }
@@ -501,19 +518,19 @@ public final class RewindTreeScreen extends ApricityScreen {
         Minecraft minecraft = Minecraft.getInstance();
         if (savingSlot != null) {
             // 写盘期间世界是放行的：这时候再动索引（删除 / 改名）会和服务端线程上的写盘抢同一张索引
-            toast(document, "rewind.ui.toast.busy");
+            log("rewind.ui.log.busy");
             return false;
         }
         if (RewindApi.isBusy()) {
-            toast(document, "rewind.ui.toast.busy");
+            log("rewind.ui.log.busy");
             return false;
         }
         if (!minecraft.hasSingleplayerServer() || minecraft.level == null) {
-            toast(document, "rewind.ui.toast.no_world");
+            log("rewind.ui.log.no_world");
             return false;
         }
         if (minecraft.getSingleplayerServer().isPublished()) {
-            toast(document, "rewind.ui.toast.lan");
+            log("rewind.ui.log.lan");
             return false;
         }
         return true;
@@ -532,20 +549,13 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
     }
 
-    private void toast(Document document, String messageKey, Object... args) {
-        Element area = document.querySelector("#toastArea");
-        if (area == null) {
-            return;
-        }
-        Element element = document.createElement("div");
-        // 模板里的 .toast-2 靠 .show 从透明渐变到不透明；直接带上，免得过渡没生效时看不见
-        element.setClassName("toast-2 show");
-        element.setTextContent(tr(messageKey, args));
-        area.appendChild(element);
-        while (area.children.size() > MAX_TOASTS) {
-            area.children.get(0).remove();
-        }
-        toasts.add(new Toast(element));
+    /**
+     * 界面上的反馈**只写日志，不往页面上放任何提示**——和模组别处一致（F7/F8 也是只写日志）。
+     *
+     * <p>文案仍然走 lang（{@code rewind.ui.log.*}），所以日志里看到的是玩家语言。
+     */
+    private static void log(String messageKey, Object... args) {
+        Rewind.LOGGER.info("Rewind: {}", tr(messageKey, args));
     }
 
     // ------------------------------------------------------------------ 渲染

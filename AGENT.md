@@ -92,7 +92,7 @@ client    CheckpointController            客户端策略：过渡、界面、�
 ```
 
 - **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
-- **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位，时间树界面上的「读取 / 覆盖」走的就是它们。
+- **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位；时间树界面上的「读取」走的就是它们（「覆盖」不走——它要界面一直开着，见「时间树」一节）。
 - **查询**：`worldRoot(server)` / `hasCheckpoint(worldRoot, slot)` / `describe(...)` / `describeAll(worldRoot)`（一次读完整张索引，界面渲染整页槽位用它）/ `listCheckpoints(worldRoot)` / `readInventory(worldRoot, slot)` / `slots()`（界面固定展示的槽位顺序），只读存档目录。命令层的 `/rewind status` 读的就是它们。
 - **槽位管理**（纯文件操作，任意线程可调，但不要和存档点操作并发——两边都写同一张索引）：`deleteCheckpoint(worldRoot, slot)` 删掉槽位目录 / 清单 / 背包快照 / 索引条目（先摘索引条目再删文件，中途崩了留下的是没人引用的目录）；`renameCheckpoint(worldRoot, slot, displayName)` 只改索引里的显示名，槽位 id 与目录都不动，所以改名不会触发重拷，而且覆盖这个槽位时会保留（`CheckpointWriter.create` 从旧索引里抄回来）。
 - **槽位清单**：`SnapshotLayout.uiSlots()` = `auto`、`quick`，然后是 8 个手动槽位 `s1`..`s8`。`quick` 就是 F7/F8 用的 `DEFAULT_SLOT`；`auto` 是「跟着原版自动保存建点」用的槽位（见「自动存档点」一节），也可以手动覆盖。槽位名会当目录名用，所以 `isValidSlotName` 限定 `[A-Za-z0-9_-]`；玩家起的名字由 `isValidDisplayName` 限定 1-20 字符。
@@ -146,7 +146,9 @@ F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（�
 - **「没有存档点」不是失败路径**：F8 在没建过存档点时只写一条日志，不动玩家当前的界面（原来会走 `fail()` 把界面关掉）。
 
 - **所有过渡参数都在客户端配置里**：`RewindClientConfig`（`run/config/rewind-client.toml`，`ModConfig.Type.CLIENT`）管着淡入时长、存档/读档各自的淡出时长、饱和度倍数、模糊半径、读档的 settle tick。默认值与改造前写死的常量一致。值只在配置加载/重载时抄进 static 字段（后处理每帧都读，不能每帧查表），配置没加载成功时保持默认值。**加新的过渡可调项就往这里加**，别在 `RewindTransition` / 渲染器里再写死常量；着色器里的浓度/半径是 uniform（`SaturationBoost` / `BlurRadius`），由渲染器每帧从配置灌进去。
-- **过渡包络**：`RewindTransition` 用真实时间推进 0 → 1 → 0（存档 = 饱和度提高，读档 = 高斯模糊）。`isFadeInDone()` 用来卡「等效果满强度之后再动手」，这样真正危险的动作玩家看不到。时长全部来自 `RewindClientConfig`；`HOLD_LIMIT_SECONDS`（25s）不是可调项，是「任何异常路径都不该让效果一直挂着」的兜底。另外读档「世界回来之后、开始淡出之前」那段等待是 `restoreSettleTicks`，和淡出时长是两笔账：读档完成后总共还糊多久 = `restoreSettleTicks / 20 + blurFadeOutSeconds`。
+- **过渡包络**：`RewindTransition` 用真实时间推进 0 → 1 → 0（存档 = 饱和度提高，读档 = 高斯模糊）。`isFadeInDone()` 用来卡「等效果满强度之后再动手」，这样真正危险的动作玩家看不到。时长全部来自 `RewindClientConfig`；`HOLD_LIMIT_SECONDS`（25s）不是可调项，是「任何异常路径都不该让效果一直挂着」的兜底。另外读档「世界回来之后、开始淡出之前」那段等待不再是一个固定 tick 数：判据是**客户端已加载的区块数连续两 tick 不再增长**（`CheckpointController.REVEALING`，常量 `REVEAL_STABLE_TICKS`），配置里的 `restoreSettleTicks` 退化成**上限**。原来固定等 10 tick（0.5 秒），而这段时间玩家其实已经能看见世界、手里的东西也回来了——多糊的每一 tick 都是白等；现在 in-place 回滚那条路只等 3-4 tick（0.15-0.2 秒），读档完成后总共还糊 ≈ 0.2-0.25 秒。日志里有一行 `Rewind: reveal settled after N ticks (chunks=..., stable=..., cap=...)` 可以核对。
+
+注意那个上限是从**进入 REVEALING 阶段**算起的（含世界还没回来的 tick）：关世界重开那条回退路径上，客户端拿到世界时 `phaseTicks` 往往已经超过上限，于是「世界一出现就收」——这和改动前一样（改动前那 10 tick 也是被这些空 tick 吃掉的），所以那条路的行为没变。
 - **两种效果都是后处理**：`RewindTransitionRenderer` 在 `RenderFrameEvent.Post` 把画面重画一遍，`EffectMode` uniform 选效果（`1` = 饱和度，其它 = 高斯模糊），强度从 `RewindTransition.strength()` 来。三个必须记住的点：那一刻这一帧**还没** blit 到屏幕，所以要画进**主渲染目标**而不是帧缓冲 0；必须「读副本、写主目标」，所以每帧先把当前帧拷进自己的 `TextureTarget`——世界被拆掉之后，这张副本同时就是唯一还能显示的遮罩内容；强度为 0 时着色器要逐位还原原画面（饱和度那条靠 `mix(vec3(luma), rgb, 1.0 + 0.0)`）。着色器在 `assets/rewind/shaders/core/rewind_transition.{json,vsh,fsh}`，**JSON 里的 `vertex`/`fragment` 必须带命名空间**（`rewind:rewind_transition`，否则会去 `minecraft:` 找）。存档的浓度由 fsh 里的 `SATURATION_BOOST` 定（当前 1.5 = 满强度 2.5 倍饱和度）；它是线性的 `mix(luma, rgb, 1 + boost)`，再往上调低亮度通道会先被 clamp 掉、开始出现色块，那时该换成保亮度/保色相的写法而不是继续加常数。
 - **存档不再动摄像机 FOV**：原来的广角是靠 `ViewportEvent.ComputeFov` 把 FOV 拉到 120°，已经整段删掉（连带 `RewindScreens.onComputeFov` / `FOV_MAX`）；现在改的是像素，玩家设置一概不动。
 - **世界还在时不挂屏**（F7）：改成在服务器线程上 `await` 一个 latch 冻结世界（落盘完成后摁住，快照写完放行，服务端侧 20s 超时兜底），等价于原来的「暂停世界」但不产生任何界面。
@@ -156,7 +158,9 @@ F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（�
 
 ### 时间树（存档槽位管理界面，neoforge-1.21.1）
 
-F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所有槽位：自动、快速两个特殊槽位 + 8 个手动槽位。手动槽位每张卡有读取 / 覆盖 / 重命名，**自动 / 快速这两个固定角色没有名字可改，第三个按钮是「设置」**；详情面板另有删除，还有搜索、排序、确认弹窗、设置弹窗、重命名弹窗和提示条。
+F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所有槽位：自动、快速两个特殊槽位 + 8 个手动槽位。手动槽位每张卡有读取 / 覆盖 / 重命名，**自动 / 快速这两个固定角色没有名字可改，第三个按钮是「设置」**；详情面板另有删除，还有搜索、排序、确认弹窗、设置弹窗、重命名弹窗。
+
+**界面上不放任何提示**：所有反馈（写完了 / 没存档点 / 局域网开着 / 名字不合法……）只写日志，文案走 `rewind.ui.log.*`——和模组别处一致（F7/F8 也是只写日志，不往聊天框发东西）。
 
 - **排序默认按槽位序号**（`SortMode.INDEX`，模板里 `#sort` 的第一个选项也标了 `selected`），所以卡片默认就是固定的 `s1..s8` 顺序；「最新」那个角标只是标出哪个槽位最新，不会把顺序挪走。详情面板里的字段是「保存时间 / 游玩时长 / 生物群系 / 坐标 / 文件大小」——「世界」和「状态」这两行只在设置弹窗里有。
 
@@ -167,11 +171,12 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 - **整页字体是微软雅黑**：原来的 `OreRegular` / `OreDisplay` 是远程 webfont，游戏里一直加载不到（AUI 日志里 `font family unavailable`），页面走的本来就是 fallback；现在把两个 `@font-face` 去掉、所有 `font-family` 改成 `"Microsoft YaHei","微软雅黑",...`。
 - **别用 `Document.refresh()` 当「刷新样式」**：它是从模板文件整页重新解析，会把动态加的节点全丢掉。`setInnerHTML` 插入的节点会走完整的 HTML 解析管线（自定义标签 `<item>` 因此能解析成 `Item` 元素）并自己排进样式重算队列，不需要手动刷新。
 - **尖括号要摘掉，不能用实体转义**：AUI 的 HTML 解析器不做实体解码（`&lt;` 会原样显示），所以动态文本（世界名、玩家起的槽位名、物品 SNBT）统一过 `RewindTreeScreen.text()` 去掉 `<` 与 `>`。
-- **读取会退出界面，覆盖不会**。「读取」转交 `RewindApi.requestRollback(slot, "ui")`，也就是 F8 那条带过渡的管线——过渡是整帧后处理，界面开着会挡在效果上面，所以 `CheckpointController` 动手前会先 `setScreen(null)`，玩家看到的是「点一下 → 界面收起 → 世界糊住 → 换回来」。「覆盖」走 `RewindTreeScreen.startBackgroundSave`：在服务端线程上跑 `RewindApi.createCheckpoint(slot, "ui")`，**不放过渡、不动界面**，做完由 `tick()` 把结果收回来刷界面（提示条 + 卡片上的时间/大小）。重命名和删除是就地做的（纯文件操作），做完直接重画。
+- **读取会退出界面，覆盖不会**。「读取」转交 `RewindApi.requestRollback(slot, "ui")`，也就是 F8 那条带过渡的管线——过渡是整帧后处理，界面开着会挡在效果上面，所以 `CheckpointController` 动手前会先 `setScreen(null)`，玩家看到的是「点一下 → 界面收起 → 世界糊住 → 换回来」。「覆盖」走 `RewindTreeScreen.startBackgroundSave`：在服务端线程上跑 `RewindApi.createCheckpoint(slot, "ui")`，**不放过渡、不动界面**，做完由 `tick()` 把结果收回来刷界面（只写日志 + 更新卡片上的时间/大小）。重命名和删除是就地做的（纯文件操作），做完直接重画。
   > 一致性保证不变：任务跑在服务端线程上，那段时间世界不 tick，等于把「拷贝期间没人写盘」这条要求换了个实现方式（F7 是关界面 + 过渡，这里是占住服务端线程）。
-- **界面里覆盖的那一版没有封面**：抓帧那一刻屏幕上就是界面本身，`CoverCapture` 会跳过（否则封面里会拍进时间树）。封面按建点时刻命名，所以那一版自然没有封面、卡片退回纯色块；F7 与自动建点仍然有封面。
+- **界面里覆盖那一版照样有封面，而且封面里没有界面**：抓帧那一帧 `CoverCapture` 会把当前界面（直接换 `Minecraft.screen` 字段，不走 `setScreen`，免得触发 `removed()/init()` 把 AUI 文档重建、把界面状态清掉）和 HUD 一起临时摘掉，抓完立刻还原——只影响这一帧，玩家看不见。所以「界面一直开着」和「封面里没有界面」不冲突。
+- **封面文件比索引晚几十毫秒落地，所以界面要等它再重画一次**（`RewindTreeScreen.flushWaitingCover`，最多等 `COVER_WAIT_TICKS` = 20 tick）：覆盖完成那一刻索引已经好了、封面还没写完，卡片只能先退回纯色块；没有这一步，玩家得重开页面才看得到图。自测里有一条断言盯着这个（封面落地后卡片上必须出现 `img.cover-shot`）。
 - **平时世界是暂停的，写盘期间放行**：`isPauseScreen()` 返回 `savingSlot == null`——管理界面开着时世界停住（不然站在危险的地方翻存档点会挨打），但后台写盘必须让服务端线程能跑，所以那几百毫秒放行。删除 / 改名仍然走客户端线程的文件操作（不占服务端线程），并且在写盘期间会被 `usable()` 挡掉：那会儿世界是活的，自动建点随时可能落盘，客户端线程再去改同一张索引就会打架。**别把它们改成 `server.execute(...)`**，没必要，也会让删除/改名变成异步的。
-- **卡片封面是建点时抓的截图**：`CheckpointWriter.create` 往 `CoverRequest` 里留一条待办（中立的小盒子，服务端线程写、客户端渲染线程取，两边不用互相引用），客户端 `CoverCapture` 在下一帧的 `RenderFrameEvent` 上兑现——那会儿服务端正忙在落盘和拷贝上、世界不 tick，所以抓到的就是存档点那一刻的画面。抓帧那一帧临时把 `options.hideGui` 置起来，封面里因此没有 HUD / 手持物；界面本身建点前就被摘掉了，万一抓帧时还有界面开着（比如自动建点时玩家开着背包），这一张直接放弃。抓帧注册在 `EventPriority.HIGHEST`，必须抢在过渡后处理之前读那一帧，否则封面会带上存档过渡的饱和度。
+- **卡片封面是建点时抓的截图**：`CheckpointWriter.create` 往 `CoverRequest` 里留一条待办（中立的小盒子，服务端线程写、客户端渲染线程取，两边不用互相引用），客户端 `CoverCapture` 在下一帧的 `RenderFrameEvent` 上兑现——那会儿服务端正忙在落盘和拷贝上、世界不 tick，所以抓到的就是存档点那一刻的画面。抓帧那一帧把 `options.hideGui` 和当前界面都临时摘掉，封面里因此既没有 HUD / 手持物、也没有界面。抓帧注册在 `EventPriority.HIGHEST`，必须抢在过渡后处理之前读那一帧，否则封面会带上存档过渡的饱和度。
 - **封面存在 `<gameDir>/apricity/rewind/covers/<存档目录名>/<槽位>-<毫秒>.png`**，页面用 `/rewind/covers/...`（AUI 的根相对路径，`/` 开头 = 相对 `apricity` 根）引用它。放这儿而不是存档目录里，是因为 AUI 只认资源包和 `<gameDir>/apricity/`，任意绝对路径解析不了。文件名带建点时刻（就是索引里的 `savedAtMillis`），是因为 **AUI 按路径缓存贴图、同一个路径换内容不会重读**——每建一次点就换一个名字，页面按索引里的时刻拼出当前那一个；写新的时把旧的一起删掉，删槽位时也删（封面不在存档目录里，`SnapshotStore` 带不上它，是界面上那条删除路径单独清的）。没有截图时退回纯色块（`COVER_COLORS`），封面框也不盖黑色渐变阴影（原来那个 `.cover-shade` 已经删掉）。
 - **封面用 `<img class="cover-shot">`**（`object-fit:cover`，比封面框大的部分由封面框的 `overflow:hidden` 裁掉）。**但 AUI 目前在屏幕文档里画不出图片**，所以卡片上看到的还是纯色块——见下面「已知问题」。页面这一侧的接线是好的：自测会断言 `<img>` 在、`src` 指向当前那一版封面、`ImageDrawer.isTextureReady` 返回 true。
 - **背包快照**：建点时 `WorldFlush` 把非空栏位抓成「栏位序号 → 原版 SNBT」（`ItemStack.saveOptional`），存到与槽位目录同级的 `<槽位>.inventory`（不参与镜像；`SnapshotInventory` 负责读写，一行一条、TAB 分隔）。详情面板把每格喂给 AUI 的 `<item>` 元素——它认 SNBT，数量也由它自己画，所以不要另外加数量角标。

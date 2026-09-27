@@ -91,6 +91,10 @@ public final class CheckpointController {
     private static Phase phase = Phase.IDLE;
     private static String requestSource = "";
     private static int phaseTicks;
+    /** 「世界已经回来」之后等区块到位的判据：已加载区块数连续这么多 tick 没再增长就算到位。 */
+    private static final int REVEAL_STABLE_TICKS = 2;
+    private static int revealLoadedChunks;
+    private static int revealStableTicks;
     /** 本轮操作针对的槽位。热键用 {@link Rewind#SLOT}，界面上的读取/覆盖按玩家选的槽位覆盖它。 */
     private static String slot = Rewind.SLOT;
 
@@ -366,9 +370,27 @@ public final class CheckpointController {
                     }
                     return;
                 }
-                if (phaseTicks < RewindClientConfig.restoreSettleTicks()) {
+                // 等区块到位再淡出：判据是「客户端已加载的区块数不再增长」（连续两 tick 没涨）。
+                // 原来这里是固定等 restoreSettleTicks（默认 10 tick = 0.5 秒），而这段时间玩家其实已经
+                // 能看见世界、手里的东西也回来了，多糊的每一 tick 都是白等；现在配置里的那个值改成
+                // 上限，正常情况下 3-4 tick 就收。
+                //
+                // 注意上限是从**进入这个阶段**算起的（含世界还没回来的那些 tick）。关世界重开那条
+                // 回退路径上，客户端拿到世界时 phaseTicks 往往已经超过上限了，于是「世界一出现就收」——
+                // 这和改动前一样（改动前那 10 tick 也是被这些空 tick 吃掉的），所以那条路的行为没变。
+                if (minecraft.level.getChunkSource().getLoadedChunksCount() > revealLoadedChunks) {
+                    revealLoadedChunks = minecraft.level.getChunkSource().getLoadedChunksCount();
+                    revealStableTicks = 0;
+                } else {
+                    revealStableTicks++;
+                }
+                if (revealStableTicks < REVEAL_STABLE_TICKS
+                        && phaseTicks < RewindClientConfig.restoreSettleTicks()) {
                     return;
                 }
+                Rewind.LOGGER.info("Rewind: reveal settled after {} ticks (chunks={}, stable={}, cap={})",
+                        phaseTicks, revealLoadedChunks, revealStableTicks,
+                        RewindClientConfig.restoreSettleTicks());
                 // 世界真的回来了：摘掉逻辑屏，让模糊淡出去露出新世界
                 minecraft.setScreen(null);
                 RewindTransition.finish();
@@ -457,9 +479,16 @@ public final class CheckpointController {
         lastRestoreCopied = workResult.copiedFiles;
         lastRestoreSkipped = workResult.skippedFiles;
         lastRestoreFiles = workResult.totalFiles;
+        beginReveal();
+        succeed("rewind.msg.restored", workResult.summary);
+    }
+
+    /** 进入「等世界回来」阶段：把「区块到位」的判据清零。 */
+    private static void beginReveal() {
         phase = Phase.REVEALING;
         phaseTicks = 0;
-        succeed("rewind.msg.restored", workResult.summary);
+        revealLoadedChunks = 0;
+        revealStableTicks = 0;
     }
 
     // ------------------------------------------------------------------ 回退路径：关世界 → 覆盖 → 重开
@@ -554,8 +583,7 @@ public final class CheckpointController {
         lastRestoreInPlace = false;
         lastRestoreMillis = restoreStartedNanos == 0L ? -1L : millisSince(restoreStartedNanos);
         restoreStartedNanos = 0L;
-        phase = Phase.REVEALING;
-        phaseTicks = 0;
+        beginReveal();
         succeed("rewind.msg.restored", workerSummary);
     }
 

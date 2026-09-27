@@ -11,6 +11,7 @@ import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.Screen;
 
 /**
  * 存档点的封面图：建点时抓一张**没有界面**的画面，存成 PNG，时间树上的卡片封面读它。
@@ -19,9 +20,10 @@ import net.minecraft.client.Screenshot;
  * {@code RenderFrameEvent} 里兑现。这段时间服务端正忙在落盘和拷贝上、世界不会 tick，所以抓到的
  * 就是存档点那一刻的画面。
  *
- * <p><b>没有界面</b>：抓帧那一帧把 {@code options.hideGui} 临时置起来（HUD / 手持物不画进去），
- * 抓完立刻还原——只影响这一帧。界面本身由 {@code CheckpointController} 在建点前就摘掉了；
- * 万一抓帧时还有界面开着（比如自动建点时玩家开着背包），这一张直接不要，免得把界面拍进封面。
+ * <p><b>没有界面</b>：抓帧那一帧把 HUD（{@code options.hideGui}）和当前界面都临时摘掉，抓完立刻还原——
+ * 只影响这一帧。界面是直接换 {@code Minecraft.screen} 字段摘的（不走 {@code setScreen}，免得触发
+ * {@code removed()/init()} 把界面状态清掉、把 AUI 文档重建一遍），所以不管在不在界面里建点
+ * （F7 会先把界面摘掉，界面上的「覆盖」则要求界面一直开着），封面都是干净的世界画面。
  *
  * <p><b>存哪儿</b>：{@code <gameDir>/apricity/rewind/covers/<存档目录名>/<槽位>-<毫秒>.png}。
  * 放这儿是因为 AUI 的加载根之一就是 {@code <gameDir>/apricity/}（{@code Loader.getResourceStream}
@@ -39,14 +41,18 @@ public final class CoverCapture {
     private static CoverRequest.Pending pending;
     private static boolean hidGui;
     private static boolean previousHideGui;
+    /** 抓帧那一帧临时摘掉的界面；只摘一帧，不碰它的生命周期。 */
+    private static Screen hiddenScreen;
 
     private CoverCapture() {
     }
 
     /**
-     * 帧开始：有请求就先把 GUI 藏起来。
+     * 帧开始：有请求就把界面和 HUD 都藏起来。
      *
-     * <p>必须在**这一帧画之前**置上 {@code hideGui}，抓到的帧里才没有 HUD。
+     * <p>必须都在**这一帧画之前**摘掉，抓到的帧里才没有界面、也没有 HUD。界面是直接换字段摘的：
+     * 走 {@code setScreen(null)} 会触发 {@code removed()}（AUI 会把文档整个丢掉），再挂回来
+     * 就要重建一遍，界面的滚动位置、选中项全没了，玩家还会看到闪一下。
      */
     public static void onFramePre(Minecraft minecraft) {
         if (pending != null) {
@@ -57,8 +63,8 @@ public final class CoverCapture {
             return;
         }
         if (minecraft.screen != null) {
-            Rewind.LOGGER.info("Rewind: skipping the cover for {} because a screen is open", request.slot);
-            return;
+            hiddenScreen = minecraft.screen;
+            minecraft.screen = null;
         }
         previousHideGui = minecraft.options.hideGui;
         minecraft.options.hideGui = true;
@@ -67,7 +73,7 @@ public final class CoverCapture {
     }
 
     /**
-     * 帧结束：抓帧、写文件、还原 GUI。
+     * 帧结束：抓帧、写文件、还原界面与 HUD。
      *
      * <p>注册成 HIGHEST 优先级是为了抢在过渡后处理之前读到**没被效果处理过**的那一帧——
      * 建点时的饱和度过渡刚好也在这一帧开始，晚一步封面就会带上饱和度。
@@ -81,6 +87,10 @@ public final class CoverCapture {
         if (hidGui) {
             minecraft.options.hideGui = previousHideGui;
             hidGui = false;
+        }
+        if (hiddenScreen != null) {
+            minecraft.screen = hiddenScreen;
+            hiddenScreen = null;
         }
         try {
             RenderTarget target = minecraft.getMainRenderTarget();

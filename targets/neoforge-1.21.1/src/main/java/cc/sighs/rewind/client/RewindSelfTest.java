@@ -552,6 +552,23 @@ public final class RewindSelfTest {
                             "the tree should still be open after the background save, but the screen is "
                                     + minecraft.screen);
                     check(!RewindTransition.isActive(), "the background save must not start a transition");
+                    Path manageWorld = RewindApi.worldRoot(manageServer);
+                    boolean cover = CoverCapture.hasCover(String.valueOf(manageWorld.getFileName()), PROBE_SLOT,
+                            written.savedAtMillis);
+                    if (!cover && stageTicks <= 400) {
+                        // 封面是抓帧之后异步落盘的，比索引晚几十毫秒，等它出现（超时由上面那个 400 兜着）
+                        return;
+                    }
+                    check(cover, "overwriting from inside the tree should still capture a cover");
+                    if (managePhase == 1) {
+                        // 封面落地之后界面还要自己重画一次，卡片上才会出现 <img>（不然要等玩家重开页面）
+                        managePhase = 2;
+                        return;
+                    }
+                    Element shot = tree.getLinkedDocument() == null ? null
+                            : tree.getLinkedDocument().querySelector(
+                                    "#slotGrid [data-slot=\"" + PROBE_SLOT + "\"] img.cover-shot");
+                    check(shot != null, "the probe card should show the cover <img> once the file lands");
                     Rewind.LOGGER.info("Rewind self-test: overwriting from the tree kept the screen open ({})",
                             written.describe());
                     minecraft.setScreen(null);

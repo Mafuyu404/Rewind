@@ -19,10 +19,10 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 public final class RewindClientConfig {
     // 默认值：必须与改造前写死的常量一致
     public static final float DEFAULT_FADE_IN_SECONDS = 0.22F;
-    public static final float DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.35F;
+    public static final float DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.15F;
     public static final float DEFAULT_SATURATION_BOOST = 1.5F;
     public static final float DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05F;
-    public static final float DEFAULT_BLUR_RADIUS = 9.0F;
+    public static final float DEFAULT_BLUR_RADIUS = 13.0F;
     public static final int DEFAULT_RESTORE_SETTLE_TICKS = 10;
 
     private static ModConfigSpec.DoubleValue fadeIn;
@@ -72,9 +72,9 @@ public final class RewindClientConfig {
                 .defineInRange("blurRadius", (double) DEFAULT_BLUR_RADIUS, 0.0D, 64.0D);
 
         restoreSettleTicks = builder
-                .comment("读档时「世界已经回来」之后、开始淡出之前还要等多少 tick（20 tick = 1 秒）。",
-                        "这是等区块到位的缓冲，和上面的淡出时长是两笔账：读档完成后总共还糊多久"
-                                + "= 这个值 / 20 + blurFadeOutSeconds。")
+                .comment("读档时「世界已经回来」之后、开始淡出之前，等区块到位的**上限**（20 tick = 1 秒）。",
+                        "正常情况下用不到这个上限：客户端已加载的区块数连续两 tick 不再增长就淡出，",
+                        "所以读档完成后通常只还糊 0.1-0.2 秒（再加下面的淡出时长）；这个值只是大视距 / 卡顿时的兜底。")
                 .defineInRange("restoreSettleTicks", DEFAULT_RESTORE_SETTLE_TICKS, 0, 200);
 
         builder.pop();
