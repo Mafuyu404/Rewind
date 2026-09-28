@@ -7,114 +7,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     
     <title>时间树</title>
+    <!-- ore 主题用 AUI 内置的那份（assets/apricityui/apricity/apricityui/theme/ore/ore.css），
+         不在页面里再塞一份拷贝；`/` 开头 = 相对 AUI 的 apricity 根。 -->
+    <link rel="stylesheet" href="/apricityui/theme/ore/ore.css">
     <style>
-        /* ==========================================================================
-           ApricityUI — Ore theme (core, inlined so the page works offline too)
-           ========================================================================== */
-        /* 整页统一用微软雅黑。原来的 OreRegular / OreDisplay 是远程 webfont，游戏里一直加载不到
-           （AUI 日志里 "font family unavailable, using fallback"），页面走的本来就是 fallback，
-           所以这里直接把那两个 @font-face 去掉，只留系统字体。 */
-        .ore-theme{
-            --ink:#f4f5f7;--ink-muted:#b6bac1;--ink-dark:#191a1c;--canvas:#202124;--surface:#48494a;
-            --surface-deep:#313233;--surface-soft:#d0d1d4;--edge:#1e1e1f;--edge-light:#77797c;
-            --green:#3c8527;--green-hover:#2a641c;--green-shadow:#1d4d13;--purple:#7345e5;--purple-hover:#5d2cc6;
-            --purple-shadow:#4a1cac;--gold:#f0b92d;--gold-shadow:#936715;--red:#b33b31;--red-hover:#8b2923;
-            --red-shadow:#662019;--blue:#2d78a8;--success:#69ad45;--warning:#f0b92d;--danger:#d45b50;
-            --info:#58a6d2;--focus:#ffffff;
-            --space-1:4px;--space-2:8px;--space-3:16px;--space-4:24px;--space-5:32px;
-            --font-sm:13px;--font-md:16px;--font-lg:20px;--font-xl:28px;
-            min-width:320px;min-height:100%;margin:0;color:var(--ink);
-            font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC","PingFang SC",sans-serif;
-            font-size:var(--font-md);line-height:1.5;letter-spacing:0;caret-color:var(--green);
-        }
-        .ore-theme *,.ore-theme *::before,.ore-theme *::after{box-sizing:border-box}
-        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme p,.ore-theme ul,.ore-theme ol,.ore-theme figure{margin-top:0}
-        .ore-theme h1,.ore-theme h2,.ore-theme h3,.ore-theme h4,.ore-theme h5,.ore-theme h6,.ore-theme .font-display{color:var(--ink);font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC","PingFang SC",sans-serif;font-weight:400;line-height:1.15}
-        .ore-theme h1{margin-bottom:16px;font-size:36px}
-        .ore-theme h2{margin-bottom:14px;font-size:28px}
-        .ore-theme h3{margin-bottom:12px;font-size:22px}
-        .ore-theme h4{margin-bottom:10px;font-size:18px}
-        .ore-theme h5{margin-bottom:8px;font-size:16px}
-        .ore-theme h6{margin-bottom:8px;font-size:14px}
-        .ore-theme p{margin-bottom:16px}
-        .ore-theme strong{color:#fff}
-        .ore-theme small,.ore-theme .text-muted{color:var(--ink-muted)}
-        .ore-theme kbd{padding:2px 6px;border:2px solid var(--edge);color:#fff;background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",monospace;font-size:12px}
-        .ore-theme hr,.ore-theme .ore-divider{height:4px;margin:16px 0;border:0;border-top:2px solid #333334;border-bottom:2px solid #5a5b5c}
-        .ore-theme img{max-width:100%;image-rendering:pixelated}
-        .ore-theme .container{width:100%;max-width:1240px;margin:0 auto;padding:0 20px}
-        .ore-theme .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}
-        .ore-theme .col-4{grid-column:span 4}
-        .ore-theme .col-8{grid-column:span 8}
-        .ore-theme .col-12{grid-column:span 12}
-        .ore-theme .stack{display:flex;flex-direction:column;gap:12px}
-        .ore-theme .cluster{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
-        .ore-theme .split{display:flex;align-items:center;justify-content:space-between;gap:16px}
-        .ore-theme .button{min-height:42px;margin:0;padding:7px 16px 13px;border:3px solid var(--edge);color:#fff;background:var(--green);box-shadow:inset 0 -6px var(--green-shadow),inset 3px 3px rgba(255,255,255,.22),inset -3px -9px rgba(0,0,0,.12);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:16px;line-height:1;text-align:center;text-shadow:2px 2px rgba(0,0,0,.35);cursor:pointer;user-select:none;display:inline-flex;align-items:center;justify-content:center;gap:8px}
-        .ore-theme .button:hover{background:var(--green-hover)}
-        .ore-theme .button:active{padding-top:9px;padding-bottom:11px;box-shadow:inset 3px 3px rgba(255,255,255,.18),inset -3px -3px rgba(0,0,0,.18)}
-        .ore-theme .button-secondary{background:var(--purple);box-shadow:inset 0 -6px var(--purple-shadow),inset 3px 3px rgba(255,255,255,.25),inset -3px -9px rgba(0,0,0,.12)}
-        .ore-theme .button-secondary:hover{background:var(--purple-hover)}
-        .ore-theme .button-tertiary{color:var(--ink-dark);background:var(--surface-soft);box-shadow:inset 0 -6px #58585a,inset 3px 3px rgba(255,255,255,.55),inset -3px -9px rgba(0,0,0,.08);text-shadow:none}
-        .ore-theme .button-tertiary:hover{color:#000;background:#b1b2b5}
-        .ore-theme .button-danger{background:var(--red);box-shadow:inset 0 -6px var(--red-shadow),inset 3px 3px rgba(255,255,255,.2),inset -3px -9px rgba(0,0,0,.12)}
-        .ore-theme .button-danger:hover{background:var(--red-hover)}
-        .ore-theme .button-gold{background:var(--gold);color:#241a06;text-shadow:none;box-shadow:inset 0 -6px var(--gold-shadow),inset 3px 3px rgba(255,255,255,.35),inset -3px -9px rgba(0,0,0,.12)}
-        .ore-theme .button-gold:hover{background:#d8a520}
-        .ore-theme .button-small{min-height:32px;padding:5px 10px 9px;font-size:13px}
-        .ore-theme .button-wide{width:100%}
-        .ore-theme .button[disabled]{border-color:#313233;color:#8b8d91;background:#55575a;box-shadow:inset 0 -5px #3b3c3e,inset 2px 2px #696b6e;text-shadow:none;cursor:default}
-        .ore-theme .card,.ore-theme .panel{border:3px solid var(--edge);color:var(--ink);background:var(--surface);box-shadow:inset 2px 2px var(--edge-light),inset -2px -2px #292a2b}
-        .ore-theme .card-header{min-height:46px;padding:12px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:18px;line-height:1.1;display:flex;align-items:center;justify-content:space-between;gap:10px}
-        .ore-theme .card-body{padding:16px}
-        .ore-theme .card-footer{padding:12px 16px;border-top:3px solid var(--edge);background:#3a3b3d}
-        .ore-theme .form-label{margin-bottom:6px;color:var(--ink);display:block}
-        .ore-theme .form-help{margin-top:5px;color:var(--ink-muted);font-size:var(--font-sm)}
-        .ore-theme .form-input,.ore-theme .form-select{width:100%;min-height:42px;padding:8px 10px;border:3px solid var(--edge);color:#fff;background:var(--surface-deep);box-shadow:inset 0 5px #242425;font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:15px;line-height:1.35}
-        .ore-theme .form-input:hover,.ore-theme .form-select:hover{border-color:#85878b}
-        .ore-theme .form-input:focus,.ore-theme .form-select:focus{border-color:var(--focus);outline:2px solid var(--green);outline-offset:0}
-        .ore-theme .badge{min-height:24px;padding:3px 8px;border:2px solid var(--edge);color:#fff;background:var(--blue);font-size:12px;line-height:1.2;display:inline-flex;align-items:center;gap:4px}
-        .ore-theme .badge-success{background:var(--green)}
-        .ore-theme .badge-warning{color:#221b0d;background:var(--gold)}
-        .ore-theme .badge-danger{background:var(--red)}
-        .ore-theme .badge-purple{background:var(--purple)}
-        .ore-theme .badge-ghost{background:#3a3b3d;color:var(--ink-muted)}
-        .ore-theme .alert{padding:12px 14px;border:3px solid var(--edge);border-left-width:8px;color:#fff;background:#363739;box-shadow:inset 2px 2px rgba(255,255,255,.08)}
-        .ore-theme .alert-info{border-left-color:var(--info)}
-        .ore-theme .alert-warning{border-left-color:var(--warning)}
-        .ore-theme .progress{height:24px;padding:3px;border:3px solid var(--edge);background:#252628;box-shadow:inset 0 3px #151516;overflow:hidden}
-        .ore-theme .progress-bar{height:100%;min-width:0;background:var(--green);box-shadow:inset 0 -4px var(--green-shadow),inset 2px 2px rgba(255,255,255,.2);transition:width .35s steps(6)}
-        .ore-theme .progress-purple .progress-bar{background:var(--purple);box-shadow:inset 0 -4px var(--purple-shadow),inset 2px 2px rgba(255,255,255,.2)}
-        .ore-theme .progress-gold .progress-bar{background:var(--gold);box-shadow:inset 0 -4px var(--gold-shadow),inset 2px 2px rgba(255,255,255,.25)}
-        .ore-theme .list-group{margin:0;padding:0;border:3px solid var(--edge);list-style:none}
-        .ore-theme .list-group-item{min-height:42px;padding:9px 12px;border-bottom:2px solid #292a2b;color:var(--ink);background:var(--surface);display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px}
-        .ore-theme .list-group-item:last-child{border-bottom:0}
-        .ore-theme .list-group-item:hover{background:#56585b}
-        .ore-theme .inventory-grid{display:grid;grid-template-columns:repeat(9,1fr);gap:3px}
-        .ore-theme .slot{aspect-ratio:1/1;border:3px solid #1c1c1d;border-top-color:#303133;border-left-color:#303133;color:#fff;background:#77787a;box-shadow:inset 3px 3px #4d4e50,inset -3px -3px #b2b3b5;font-family:"Microsoft YaHei","微软雅黑",sans-serif;display:flex;align-items:center;justify-content:center;position:relative}
-        .ore-theme .slot:hover{border-color:#fff;background:#8c8e91}
-        .ore-theme .tabs{border-bottom:3px solid var(--edge);display:flex;flex-wrap:wrap;gap:4px}
-        .ore-theme .tab{min-height:38px;padding:8px 14px;border:2px solid var(--edge);border-bottom:0;color:var(--ink-muted);background:#37383a;font:inherit;font-family:"Microsoft YaHei","微软雅黑",sans-serif;cursor:pointer}
-        .ore-theme .tab:hover,.ore-theme .tab.active{color:#fff;background:var(--surface);box-shadow:inset 0 4px var(--purple)}
-        .ore-theme .modal-backdrop{position:fixed;inset:0;z-index:900;padding:24px;background:rgba(0,0,0,.68);display:none;align-items:center;justify-content:center}
-        .ore-theme .modal-backdrop.open{display:flex}
-        .ore-theme .modal{position:relative;z-index:1;width:520px;max-width:100%;border:4px solid var(--edge);background:var(--surface);box-shadow:8px 8px rgba(0,0,0,.42),inset 2px 2px var(--edge-light);animation:pop .16s steps(3)}
-        @keyframes pop{from{transform:scale(.94);opacity:.4}to{transform:scale(1);opacity:1}}
-        .ore-theme .modal-header{min-height:50px;padding:13px 16px;border-bottom:3px solid var(--edge);background:var(--surface-deep);font-family:"Microsoft YaHei","微软雅黑",sans-serif;font-size:20px;display:flex;align-items:center;gap:10px}
-        .ore-theme .modal-body{padding:18px 16px}
-        .ore-theme .modal-footer{padding:12px 16px;border-top:3px solid var(--edge);display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}
-        .ore-theme .text-center{text-align:center}
-        .ore-theme .text-success{color:#8bd067}
-        .ore-theme .text-warning{color:#ffd45f}
-        .ore-theme .text-danger{color:#ef8178}
-        .ore-theme .text-info{color:#82c6ec}
-        .ore-theme .font-sm{font-size:var(--font-sm)}
-        .ore-theme .m-0{margin:0}
-        .ore-theme .mt-2{margin-top:8px}.ore-theme .mt-3{margin-top:16px}
-        .ore-theme .mb-1{margin-bottom:4px}.ore-theme .mb-2{margin-bottom:8px}.ore-theme .mb-3{margin-bottom:16px}
-        .ore-theme .p-2{padding:8px}.ore-theme .p-3{padding:16px}
+        /* 整页统一用微软雅黑：ore 主题用的是 OreRegular / OreDisplay 两个字体族，游戏里加载不到
+           （AUI 日志里 "font family unavailable, using fallback"）。主题里的 font-family 声明都是
+           普通优先级，所以这一条用 !important 把整棵子树盖成系统字体。 */
+        .ore-theme,.ore-theme *{font-family:"Microsoft YaHei","微软雅黑","Noto Sans SC","PingFang SC",sans-serif !important}
 
-        /* ---------- Ore extension bits used here ---------- */
+        /* 内置主题里没有、而本页在用的：灰底 badge */
+        .ore-theme .badge-ghost{background:#3a3b3d;color:var(--ink-muted)}
 
         /* ==========================================================================
            Save / Load screen
@@ -201,8 +104,10 @@
         .inv-caret{display:inline-block;width:14px}
         /* 展开时快捷栏（第四行）和上面三行背包之间的间隔 */
         .inv-gap{height:12px}
-        .inv-item{width:100%;height:100%;position:relative;box-shadow:inset -2px -2px rgba(0,0,0,.35),inset 2px 2px rgba(255,255,255,.28)}
-        .inv-count{position:absolute;right:1px;bottom:0;font-size:10px;color:#fff;text-shadow:1px 1px #000;font-family:"Microsoft YaHei","微软雅黑",sans-serif}
+        /* 背包快照的格子：内置主题是固定 44px 宽（9 列 = 420px），比详情面板还宽、会横向溢出；
+           这里压成 28px、间隙 2px（9 列 = 268px）。物品用 AUI 的 <item> 画，图标就是它默认的 16px。 */
+        .ore-theme .inventory-grid{grid-template-columns:repeat(9,28px);gap:2px}
+        .ore-theme .inventory-grid .slot{width:28px;height:28px;border-width:2px;box-shadow:inset 2px 2px #4d4e50,inset -2px -2px #b2b3b5}
         .stat-row{display:flex;justify-content:space-between;gap:10px}
         .scroll-area{max-height:480px;overflow-y:auto;padding-right:4px}
         .scroll-area::-webkit-scrollbar{width:12px}
@@ -210,6 +115,94 @@
         .scroll-area::-webkit-scrollbar-thumb{background:#5a5c60;border:2px solid #14151a;box-shadow:inset 2px 2px #7d7f83}
         .scroll-area::-webkit-scrollbar-thumb:hover{background:var(--green)}
         .empty-note{padding:26px 14px;text-align:center;color:var(--ink-muted);border:3px dashed #3a3b3d;background:rgba(0,0,0,.18)}
+
+        /* ==========================================================================
+           节点树布局：槽位之间的时间线关系，画在可拖拽平移 / 滚轮缩放的流程图画布上。
+           连线由每个节点的 ::before / ::after 拼出来，没有额外的图形层。
+           布局由 Java 侧驱动：data-dir 决定方向，body.tree-mode 决定显示哪一套布局。
+           ========================================================================== */
+        /* 标题旁边多一个布局切换开关（用主题的 switch） */
+        .page-title{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
+        .layout-switch{display:flex;align-items:flex-end;gap:8px}
+        .layout-switch-label{color:var(--ink-muted);font-size:14px;cursor:pointer}
+        .layout-switch-label.active{color:#fff}
+
+        /* 两套布局只显示一套 */
+        .tree-view{display:none}
+        body.tree-mode .archive-view{display:none}
+        body.tree-mode .tree-view{display:block}
+
+        /* 流程图画布：拖拽平移，滚轮以光标为中心缩放。
+           高度这里只是兜底，真正的值由 Java 侧按视口高度算好写进行内样式。 */
+        .flow-canvas{position:relative;height:420px;overflow:hidden;border:3px solid var(--edge);
+            background-color:#191a1c;
+            background-image:repeating-linear-gradient(0deg,rgba(255,255,255,.03) 0 2px,transparent 2px 24px),
+                             repeating-linear-gradient(90deg,rgba(255,255,255,.03) 0 2px,transparent 2px 24px);
+            cursor:grab;user-select:none}
+        .flow-canvas.is-panning{cursor:grabbing}
+        .flow-world{position:absolute;left:0;top:0;transform-origin:0 0}
+        .flow-rotate{position:absolute;right:12px;top:12px;z-index:2}
+
+        /* 树：子节点挂在父节点下方，连线由每个子节点的左边框 / 上边框拼出来 */
+        .tree-chart{display:flex;padding:8px 0}
+        .tree-branch{margin:0;padding:0;list-style:none;display:flex;position:relative}
+        .tree-node{position:relative;display:flex;flex-direction:column;align-items:center;padding:24px 0 0}
+        /* 子节点上方：左半段横线（首个子节点不要）+ 右半段横线兼落线 */
+        .tree-node::before{content:"";position:absolute;top:0;right:50%;width:50%;height:4px;background:#4b4d51}
+        .tree-node::after{content:"";position:absolute;top:0;left:50%;width:50%;height:24px;border-top:4px solid #4b4d51;border-left:4px solid #4b4d51}
+        .tree-node:first-child::before{display:none}
+        .tree-node:last-child::after{border-top:0}
+        /* 父节点到横线的那一竖 */
+        .tree-node > .tree-branch{margin-top:24px}
+        .tree-node > .tree-branch::before{content:"";position:absolute;left:50%;top:-24px;width:4px;height:24px;background:#4b4d51}
+        /* 根节点顶上没有连线 */
+        .tree-chart > .tree-branch > .tree-node{padding-top:0}
+        .tree-chart > .tree-branch > .tree-node::before,.tree-chart > .tree-branch > .tree-node::after{display:none}
+
+        /* 方向：默认从上到下；data-dir 换成 right / up / left 就整体转 90°。
+           连线的几何只是把上面那套的上下左右对调，横向母线换成竖向母线。 */
+        .tree-view[data-dir="right"] .tree-branch{flex-direction:column}
+        .tree-view[data-dir="right"] .tree-card{margin:0}
+        .tree-view[data-dir="right"] .tree-node{flex-direction:row;padding:8px 0 8px 24px}
+        .tree-view[data-dir="right"] .tree-node::before{top:auto;right:auto;bottom:50%;left:0;width:4px;height:50%}
+        .tree-view[data-dir="right"] .tree-node::after{top:50%;right:auto;bottom:auto;left:0;width:24px;height:50%}
+        .tree-view[data-dir="right"] .tree-node:last-child::after{border-top:4px solid #4b4d51;border-left:0}
+        .tree-view[data-dir="right"] .tree-node > .tree-branch{margin-top:0;margin-left:24px}
+        .tree-view[data-dir="right"] .tree-node > .tree-branch::before{top:50%;left:-24px;width:24px;height:4px}
+        .tree-view[data-dir="right"] .tree-chart > .tree-branch > .tree-node{padding-left:0}
+
+        .tree-view[data-dir="up"] .tree-node{flex-direction:column-reverse;padding:0 0 24px 0}
+        .tree-view[data-dir="up"] .tree-node::before{top:auto;bottom:0}
+        .tree-view[data-dir="up"] .tree-node::after{top:auto;bottom:0;border-top:0;border-bottom:4px solid #4b4d51}
+        .tree-view[data-dir="up"] .tree-node:last-child::after{border-bottom:0}
+        .tree-view[data-dir="up"] .tree-node > .tree-branch{margin-top:0;margin-bottom:24px}
+        .tree-view[data-dir="up"] .tree-node > .tree-branch::before{top:auto;bottom:-24px}
+        .tree-view[data-dir="up"] .tree-chart > .tree-branch > .tree-node{padding-bottom:0}
+
+        .tree-view[data-dir="left"] .tree-branch{flex-direction:column}
+        .tree-view[data-dir="left"] .tree-card{margin:0}
+        .tree-view[data-dir="left"] .tree-node{flex-direction:row-reverse;padding:8px 24px 8px 0}
+        .tree-view[data-dir="left"] .tree-node::before{top:auto;right:0;bottom:50%;left:auto;width:4px;height:50%}
+        .tree-view[data-dir="left"] .tree-node::after{top:50%;right:0;left:auto;width:24px;height:50%;border-top:4px solid #4b4d51;border-left:0;border-right:4px solid #4b4d51}
+        .tree-view[data-dir="left"] .tree-node:last-child::after{border-top:4px solid #4b4d51;border-right:0}
+        .tree-view[data-dir="left"] .tree-node > .tree-branch{margin-top:0;margin-right:24px}
+        .tree-view[data-dir="left"] .tree-node > .tree-branch::before{top:50%;right:-24px;left:auto;width:24px;height:4px}
+        .tree-view[data-dir="left"] .tree-chart > .tree-branch > .tree-node{padding-right:0}
+
+        /* 横向方向：节点排成三行（序号 + 标题 / 组信息 / 时间），卡片收窄，整棵树才不至于太长 */
+        .tree-view[data-dir="right"] .tree-card,.tree-view[data-dir="left"] .tree-card{width:240px;flex-direction:column;flex-wrap:nowrap}
+        .tree-view[data-dir="right"] .tree-head,.tree-view[data-dir="left"] .tree-head{order:1;flex:0 0 auto}
+        .tree-view[data-dir="right"] .tree-meta,.tree-view[data-dir="left"] .tree-meta{order:2;flex:0 0 auto}
+        .tree-view[data-dir="right"] .slot-clock,.tree-view[data-dir="left"] .slot-clock{order:3}
+
+        /* 节点卡片：同一套节点，竖 / 横方向靠 order 决定时间落在标题右边还是最后一行 */
+        .tree-card{width:340px;margin:0 8px;padding:10px 12px;gap:5px 8px;flex-direction:row;flex-wrap:wrap}
+        .tree-chart .tree-card:hover{transform:none}
+        .tree-head{order:1;flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px}
+        .tree-head .slot-title{flex:1 1 auto;min-width:0}
+        .tree-card .slot-clock{order:2;flex:0 0 auto}
+        .tree-meta{order:3;flex:1 0 100%;margin:0;color:var(--ink-muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
         @media (max-width:900px){
             .ore-theme .col-4,.ore-theme .col-8{grid-column:span 12}
         }
@@ -238,7 +231,15 @@
 
         <!-- 当前世界状态：静态写入，接入真实数据后由游戏侧替换 -->
         <div class="page-head">
-            <h1>时间树</h1>
+            <div class="page-title">
+                <h1>时间树</h1>
+                <!-- 布局切换：档案布局（槽位卡片） / 节点树布局（时间线），开关由 Java 侧驱动 -->
+                <div class="layout-switch" role="group" aria-label="布局切换">
+                    <span class="layout-switch-label active" data-act="layout" data-layout="archive">档案布局</span>
+                    <span class="switch" data-act="switch-layout" role="switch" tabindex="0" aria-checked="false" aria-label="在档案布局和节点树布局之间切换"><span class="switch-control"><span class="switch-status"></span><span class="switch-button"></span></span></span>
+                    <span class="layout-switch-label" data-act="layout" data-layout="tree">节点树布局</span>
+                </div>
+            </div>
             <div class="hud-bar" id="hudBar">
                 <span class="hud-chip">群系 <b>赭岩峡谷</b></span>
                 <span class="hud-chip">坐标 <b>96, 74, -210</b></span>
@@ -250,6 +251,8 @@
         <div class="grid">
             <div class="col-8">
 
+                <!-- 档案布局：自动 / 快速存档 + 槽位卡片 -->
+                <div class="archive-view">
                 <!-- 自动 / 快速存档 -->
                 <div class="special-grid" id="specialGrid">
                     <article class="card special-card" data-act="select" data-id="auto" tabindex="0" role="button" aria-label="自动存档">
@@ -442,6 +445,60 @@
                         </article>
                     </div>
                 </div>
+                </div>
+
+                <!-- 节点树布局：槽位之间的时间线关系（流程图画布，可拖拽平移 / 滚轮缩放）。
+                     #treeChart 里的静态内容只是「没接上数据时的样子」，运行时由 Java 侧整体替换。 -->
+                <div class="tree-view" id="treeView" data-dir="down">
+                    <div class="toolbar">
+                        <h3>时间线 <span class="badge badge-purple" id="treeCount">0</span></h3>
+                        <div class="cluster">
+                            <span class="text-muted font-sm">拖拽平移 · 滚轮以光标为中心缩放</span>
+                            <button class="button button-small button-tertiary" data-act="flow-reset">重置视图</button>
+                        </div>
+                    </div>
+                    <div class="flow-canvas" id="flowCanvas">
+                        <div class="flow-world" id="flowWorld">
+                            <div class="tree-chart" id="treeChart">
+                                <ul class="tree-branch">
+                                    <li class="tree-node">
+                                        <article class="card slot-card tree-card" data-act="select" data-slot="auto" tabindex="0" role="button">
+                                            <div class="tree-head"><span class="badge badge-warning">自动</span><h4 class="slot-title">自动存档</h4></div>
+                                            <p class="tree-meta">6 分钟前 · 9.2 MB · 雪原针叶林</p>
+                                            <span class="slot-clock">第 5 天 18:24</span>
+                                        </article>
+                                        <ul class="tree-branch">
+                                            <li class="tree-node">
+                                                <article class="card slot-card tree-card selected" data-act="select" data-slot="quick" tabindex="0" role="button">
+                                                    <div class="tree-head"><span class="badge badge-purple">快速</span><h4 class="slot-title">快速存档</h4></div>
+                                                    <p class="tree-meta">24 分钟前 · 13.2 MB · 玄武岩三角洲</p>
+                                                    <span class="slot-clock">第 7 天 18:24</span>
+                                                </article>
+                                                <ul class="tree-branch">
+                                                    <li class="tree-node">
+                                                        <article class="card slot-card tree-card" data-act="select" data-slot="s1" tabindex="0" role="button">
+                                                            <div class="tree-head"><span class="badge badge-ghost">01</span><h4 class="slot-title">黎明要塞</h4></div>
+                                                            <p class="tree-meta">2 小时前 · 15.5 MB · 平原高地</p>
+                                                            <span class="slot-clock">第 11 天 14:00</span>
+                                                        </article>
+                                                    </li>
+                                                    <li class="tree-node">
+                                                        <article class="card slot-card tree-card" data-act="select" data-slot="s2" tabindex="0" role="button">
+                                                            <div class="tree-head"><span class="badge badge-ghost">02</span><h4 class="slot-title">幽晶深窟</h4></div>
+                                                            <p class="tree-meta">9 小时前 · 25.9 MB · 深板岩洞窟</p>
+                                                            <span class="slot-clock">第 18 天 10:00</span>
+                                                        </article>
+                                                    </li>
+                                                </ul>
+                                            </li>
+                                        </ul>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                        <button class="button button-small button-tertiary flow-rotate" data-act="rotate-tree" title="旋转时间线方向"><span aria-hidden="true">↻</span> <span class="rotate-label">从上到下</span></button>
+                    </div>
+                </div>
             </div>
 
             <!-- 详情：当前选中槽位 01 -->
@@ -456,15 +513,16 @@
                         </div>
                         <div class="inv-title" data-act="toggle-inventory"><span class="inv-caret">▶</span>背包快照</div>
                         <div class="inventory-grid">
-                            <div class="slot" title="红石粉 × 12"><span class="inv-item" style="background:#d4483c"></span><span class="inv-count">12</span></div>
-                            <div class="slot" title="小麦 × 25"><span class="inv-item" style="background:#e0c455"></span><span class="inv-count">25</span></div>
-                            <div class="slot"></div>
-                            <div class="slot" title="小麦 × 9"><span class="inv-item" style="background:#e0c455"></span><span class="inv-count">9</span></div>
+                            <!-- 静态占位：运行时由 Java 侧整格替换成 <div class="slot"><item>物品表达式</item></div> -->
                             <div class="slot"></div>
                             <div class="slot"></div>
-                            <div class="slot" title="铁锭 × 55"><span class="inv-item" style="background:#d8d8d8"></span><span class="inv-count">55</span></div>
                             <div class="slot"></div>
-                            <div class="slot" title="面包 × 11"><span class="inv-item" style="background:#c98a52"></span><span class="inv-count">11</span></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
+                            <div class="slot"></div>
                         </div>
                         <ul class="list-group mt-3">
                             <li class="list-group-item"><span class="text-muted">保存时间</span><span>2026-09-25 19:38（2 小时前）</span></li>

@@ -20,11 +20,18 @@ import net.minecraft.server.MinecraftServer;
  * （增量清单）、{@code <槽位>.inventory}（背包快照，只在界面上展示）。后两个与槽位目录同级、
  * 不参与镜像。槽位的删除与改名在 {@link SnapshotStore}。
  *
+ * <p>建点还会在索引里留下一条时间线的边：新存档点的 {@code parentSlot} 指向建点这一刻世界所在的
+ * 那个存档点（索引里的 {@code head}），建完点 {@code head} 就移到新节点上。界面上的
+ * 「节点树布局」画的就是这些边。
+ *
  * <p>这里只有机制，没有任何客户端概念（过渡、界面、状态机）——那些在
  * {@code cc.sighs.rewind.client.CheckpointController}。对外的门面是
  * {@link cc.sighs.rewind.api.RewindApi}。
  */
 public final class CheckpointWriter {
+    /** 时间线成环保护：顺着 parentSlot 往上走最多这么多步。 */
+    private static final int TIMELINE_WALK_LIMIT = 64;
+
     /** 一次磁盘操作的结果：{@code meta} 只有建立存档点时非 null。 */
     public static final class Result {
         public final SnapshotMeta meta;
@@ -72,6 +79,8 @@ public final class CheckpointWriter {
         if (previous != null) {
             base.displayName = previous.displayName;
         }
+        // 时间线：新节点挂在建点这一刻世界所在的节点下面
+        base.parentSlot = parentFor(index, slot, previous);
 
         SnapshotMeta incomplete = base.copy();
         incomplete.status = SnapshotLayout.STATUS_INCOMPLETE;
@@ -92,6 +101,8 @@ public final class CheckpointWriter {
         complete.totalBytes = mirror.totalBytes;
         index = SnapshotIndex.load(indexFile);
         index.put(complete, slot);
+        // 建完点，世界就站在这个节点上了：之后建的存档点都挂在它下面
+        index.setHead(slot);
         index.save(indexFile);
 
         long millis = millisSince(startedNanos);
@@ -122,5 +133,41 @@ public final class CheckpointWriter {
 
     private static long millisSince(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    /**
+     * 新节点挂在谁下面：建点这一刻时间线的「头」（世界当前所在的节点）就是它的父节点。
+     *
+     * <p>覆盖头所在的那个槽位时，新节点顶替旧节点的位置——沿用旧节点的父节点，
+     * 免得时间线上凭空多出一个自己指向自己的节点、或者把这条线的根弄丢。
+     * 旧节点的父节点如果反过来挂在这个槽位下面，那宁可退回成根：断一条边好过成环。
+     */
+    private static String parentFor(SnapshotIndex index, String slot, SnapshotMeta previous) {
+        String head = index.getHead();
+        if (head.isEmpty() || index.get(head) == null) {
+            // 头还没立起来（新世界），或者头所在的槽位已经被删了：这条线从这里重新起头
+            return "";
+        }
+        if (!head.equals(slot)) {
+            return head;
+        }
+        String previousParent = previous == null ? "" : previous.parentSlot;
+        if (previousParent.isEmpty() || isDescendant(index, previousParent, slot)) {
+            return "";
+        }
+        return previousParent;
+    }
+
+    /** {@code slot} 是不是挂在 {@code ancestor} 下面（顺着 parentSlot 往上走）。 */
+    private static boolean isDescendant(SnapshotIndex index, String slot, String ancestor) {
+        String current = slot;
+        for (int step = 0; step < TIMELINE_WALK_LIMIT && current != null && !current.isEmpty(); step++) {
+            if (current.equals(ancestor)) {
+                return true;
+            }
+            SnapshotMeta meta = index.get(current);
+            current = meta == null ? "" : meta.parentSlot;
+        }
+        return false;
     }
 }

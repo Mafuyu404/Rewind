@@ -11,10 +11,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
 
-/** 存档点索引：记录每个槽位的元数据。键格式为 {@code slot.<槽位>.<字段>}。 */
+/** 存档点索引：记录每个槽位的元数据，以及时间线的「头」。键格式为 {@code slot.<槽位>.<字段>}。 */
 public final class SnapshotIndex {
     private static final String FORMAT_KEY = "format";
     private static final String FORMAT_VALUE = "1";
+    /** 时间线「头」的键名：世界当前站在哪个节点上。 */
+    private static final String HEAD_KEY = "head";
 
     private final Properties properties = new Properties();
 
@@ -70,6 +72,7 @@ public final class SnapshotIndex {
         meta.modVersion = properties.getProperty(key(slot, "modVersion"), "");
         meta.source = properties.getProperty(key(slot, "source"), "");
         meta.displayName = properties.getProperty(key(slot, "displayName"), "");
+        meta.parentSlot = properties.getProperty(key(slot, "parentSlot"), "");
         meta.biomeId = properties.getProperty(key(slot, "biomeId"), "");
         meta.playtimeTicks = readLong(slot, "playtimeTicks", 0L);
         meta.gameTime = readLong(slot, "gameTime", 0L);
@@ -95,6 +98,7 @@ public final class SnapshotIndex {
         properties.setProperty(key(slot, "modVersion"), meta.modVersion);
         properties.setProperty(key(slot, "source"), meta.source);
         properties.setProperty(key(slot, "displayName"), meta.displayName);
+        properties.setProperty(key(slot, "parentSlot"), meta.parentSlot);
         properties.setProperty(key(slot, "biomeId"), meta.biomeId);
         properties.setProperty(key(slot, "playtimeTicks"), Long.toString(meta.playtimeTicks));
         properties.setProperty(key(slot, "gameTime"), Long.toString(meta.gameTime));
@@ -120,6 +124,25 @@ public final class SnapshotIndex {
             }
         }
         return removed;
+    }
+
+    /**
+     * 时间线的「头」：世界当前站在哪个存档点上（槽位名）。
+     *
+     * <p>建点时新节点就挂在它下面，回滚到某个存档点之后就移到那个槽位。空表示还不知道
+     * （新世界、或者头所在的槽位被删了）——这时候建出来的存档点就是这条时间线的根。
+     */
+    public String getHead() {
+        return properties.getProperty(HEAD_KEY, "");
+    }
+
+    /** 移动时间线的「头」；传空串表示清掉（下一个存档点会成为根）。 */
+    public void setHead(String slot) {
+        if (slot == null || slot.isEmpty()) {
+            properties.remove(HEAD_KEY);
+            return;
+        }
+        properties.setProperty(HEAD_KEY, slot);
     }
 
     /** 先写临时文件再替换，避免写一半留下坏索引。 */

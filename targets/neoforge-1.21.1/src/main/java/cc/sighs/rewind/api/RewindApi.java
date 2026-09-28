@@ -117,20 +117,22 @@ public final class RewindApi {
             return invalid;
         }
         Path worldRoot = worldRoot(server);
+        RewindResult result;
         // 回滚窗口在这一刻打开：从这里到文件还原完，任何世界落盘都是马上要被覆盖掉的
         Rewind.beginDiscard();
         try {
             InPlaceRollback.Result rolled = InPlaceRollback.run(server, worldRoot, slot);
-            RewindResult result = RewindResult.rollback(slot, true, rolled.summary(), rolled.totalMs,
+            result = RewindResult.rollback(slot, true, rolled.summary(), rolled.totalMs,
                     rolled.mirrorCopied, rolled.mirrorSkipped, rolled.mirrorFiles);
-            lastResult = result;
-            return result;
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: in-place rollback for {} failed", slot, t);
             return fail(RewindResult.Kind.ROLLBACK, slot, t);
         } finally {
             Rewind.endDiscard();
         }
+        moveTimelineHead(worldRoot, slot);
+        lastResult = result;
+        return result;
     }
 
     /**
@@ -143,11 +145,29 @@ public final class RewindApi {
             CheckpointWriter.Result copied = CheckpointWriter.restoreFiles(worldRoot, slot);
             RewindResult result = RewindResult.rollback(slot, false, copied.summary(), copied.millis,
                     copied.mirror.copied, copied.mirror.skipped, copied.mirror.files.size());
+            moveTimelineHead(worldRoot, slot);
             lastResult = result;
             return result;
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: restoring files of slot {} failed", slot, t);
             return fail(RewindResult.Kind.ROLLBACK, slot, t);
+        }
+    }
+
+    /**
+     * 把时间线的「头」移到这个槽位：回溯之后世界就站在这个存档点上，之后建的存档点都挂在它下面。
+     *
+     * <p>纯索引操作，失败了也不影响回溯本身（只写一条日志）——最坏的情况是下一个存档点的父节点
+     * 还是上一个，时间线少一条边而已。
+     */
+    private static void moveTimelineHead(Path worldRoot, String slot) {
+        try {
+            Path indexFile = SnapshotLayout.indexFile(worldRoot);
+            SnapshotIndex index = SnapshotIndex.load(indexFile);
+            index.setHead(slot);
+            index.save(indexFile);
+        } catch (IOException e) {
+            Rewind.LOGGER.warn("Rewind: failed to move the timeline head to {}", slot, e);
         }
     }
 

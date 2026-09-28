@@ -74,6 +74,13 @@
   "rewind.ui.detail.status": "Status",
   "rewind.ui.detail.empty": "Pick a slot on the left to see its details",
 
+  "rewind.ui.tree.count": "%s nodes",
+  "rewind.ui.tree.empty": "No checkpoints yet. Press F7 to write one - it becomes the root of this timeline.",
+  "rewind.ui.tree.dir.down": "Top to bottom",
+  "rewind.ui.tree.dir.right": "Left to right",
+  "rewind.ui.tree.dir.up": "Bottom to top",
+  "rewind.ui.tree.dir.left": "Right to left",
+
   "rewind.ui.modal.confirm_title": "Confirm",
   "rewind.ui.modal.overwrite": "Overwrite \"%s\"? The current progress will be written into this slot.",
   "rewind.ui.modal.delete": "Delete \"%s\"? This cannot be undone.",

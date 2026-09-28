@@ -160,6 +160,8 @@ F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（�
 
 F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所有槽位：自动、快速两个特殊槽位 + 8 个手动槽位。手动槽位每张卡有读取 / 覆盖 / 重命名，**自动 / 快速这两个固定角色没有名字可改，第三个按钮是「设置」**；详情面板另有删除，还有搜索、排序、确认弹窗、设置弹窗、重命名弹窗。
 
+页面有两套布局，标题旁边的开关切换：**档案布局**（下面讲的就是它）与**节点树布局**（时间线，见「时间线」一节）。
+
 **界面上不放任何提示**：所有反馈（写完了 / 没存档点 / 局域网开着 / 名字不合法……）只写日志，文案走 `rewind.ui.log.*`——和模组别处一致（F7/F8 也是只写日志，不往聊天框发东西）。
 
 - **排序默认按槽位序号**（`SortMode.INDEX`，模板里 `#sort` 的第一个选项也标了 `selected`），所以卡片默认就是固定的 `s1..s8` 顺序；「最新」那个角标只是标出哪个槽位最新，不会把顺序挪走。详情面板里的字段是「保存时间 / 游玩时长 / 生物群系 / 坐标 / 文件大小」——「世界」和「状态」这两行只在设置弹窗里有。
@@ -178,11 +180,36 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 - **平时世界是暂停的，写盘期间放行**：`isPauseScreen()` 返回 `savingSlot == null`——管理界面开着时世界停住（不然站在危险的地方翻存档点会挨打），但后台写盘必须让服务端线程能跑，所以那几百毫秒放行。删除 / 改名仍然走客户端线程的文件操作（不占服务端线程），并且在写盘期间会被 `usable()` 挡掉：那会儿世界是活的，自动建点随时可能落盘，客户端线程再去改同一张索引就会打架。**别把它们改成 `server.execute(...)`**，没必要，也会让删除/改名变成异步的。
 - **卡片封面是建点时抓的截图**：`CheckpointWriter.create` 往 `CoverRequest` 里留一条待办（中立的小盒子，服务端线程写、客户端渲染线程取，两边不用互相引用），客户端 `CoverCapture` 在下一帧的 `RenderFrameEvent` 上兑现——那会儿服务端正忙在落盘和拷贝上、世界不 tick，所以抓到的就是存档点那一刻的画面。抓帧那一帧把 `options.hideGui` 和当前界面都临时摘掉，封面里因此既没有 HUD / 手持物、也没有界面。抓帧注册在 `EventPriority.HIGHEST`，必须抢在过渡后处理之前读那一帧，否则封面会带上存档过渡的饱和度。
 - **封面存在 `<gameDir>/apricity/rewind/covers/<存档目录名>/<槽位>-<毫秒>.png`**，页面用 `/rewind/covers/...`（AUI 的根相对路径，`/` 开头 = 相对 `apricity` 根）引用它。放这儿而不是存档目录里，是因为 AUI 只认资源包和 `<gameDir>/apricity/`，任意绝对路径解析不了。文件名带建点时刻（就是索引里的 `savedAtMillis`），是因为 **AUI 按路径缓存贴图、同一个路径换内容不会重读**——每建一次点就换一个名字，页面按索引里的时刻拼出当前那一个；写新的时把旧的一起删掉，删槽位时也删（封面不在存档目录里，`SnapshotStore` 带不上它，是界面上那条删除路径单独清的）。没有截图时退回纯色块（`COVER_COLORS`），封面框也不盖黑色渐变阴影（原来那个 `.cover-shade` 已经删掉）。
-- **封面用 `<img class="cover-shot">`**（`object-fit:cover`，比封面框大的部分由封面框的 `overflow:hidden` 裁掉）。**但 AUI 目前在屏幕文档里画不出图片**，所以卡片上看到的还是纯色块——见下面「已知问题」。页面这一侧的接线是好的：自测会断言 `<img>` 在、`src` 指向当前那一版封面、`ImageDrawer.isTextureReady` 返回 true。
+- **封面用 `<img class="cover-shot">`**（`object-fit:cover`，比封面框大的部分由封面框的 `overflow:hidden` 裁掉）。页面这一侧的接线是好的：自测会断言 `<img>` 在、`src` 指向当前那一版封面、`ImageDrawer.isTextureReady` 返回 true。（AUI 1.2.5.1 上这张图看不见，1.2.5.2 起正常——见「曾经的问题：AUI 屏幕文档里画不出图片」。）
 - **背包快照**：建点时 `WorldFlush` 把非空栏位抓成「栏位序号 → 原版 SNBT」（`ItemStack.saveOptional`），存到与槽位目录同级的 `<槽位>.inventory`（不参与镜像；`SnapshotInventory` 负责读写，一行一条、TAB 分隔）。详情面板把每格喂给 AUI 的 `<item>` 元素——它认 SNBT，数量也由它自己画，所以不要另外加数量角标。
 - **背包快照默认折叠，只显示一行快捷栏**（9 格）。「背包快照」四个字左边是折叠/展开箭头（`▶` / `▼`，点整行切换，`data-act="toggle-inventory"`，状态是 `RewindTreeScreen.inventoryExpanded`，每次开界面都是折叠的）。展开后是「背包三行 + 快捷栏一行」——**快捷栏按原版习惯放在第四行**，中间用 `.inv-gap`（12px）把快捷栏和背包槽位分开；护甲与副手有东西才在快捷栏下面再起一行。
 - **HUD 的「已游玩」**读的是集成服务端玩家的 `play_time` 统计（客户端的 `LocalPlayer` 身上没有这个统计）；界面开着时世界暂停，读一个 int 不会打架。
-- **自测覆盖**：`-PrwSelfTest=true` 的第 1 轮会在存档点写完后打开时间树，断言「2 张特殊卡 + 8 张手动卡 + 4 个 HUD chip」、世界名出现在特殊卡上、空槽位的读取按钮是禁用的、背包快照默认折叠成一行快捷栏（9 格）且点标题能展开成完整背包（≥36 格）、箭头跟着翻、点卡片能切换选中、特殊卡上有「设置」而没有「重命名」且设置弹窗能开能关，并存一张 `run/screenshots/rewind-tree.png` 供人眼确认版面。最后一轮结束后还有一次 `VERIFY_TREE_MANAGE`：往探针槽位 `s1` 建点 → 在该卡上走一遍重命名（断言真的落进索引）→ 点删除确认 → 断言索引条目与槽位目录都没了、卡片回到空状态 → **最后从界面里覆盖一次**（槽位刚被删掉，所以这一下是新建）：确认后立刻断言「界面还在、没有过渡」，然后等后台写盘落地再断言槽位又完整了——这条守着「在 GUI 里覆盖不退出界面」这个要求。注意这两个阶段都必须等 `RewindTransition.isActive()` 变 false 才能开界面，否则会被「过渡期间不得出现任何界面」当场抓住。
+- **自测覆盖**：`-PrwSelfTest=true` 的第 1 轮会在存档点写完后打开时间树，断言「2 张特殊卡 + 8 张手动卡 + 4 个 HUD chip」、世界名出现在特殊卡上、空槽位的读取按钮是禁用的、背包快照默认折叠成一行快捷栏（9 格）且点标题能展开成完整背包（≥36 格）、箭头跟着翻、点卡片能切换选中、特殊卡上有「设置」而没有「重命名」且设置弹窗能开能关，并存一张 `run/screenshots/rewind-tree.png` 供人眼确认版面。同一轮接着点一下布局开关切到节点树布局，等布局算完再验时间线：`body.tree-mode` 挂上了、两套布局都在文档里、当前那套的标签高亮、节点数 = 有存档点的槽位数、整棵树只有一个根且根就是快速存档、自动存档的 `parentSlot` 是 `quick`、默认方向是从上到下且转一下变成从左到右（按钮文字跟着换）、`#flowWorld` 上有 `translate(...) scale(...)`、点节点能填详情面板，并存一张 `run/screenshots/rewind-timeline.png`。最后一轮结束后还有一次 `VERIFY_TREE_MANAGE`：往探针槽位 `s1` 建点（断言它的 `parentSlot` 是 `quick`——回溯到快速存档之后 `head` 就在那儿）→ 在该卡上走一遍重命名（断言真的落进索引）→ 点删除确认 → 断言索引条目与槽位目录都没了、卡片回到空状态 → **最后从界面里覆盖一次**（槽位刚被删掉，所以这一下是新建）：确认后立刻断言「界面还在、没有过渡」，然后等后台写盘落地再断言槽位又完整了——这条守着「在 GUI 里覆盖不退出界面」这个要求。注意这两个阶段都必须等 `RewindTransition.isActive()` 变 false 才能开界面，否则会被「过渡期间不得出现任何界面」当场抓住。
+
+  > **截图前要留足 settle tick**（`TREE_SCREEN_SETTLE_TICKS` = 50、`TREE_TIMELINE_SETTLE_TICKS` = 90）：AUI 从 1.2.5.2 起把整页文字的光栅化丢到工作线程，**首绘时还没光栅完的行是留白的**（日志里 `[AUI Font] blank text draw`），一帧只上传 16 条，整页两百来条文字要十几帧才铺满；贴图（封面）也是异步就绪的。DOM 断言不受影响（结构早就是对的），但截图是给人看的——太早截会得到一张**一个字的没有**的图，那种图看不出对错，会误导后面来改这个界面的人。
+
+### 时间线（节点树布局，neoforge-1.21.1）
+
+「时间树」页面有两套布局，由标题旁边的开关切换（`body.tree-mode`）：**档案布局**是槽位卡片，
+**节点树布局**把同一批存档点按派生关系拼成一棵流程图，画在可拖拽平移 / 滚轮缩放的画布上
+（`#flowCanvas` > `#flowWorld` > `#treeChart`），方向还能整体旋转 90°（`#treeView[data-dir]` =
+`down` / `right` / `up` / `left`，连线全是 CSS 的 `::before` / `::after` 拼出来的，没有额外的图形层）。
+两套布局共用同一个「选中槽位」，右侧详情面板始终跟着它；节点就是**有存档点的槽位**，空槽位不在时间线上。
+
+数据侧只有一条边和一支「笔」：
+
+- `SnapshotMeta.parentSlot`：这个存档点是站在哪个存档点上建出来的（槽位名；空 = 这条时间线的根）。
+- `SnapshotIndex` 里的 `head`：世界**当前站在**哪个存档点上。建点时它就是新节点的父节点，建完点移到新节点；回溯成功后移到被回溯到的那个槽位（`RewindApi.moveTimelineHead`，「原地回滚」与 `restoreFiles` 两条路都走）。
+- `CheckpointWriter.parentFor`：`head` 就是要挂的父节点；**覆盖 `head` 自己所在的槽位时，新节点顶替旧节点的位置**（沿用旧节点的 `parentSlot`）——否则时间线上会凭空多出一个自己指向自己的节点、或者把这条线的根弄丢。旧节点的父节点如果反过来挂在这个槽位下面（`isDescendant`，`TIMELINE_WALK_LIMIT` 兜底）就退回成根：断一条边好过成环。`head` 指向的槽位已经被删掉时同样退回成根。
+
+**覆盖 / 删除会把边弄断，这是有意的**：槽位被覆盖之后里面已经是另一份世界状态，原先指向它的节点就找不到爹了——界面把这种节点画成根（`parentOf` 返回 null），而不是指着一个不存在的东西。删除槽位时如果 `head` 正好在它上面，`SnapshotStore` 会把 `head` 退回它的父节点（父节点也没了就退回「不知道」）。
+
+界面侧（`RewindTreeScreen`）：
+
+- **装树**：`fitFlow` 在「切到节点树布局 / 转了方向 / 点了重置视图 / 节点数变了」时把整棵树装进画布——装得下就居中，装不下就按最小 0.5 倍、贴着根节点那一端，剩下的靠拖拽。树的范围是把 `#treeChart .tree-card` 的盒子**并起来**算的（`#flowWorld` 会被拉满画布宽，量它只会得到画布宽度），再除以当前 `scale` 换算成没缩放的尺寸与偏移——`getBoundingClientRect()` 按 CSSOM 语义给的是**带 transform 的视觉盒**。视图刚显示时盒子可能还是 0（布局没算完），那就下一 tick 再量，最多 `FLOW_FIT_TRIES` 次。画布高度按视口算（`document.getViewportSize().height() - FLOW_CHROME_HEIGHT`，写进行内样式；CSS 里那个 `height:420px` 只是兜底）。**节点数没变就不重新装**，免得每次重画都把玩家的平移缩放抹掉。
+- **平移与缩放**：`mousedown` / `mousemove` / `mouseup` / `wheel` 四个监听都挂在 `#flowCanvas` 上——按下之后 AUI 会把 `mousemove` / `mouseup` **重派发给「按下的那个元素」**，挂在画布上光标拖到画布外面也不会丢这两个事件。位移写进 `#flowWorld` 的行内 `transform: translate(...) scale(...)`，滚轮以光标为锚。拖过 `FLOW_DRAG_SLOP` 像素之后那一下 `click` 会被吃掉（`flowMoved`），否则拖完画布会顺手把卡片选中。右上角那颗旋转按钮不参与拖拽。
+- **节点卡片**是 `.slot-card.tree-card`：角色 / 序号徽章 + 名字 + 一行摘要（多久之前 · 大小 · 群系）+ 游戏内时间，跟档案布局共用同一套交互（`data-act="select"` + `data-slot`）。横向方向下卡片收窄成三行（`order` 控制时间落在标题右边还是最后一行）。
+- **数据坏了也要画得出来**：父链成环、父节点不存在、指向自己，都在 `renderTree` 里兜底（`parentOf` 判根 + `emitted` 集合防重复递归 + 没被画出来的节点自己当根），保证每个存档点恰好出现一次。
 
 ### 自动存档点（跟着原版自动保存建点，neoforge-1.21.1）
 
@@ -195,18 +222,11 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 - **改开关要落盘**：FML 4 的 `ModConfig` 上没有 `save()`，入口是 `modConfig.getLoadedConfig().save()`。
 - **自测**（第 1 轮 `VERIFY_AUTO`）：关掉开关 → 删掉 auto 槽位 → 跑一次 `saveEverything(true, false, false)` → 断言槽位仍然空；打开开关 → 再跑一次 → 断言槽位写出来了、`source=autosave`。随后 `VERIFY_TREE` 里还会在界面上点一次那个开关，断言配置真的翻了、再翻回来。
 
-### 已知问题：AUI 屏幕文档里画不出图片（neoforge-1.21.1）
+### 曾经的问题：AUI 屏幕文档里画不出图片（neoforge-1.21.1）
 
-时间树卡片的封面（以及详情面板那张）**抓图、存盘、页面接线都是好的，但画面上看不到**，只剩纯色块。查到的事实：
+**已经随 AUI 1.2.5.2 消失，这里留个记录。** 在 AUI 1.2.5.1 上，时间树卡片与详情面板的封面（`<img class="cover-shot" src="/rewind/covers/...">`）抓图、存盘、页面接线都是好的，但画面上看不到、只剩纯色块：`<img>` 在 DOM 里且 `src` 正确，`Style.backgroundImage` 有值、`ImageDrawer.isTextureReady(...)` 返回 true（贴图确实解码并上传了），给显式宽高、关深度测试、确认 `commitDraws()` 都无效，而同一个屏幕里的形状、渐变、文字、AUI 的 `<item>` 都画得出来。当时的结论是「AUI 的 flat document 里贴图 blit 会丢，`<img>` / `background-image` / `<sprite>` / `border-image` 都走这条路」。
 
-- 页面侧没问题：`<img class="cover-shot" src="/rewind/covers/...">` 在 DOM 里、`src` 正确；CSS `background-image` 那条路也试过，同样不显示。
-- 样式与图层没问题：`Style.backgroundImage` 有值、`Background.of(element).imagePath` 有值、`ImageDrawer.isTextureReady(...)` 返回 **true**（贴图确实解码并上传了）。
-- 不是尺寸问题：给 `<img>` 显式写 `width:120px;height:90px` 也不显示。
-- 不是批处理没 flush：`Base.drawDocumentInContext` 的 finally 里会 `commitDraws()`（含 `ImageDrawer.flushBatch()`）。
-- 不是深度测试：给整个界面 `Base.pushDepthTest(false)`（AUI 自己在 top layer 上就是这么关的）也不显示。
-- 同一个屏幕里别的都正常：形状、渐变（空槽位那块棋盘格是 `repeating-conic-gradient`）、文字、AUI 的 `<item>` 元素都画得出来——**只有走 `ImageDrawer` 贴图队列的东西不显示**。
-
-也就是说，AUI 的屏幕文档（flat document）里贴图 blit 会丢，`<img>` / `background-image` / `<sprite>`（它就是给 div 设 `background-image`）/ `border-image` 都走这条路。**这是 AUI 侧的问题，不在本仓库修**；Rewind 这边不需要再改，AUI 修好之后封面会自己出现（自测里那几条断言已经在守着这条链）。
+换成 1.2.5.2 之后封面正常显示了（自测的 `rewind-tree.png` / `rewind-timeline.png` 上两张特殊卡与详情面板都是真实截图）。**当时那条结论还漏了一半原因**：AUI 的贴图与文字都是异步就绪的，页面刚打开的那几帧里两者都还没到——所以「看不到图」里也有一部分只是截图截早了，见「自测覆盖」那条关于 settle tick 的说明。
 
 ### 发布
 

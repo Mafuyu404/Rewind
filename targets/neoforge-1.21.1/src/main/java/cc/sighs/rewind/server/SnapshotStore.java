@@ -33,7 +33,14 @@ public final class SnapshotStore {
         Path indexFile = SnapshotLayout.indexFile(worldRoot);
         boolean removed = false;
         SnapshotIndex index = SnapshotIndex.load(indexFile);
+        SnapshotMeta deleted = index.get(slot);
         if (index.remove(slot)) {
+            // 时间线的「头」正好在这个槽位上：退回它的父节点（父节点也没了就退回「不知道」，
+            // 下一个存档点会成为这条线的根）
+            if (slot.equals(index.getHead())) {
+                String parent = deleted == null ? "" : deleted.parentSlot;
+                index.setHead(index.get(parent) == null ? "" : parent);
+            }
             index.save(indexFile);
             removed = true;
         }

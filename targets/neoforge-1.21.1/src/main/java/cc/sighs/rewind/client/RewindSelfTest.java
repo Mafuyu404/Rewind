@@ -5,6 +5,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
@@ -26,6 +27,7 @@ import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
@@ -67,6 +69,8 @@ public final class RewindSelfTest {
     private static final String RENAME_PROBE = "rewind-selftest";
     /** 最后一段（界面上的覆盖 / 删除）走到哪一步：0 = 还没查，1 = 已触发覆盖、等写盘落地。 */
     private static int managePhase;
+    /** 「时间树」那一轮的子步骤：0 = 档案布局，1 = 已切到节点树布局、等布局算完。 */
+    private static int treePhase;
     /** 覆盖 / 删除这两条路用的探针槽位：建完就删，跑完不留痕迹。 */
     private static final String PROBE_SLOT = SnapshotLayout.manualSlot(1);
     /** 自动建点之前快速槽位的 savedAt，用来断言「自动存档不许碰快速槽位」。 */
@@ -76,6 +80,16 @@ public final class RewindSelfTest {
     /** 折叠状态下只显示一行快捷栏（9 格）。 */
     private static final int HOTBAR_CELLS = 9;
     private static final int STAGE_TIMEOUT_TICKS = 12000;
+    /**
+     * 开「时间树」之后等多久再截图 / 查时间线（tick）。
+     *
+     * <p>AUI 从 1.2.5.2 起把整页文字的光栅化丢到工作线程，**首绘时还没光栅完的行是留白的**
+     * （日志里 `[AUI Font] blank text draw`），一帧只上传 16 条。整页两百来条文字要十几帧才铺满，
+     * 所以太早截图会得到一张没字的图——DOM 断言不受影响（结构早就对了），但截图是给人看的。
+     */
+    private static final int TREE_SCREEN_SETTLE_TICKS = 50;
+    /** 切到节点树布局之后再等这么久：新铺出来的节点卡片又是一批没光栅过的文字。 */
+    private static final int TREE_TIMELINE_SETTLE_TICKS = 90;
 
     private enum Stage {
         WAIT_WORLD,
@@ -335,6 +349,7 @@ public final class RewindSelfTest {
                         return;
                     }
                     Rewind.LOGGER.info("Rewind self-test: opening the time tree");
+                    treePhase = 0;
                     RewindTreeScreen.open();
                     return;
                 }
@@ -349,8 +364,28 @@ public final class RewindSelfTest {
                     // 让 AUI 的样式与布局先跑一两帧，别去读还没算完的盒子
                     return;
                 }
-                verifyTree(tree);
-                screenshotTree(minecraft, "rewind-tree");
+                if (treePhase == 0) {
+                    // 档案布局：卡片、详情面板、背包快照、设置弹窗
+                    if (stageTicks < TREE_SCREEN_SETTLE_TICKS) {
+                        return;
+                    }
+                    verifyTree(tree);
+                    screenshotTree(minecraft, "rewind-tree");
+                    treePhase = 1;
+                    openTimeline(tree);
+                    return;
+                }
+                if (treePhase == 1) {
+                    // 节点树布局：切过去之后要等布局算完、fitFlow 把树装进画布（它下一 tick 才动手），
+                    // 再等新铺出来的节点文字光栅完
+                    if (stageTicks < TREE_TIMELINE_SETTLE_TICKS) {
+                        return;
+                    }
+                    verifyTimeline(tree);
+                    screenshotTree(minecraft, "rewind-timeline");
+                    treePhase = 2;
+                    return;
+                }
                 minecraft.setScreen(null);
                 if (failures.isEmpty()) {
                     goTo(Stage.MUTATE);
@@ -759,6 +794,116 @@ public final class RewindSelfTest {
                 special.size(), manual.size(), chips.size(), cells, items);
     }
 
+    /** 切到「节点树布局」：点标题旁边那个开关。 */
+    private static void openTimeline(RewindTreeScreen tree) {
+        Document document = tree.getLinkedDocument();
+        check(document != null, "the tree screen has no document when opening the timeline");
+        if (document == null) {
+            return;
+        }
+        Element toggle = document.querySelector(".layout-switch [data-act=\"switch-layout\"]");
+        check(toggle != null, "the layout switch is missing from the tree screen");
+        if (toggle != null) {
+            toggle.click();
+        }
+    }
+
+    /**
+     * 「节点树布局」：同一批存档点按 {@code parentSlot} 拼成的时间线。
+     *
+     * <p>查两件事：布局切换真的把页面切过去了；以及时间线上的节点、父子关系、方向、装树
+     * 都跟磁盘上的数据对得上。连线本身是 CSS 画的，断言查不出来——那部分交给截图。
+     */
+    private static void verifyTimeline(RewindTreeScreen tree) {
+        Document document = tree.getLinkedDocument();
+        check(document != null, "the tree screen has no document during the timeline checks");
+        if (document == null) {
+            return;
+        }
+        IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) {
+            return;
+        }
+        Path world = RewindApi.worldRoot(server);
+
+        // 布局切换：body 上挂 tree-mode，两套布局都在文档里，亮的是当前那套
+        check(document.body.getClassList().contains("tree-mode"),
+                "switching the layout should put the page in tree mode");
+        Element treeView = document.querySelector("#treeView");
+        Element archiveView = document.querySelector(".archive-view");
+        check(treeView != null && archiveView != null, "both layouts should be in the document");
+        Element activeLabel = document.querySelector(".layout-switch-label[data-layout=\"tree\"]");
+        check(activeLabel != null && activeLabel.getClassList().contains("active"),
+                "the label of the active layout should be highlighted");
+
+        // 一个存档点 = 一个节点
+        Map<String, SnapshotMeta> metas = RewindApi.describeAll(world);
+        List<Element> nodes = document.querySelectorAll("#treeChart .tree-node");
+        List<Element> cards = document.querySelectorAll("#treeChart .tree-card");
+        check(nodes.size() == metas.size(),
+                "the timeline should show every checkpoint, got " + nodes.size() + " nodes for "
+                        + metas.size() + " checkpoints");
+        check(cards.size() == metas.size(), "each checkpoint should be one node, got " + cards.size());
+        List<Element> roots = document.querySelectorAll("#treeChart > .tree-branch > .tree-node");
+        check(roots.size() == 1, "the timeline should hang off a single root, got " + roots.size());
+
+        // 关系：第一个存档点（快速）是根，跟着原版自动保存建的那个挂在它下面
+        SnapshotMeta quick = RewindApi.describe(world, Rewind.SLOT);
+        SnapshotMeta auto = RewindApi.describe(world, SnapshotLayout.SLOT_AUTO);
+        check(quick != null && quick.parentSlot.isEmpty(),
+                "the first checkpoint should be the root of the timeline, got parent="
+                        + (quick == null ? "absent" : quick.parentSlot));
+        check(auto != null && Rewind.SLOT.equals(auto.parentSlot),
+                "the auto checkpoint should derive from the quick one, got parent="
+                        + (auto == null ? "absent" : auto.parentSlot));
+        Element rootCard = document.querySelector("#treeChart > .tree-branch > .tree-node > .tree-card");
+        String rootSlot = rootCard == null ? null : rootCard.getDataset().get("slot");
+        check(Rewind.SLOT.equals(rootSlot),
+                "the root node should be the quick checkpoint, got " + rootSlot);
+
+        // 方向：默认从上到下，点一下顺时针转 90°，按钮上的文字跟着换
+        check(treeView != null && "down".equals(treeView.getAttribute("data-dir")),
+                "the timeline should start top-to-bottom, got "
+                        + (treeView == null ? "no #treeView" : treeView.getAttribute("data-dir")));
+        Element rotate = document.querySelector("#treeView [data-act=\"rotate-tree\"]");
+        check(rotate != null, "the timeline should offer a rotate button");
+        if (rotate != null && treeView != null) {
+            rotate.click();
+            check("right".equals(treeView.getAttribute("data-dir")),
+                    "one rotation should turn the timeline to left-to-right, got " + treeView.getAttribute("data-dir"));
+            Element label = document.querySelector(".rotate-label");
+            String expected = Component.translatable("rewind.ui.tree.dir.right").getString();
+            check(label != null && label.getTextContent().contains(expected),
+                    "the rotate button should name the current direction, got "
+                            + (label == null ? "no .rotate-label" : label.getTextContent()));
+            // 转回从上到下：后面那张截图给人看的，方向别是歪的
+            rotate.click();
+            rotate.click();
+            rotate.click();
+        }
+
+        // 装树：画布的宽度高度算得出来之后，fitFlow 会给 flowWorld 写上 translate/scale
+        Element flowWorld = document.querySelector("#flowWorld");
+        check(flowWorld != null, "the flow canvas should have a world container");
+        String transform = flowWorld == null ? null : flowWorld.getInlineStylePropertyValue("transform");
+        check(transform != null && transform.startsWith("translate(") && transform.contains("scale("),
+                "fitting the timeline should translate/scale the flow world, got: " + transform);
+
+        // 点时间线上的节点，详情面板要跟着换
+        Element autoCard = document.querySelector("#treeChart [data-slot=\"" + SnapshotLayout.SLOT_AUTO + "\"]");
+        check(autoCard != null, "the timeline should hold the auto checkpoint as a node");
+        if (autoCard != null) {
+            autoCard.click();
+            Element badge = document.querySelector("#detailBadge");
+            String expected = Component.translatable("rewind.ui.slot.auto").getString();
+            check(badge != null && expected.equals(badge.getTextContent().trim()),
+                    "selecting a timeline node should move the detail panel to it, expected \"" + expected
+                            + "\", got \"" + (badge == null ? "no #detailBadge" : badge.getTextContent()) + "\"");
+        }
+        Rewind.LOGGER.info("Rewind self-test: timeline verified (nodes={}, root={}, transform={})",
+                nodes.size(), rootSlot, transform);
+    }
+
     /** 「自动存档」那张卡：跟着原版自动保存建点之后，卡片上应该有内容（不是空槽位的样子）。 */
     private static void verifyAutoCard(Document document) {
         Element card = document.querySelector("#specialGrid [data-slot=\"" + SnapshotLayout.SLOT_AUTO + "\"]");
@@ -914,6 +1059,11 @@ public final class RewindSelfTest {
         }
         Path world = RewindApi.worldRoot(server);
         check(RewindApi.hasCheckpoint(world, PROBE_SLOT), "the probe slot " + PROBE_SLOT + " should be on disk");
+        // 探针是在回溯到快速存档之后建的：时间线的「头」那时在快速存档上，所以它的父节点就该是它
+        SnapshotMeta probe = RewindApi.describe(world, PROBE_SLOT);
+        check(probe != null && Rewind.SLOT.equals(probe.parentSlot),
+                "a checkpoint written after rewinding to the quick slot should derive from it, got parent="
+                        + (probe == null ? "absent" : probe.parentSlot));
 
         Element probeCard = document.querySelector("#slotGrid [data-slot=\"" + PROBE_SLOT + "\"]");
         check(probeCard != null, "the probe slot card is missing from the tree");

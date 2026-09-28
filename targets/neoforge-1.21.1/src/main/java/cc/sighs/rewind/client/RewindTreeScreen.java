@@ -7,9 +7,12 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import javax.annotation.Nullable;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
@@ -20,8 +23,10 @@ import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.event.KeyEvent;
+import com.sighs.apricityui.event.MouseEvent;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
+import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.screen.ApricityScreen;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
@@ -51,6 +56,17 @@ import org.lwjgl.glfw.GLFW;
  *
  * <p>只有重命名和删除是就地完成的（纯文件操作，走 {@link RewindApi#renameCheckpoint} /
  * {@link RewindApi#deleteCheckpoint}），做完直接重画当前页。
+ *
+ * <p>页面有两套布局，由标题旁边的开关切换（{@code body.tree-mode}）：
+ *
+ * <ul>
+ *   <li><b>档案布局</b>：自动 / 快速两张卡片 + 8 个手动槽位，一眼看清每个槽位里是什么。</li>
+ *   <li><b>节点树布局</b>：同样的存档点，按 {@link SnapshotMeta#parentSlot} 拼成一条时间线，
+ *       画在可以拖拽平移、滚轮缩放的流程图画布上——存档点之间的先后与派生关系在这里看得见。
+ *       方向还能整体旋转 90°（{@code #treeView[data-dir]}），树长了就换个方向看。</li>
+ * </ul>
+ *
+ * <p>两套布局共用同一个「选中槽位」，切过去切回来选的还是那一个；右侧详情面板始终跟着它。
  */
 public final class RewindTreeScreen extends ApricityScreen {
     /** 模板路径，相对 AUI 的 {@code assets/apricityui/apricity/} 基准目录。 */
@@ -69,6 +85,24 @@ public final class RewindTreeScreen extends ApricityScreen {
     private static final int HOTBAR_SLOTS = 9;
     /** 主背包的格数（9 × 4，含快捷栏）。 */
     private static final int MAIN_INVENTORY_SLOTS = 36;
+
+    /** 时间线的四个方向，与模板里 {@code #treeView[data-dir]} 的取值一一对应，按顺时针排。 */
+    private static final String[] TREE_DIRS = {"down", "right", "up", "left"};
+    /** 流程图画布四周留白：装得下就居中，装不下就贴着根节点那一端。 */
+    private static final double FLOW_PADDING = 20.0D;
+    /** 自动装树时允许缩到的最小倍数（再小就看不清卡片上的字了，剩下靠拖拽）。 */
+    private static final double FLOW_FIT_MIN_SCALE = 0.5D;
+    /** 滚轮缩放的范围。 */
+    private static final double FLOW_ZOOM_MIN = 0.3D;
+    private static final double FLOW_ZOOM_MAX = 2.5D;
+    /** 画布高度 = 视口高度 − 这块（页面头、工具条、上下留白）。 */
+    private static final double FLOW_CHROME_HEIGHT = 200.0D;
+    /** 画布高度的下限：窗口再矮也得能看见一块画布。 */
+    private static final double FLOW_MIN_CANVAS_HEIGHT = 240.0D;
+    /** 视图刚显示时尺寸可能还是 0，最多等这么多 tick 再量一次。 */
+    private static final int FLOW_FIT_TRIES = 30;
+    /** 拖过这么多像素就不把 mouseup 之后的 click 当成点卡片。 */
+    private static final double FLOW_DRAG_SLOP = 4.0D;
 
     private static final DateTimeFormatter ABSOLUTE_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneId.systemDefault());
@@ -117,6 +151,31 @@ public final class RewindTreeScreen extends ApricityScreen {
     private int waitingCoverTicks;
     /** 等封面的上限（封面是抓帧之后异步落盘的，正常 2-6 tick 就好）。 */
     private static final int COVER_WAIT_TICKS = 20;
+
+    // ------------------------------------------------------------------ 时间线视图的状态
+    /** 现在是不是「节点树布局」（对应 body 上的 tree-mode）。 */
+    private boolean treeMode;
+    /** 时间线方向：{@link #TREE_DIRS} 里的一个。 */
+    private String treeDir = TREE_DIRS[0];
+    /** 流程图平移量（相对画布左上角，像素）。 */
+    private double flowX;
+    private double flowY;
+    /** 流程图缩放倍数。 */
+    private double flowScale = 1.0D;
+    /** 按下时记下的光标位置与当时的平移量。 */
+    private double flowDragX;
+    private double flowDragY;
+    private double flowDragOriginX;
+    private double flowDragOriginY;
+    private boolean flowDragging;
+    /** 刚刚拖过画布：那一下松手带出来的 click 不算点卡片。 */
+    private boolean flowMoved;
+    /** 还没量到尺寸、等下一 tick 再装树的次数。 */
+    private int flowFitTries;
+    /** 需要重新装一次树（刚切过来 / 转了方向 / 点了重置 / 数据变了）。 */
+    private boolean flowFitPending;
+    /** 上一次铺进树里的节点数：变了才重新装一次视图，免得每次重画都把玩家的平移缩放抹掉。 */
+    private int treeNodes = -1;
 
     public RewindTreeScreen() {
         super(TEMPLATE);
@@ -192,6 +251,20 @@ public final class RewindTreeScreen extends ApricityScreen {
             });
         }
 
+        // 流程图画布：拖拽平移、滚轮以光标为中心缩放。四个监听都挂在画布上——
+        // 按下之后 AUI 会把 mousemove / mouseup 重派发给「按下的那个元素」，
+        // 所以光标拖到画布外面也不会丢掉这两个事件。
+        Element canvas = document.querySelector("#flowCanvas");
+        if (canvas != null) {
+            canvas.addEventListener("wheel", this::onFlowWheel);
+            canvas.addEventListener("mousedown", this::onFlowMouseDown);
+            canvas.addEventListener("mousemove", this::onFlowMouseMove);
+            canvas.addEventListener("mouseup", this::onFlowMouseUp);
+        }
+        // 文档每次重建（打开、窗口尺寸变化）都会走 bind：把布局与方向重新写回页面
+        setTreeMode(document, treeMode);
+        applyLayout(document);
+
         render(document);
     }
 
@@ -200,6 +273,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         super.tick();
         flushFinishedSave();
         flushWaitingCover();
+        fitFlow();
     }
 
     /** 后台写盘做完了就收尾：给一条提示条，然后刷新界面（卡片上的时间、大小都会变）。 */
@@ -257,6 +331,11 @@ public final class RewindTreeScreen extends ApricityScreen {
     // ------------------------------------------------------------------ 交互
 
     private void onClick(Event event) {
+        // 刚才是拖画布：松手带出来的这一下 click 不该被当成点卡片
+        if (flowMoved) {
+            flowMoved = false;
+            return;
+        }
         if (!(event.target instanceof Element target)) {
             return;
         }
@@ -316,6 +395,18 @@ public final class RewindTreeScreen extends ApricityScreen {
                 break;
             case "modal-close":
                 closeModals(document);
+                break;
+            case "layout":
+                setTreeMode(document, "tree".equals(action.getDataset().get("layout")));
+                break;
+            case "switch-layout":
+                setTreeMode(document, !treeMode);
+                break;
+            case "rotate-tree":
+                rotateTree(document);
+                break;
+            case "flow-reset":
+                flowFitPending = true;
                 break;
             default:
                 break;
@@ -564,6 +655,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         Map<String, SnapshotMeta> metas = loadMetas();
         renderHud(document);
         renderSlots(document, metas);
+        renderTree(document, metas);
         renderDetail(document, metas);
     }
 
@@ -628,6 +720,365 @@ public final class RewindTreeScreen extends ApricityScreen {
         if (count != null) {
             count.setInnerText(tr("rewind.ui.count", used, SnapshotLayout.MANUAL_SLOT_COUNT));
         }
+    }
+
+    // ------------------------------------------------------------------ 时间线（节点树布局）
+
+    /**
+     * 把存档点按 {@link SnapshotMeta#parentSlot} 拼成一棵树，铺进 {@code #treeChart}。
+     *
+     * <p>节点就是「有存档点的槽位」——空槽位不在时间线上。父槽位不存在、指向自己、
+     * 或者父链绕成环的，都当成根：宁可断一条边，也不能让递归转不出来。
+     *
+     * <p>顺带把画布高度按视口算好，并在节点数变了的时候请求重新装一次树。
+     */
+    private void renderTree(Document document, Map<String, SnapshotMeta> metas) {
+        Element chart = document.querySelector("#treeChart");
+        Element canvas = document.querySelector("#flowCanvas");
+        if (chart == null) {
+            return;
+        }
+        if (canvas != null && treeMode) {
+            applyCanvasHeight(document, canvas);
+        }
+        Map<String, List<String>> children = new LinkedHashMap<>();
+        List<String> roots = new ArrayList<>();
+        int total = 0;
+        for (String slot : RewindApi.slots()) {
+            if (!metas.containsKey(slot)) {
+                continue;
+            }
+            total++;
+            String parent = parentOf(slot, metas);
+            if (parent == null) {
+                roots.add(slot);
+            } else {
+                children.computeIfAbsent(parent, key -> new ArrayList<>()).add(slot);
+            }
+        }
+        Element count = document.querySelector("#treeCount");
+        if (count != null) {
+            count.setInnerText(tr("rewind.ui.tree.count", total));
+        }
+        if (total == 0) {
+            chart.setInnerHTML("<div class=\"empty-note\">" + text(tr("rewind.ui.tree.empty")) + "</div>");
+        } else {
+            // 同一层里按建点时间排：时间线的先后顺序才看得出来
+            Comparator<String> bySavedAt = Comparator.comparingLong(slot -> savedAt(metas, slot));
+            roots.sort(bySavedAt);
+            for (List<String> siblings : children.values()) {
+                siblings.sort(bySavedAt);
+            }
+            StringBuilder html = new StringBuilder("<ul class=\"tree-branch\">");
+            Set<String> emitted = new HashSet<>();
+            for (String root : roots) {
+                appendTreeNode(html, root, metas, children, emitted);
+            }
+            // 父链成环时兜底：没被画出来的节点自己当根，保证每个存档点都看得见
+            for (String slot : RewindApi.slots()) {
+                if (metas.containsKey(slot) && !emitted.contains(slot)) {
+                    appendTreeNode(html, slot, metas, children, emitted);
+                }
+            }
+            html.append("</ul>");
+            chart.setInnerHTML(html.toString());
+        }
+        if (total != treeNodes) {
+            treeNodes = total;
+            flowFitPending = treeMode;
+        }
+    }
+
+    /** 一个节点 = 卡片 + 挂在自己下面的子树。 */
+    private void appendTreeNode(StringBuilder html, String slot, Map<String, SnapshotMeta> metas,
+                                Map<String, List<String>> children, Set<String> emitted) {
+        if (!emitted.add(slot)) {
+            return;
+        }
+        html.append("<li class=\"tree-node\">");
+        html.append(treeCard(slot, metas.get(slot)));
+        List<String> kids = children.get(slot);
+        if (kids != null && !kids.isEmpty()) {
+            html.append("<ul class=\"tree-branch\">");
+            for (String kid : kids) {
+                appendTreeNode(html, kid, metas, children, emitted);
+            }
+            html.append("</ul>");
+        }
+        html.append("</li>");
+    }
+
+    /** 时间线上的节点卡片：角色 / 序号 + 名字 + 一行摘要 + 游戏内时间，比槽位卡片小一号。 */
+    private String treeCard(String slot, @Nullable SnapshotMeta meta) {
+        StringBuilder html = new StringBuilder();
+        html.append("<article class=\"card slot-card tree-card").append(slot.equals(selectedSlot) ? " selected" : "")
+                .append("\" data-act=\"select\" data-slot=\"").append(slot).append("\" tabindex=\"0\" role=\"button\">");
+        html.append("<div class=\"tree-head\"><span class=\"badge ").append(slotBadgeClass(slot)).append("\">")
+                .append(text(slotBadgeLabel(slot))).append("</span><h4 class=\"slot-title\">")
+                .append(text(title(slot, meta))).append("</h4></div>");
+        html.append("<p class=\"tree-meta\">");
+        if (meta == null) {
+            html.append(text(tr("rewind.ui.slot.unused")));
+        } else {
+            html.append(text(relativeTime(meta.savedAtMillis))).append("<span>·</span>")
+                    .append(text(sizeText(meta.totalBytes))).append("<span>·</span>")
+                    .append(text(biomeName(meta.biomeId)));
+        }
+        html.append("</p><span class=\"slot-clock\">")
+                .append(text(meta == null ? "" : gameClock(meta.gameTime))).append("</span></article>");
+        return html.toString();
+    }
+
+    /**
+     * 时间线上的父节点；根、或者父节点已经不在了（被覆盖 / 删掉）时返回 null。
+     *
+     * <p>指向自己也算根——单靠这一条就能挡掉最直接的那种环。
+     */
+    @Nullable
+    private static String parentOf(String slot, Map<String, SnapshotMeta> metas) {
+        SnapshotMeta meta = metas.get(slot);
+        if (meta == null || meta.parentSlot.isEmpty() || meta.parentSlot.equals(slot)) {
+            return null;
+        }
+        return metas.containsKey(meta.parentSlot) ? meta.parentSlot : null;
+    }
+
+    /** 两套布局之间切换：body 上挂 tree-mode，开关与两侧文字跟着亮。 */
+    private void setTreeMode(Document document, boolean tree) {
+        treeMode = tree;
+        document.body.getClassList().toggle("tree-mode", tree);
+        for (Element label : document.querySelectorAll(".layout-switch-label")) {
+            label.getClassList().toggle("active", (tree ? "tree" : "archive").equals(label.getDataset().get("layout")));
+        }
+        Element toggle = document.querySelector(".layout-switch .switch");
+        if (toggle != null) {
+            toggle.getClassList().toggle("on", tree);
+            toggle.setAttribute("aria-checked", tree ? "true" : "false");
+        }
+        if (tree) {
+            flowFitPending = true;
+        }
+    }
+
+    /** 顺时针转 90°：从上到下 → 从左到右 → 从下到上 → 从右到左。 */
+    private void rotateTree(Document document) {
+        treeDir = TREE_DIRS[(indexOfDir(treeDir) + 1) % TREE_DIRS.length];
+        applyLayout(document);
+        flowFitPending = true;
+    }
+
+    /** 把当前方向写到 {@code #treeView} 上，并更新旋转按钮上的文字。 */
+    private void applyLayout(Document document) {
+        Element view = document.querySelector("#treeView");
+        if (view != null) {
+            view.setAttribute("data-dir", treeDir);
+        }
+        Element label = document.querySelector(".rotate-label");
+        if (label != null) {
+            label.setTextContent(tr(dirLabelKey(treeDir)));
+        }
+    }
+
+    private static int indexOfDir(String dir) {
+        for (int i = 0; i < TREE_DIRS.length; i++) {
+            if (TREE_DIRS[i].equals(dir)) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    private static String dirLabelKey(String dir) {
+        switch (dir) {
+            case "right":
+                return "rewind.ui.tree.dir.right";
+            case "up":
+                return "rewind.ui.tree.dir.up";
+            case "left":
+                return "rewind.ui.tree.dir.left";
+            default:
+                return "rewind.ui.tree.dir.down";
+        }
+    }
+
+    /** 滚轮缩放，以光标底下那个点为锚——缩放前后它待在原地。 */
+    private void onFlowWheel(Event event) {
+        if (!(event instanceof MouseEvent mouse)) {
+            return;
+        }
+        Document document = getLinkedDocument();
+        Element canvas = document == null ? null : document.querySelector("#flowCanvas");
+        if (canvas == null) {
+            return;
+        }
+        double delta = mouse.deltaY != 0.0D ? mouse.deltaY : mouse.scrollDelta;
+        double next = Math.min(FLOW_ZOOM_MAX, Math.max(FLOW_ZOOM_MIN, flowScale * (delta > 0.0D ? 0.87D : 1.15D)));
+        if (next == flowScale) {
+            return;
+        }
+        Element.DOMRect rect = canvas.getBoundingClientRect();
+        double pointerX = mouse.clientX - rect.x;
+        double pointerY = mouse.clientY - rect.y;
+        flowX = pointerX - (pointerX - flowX) * (next / flowScale);
+        flowY = pointerY - (pointerY - flowY) * (next / flowScale);
+        flowScale = next;
+        mouse.preventDefault();
+        applyFlowTransform(document);
+    }
+
+    private void onFlowMouseDown(Event event) {
+        if (!(event instanceof MouseEvent mouse)) {
+            return;
+        }
+        // 右上角那颗旋转按钮不参与拖拽
+        if (event.target instanceof Element target && target.closest(".flow-rotate") != null) {
+            return;
+        }
+        flowDragX = mouse.clientX;
+        flowDragY = mouse.clientY;
+        flowDragOriginX = flowX;
+        flowDragOriginY = flowY;
+        flowDragging = true;
+        flowMoved = false;
+    }
+
+    private void onFlowMouseMove(Event event) {
+        if (!flowDragging || !(event instanceof MouseEvent mouse)) {
+            return;
+        }
+        Document document = getLinkedDocument();
+        if (document == null) {
+            return;
+        }
+        double dx = mouse.clientX - flowDragX;
+        double dy = mouse.clientY - flowDragY;
+        if (Math.abs(dx) + Math.abs(dy) > FLOW_DRAG_SLOP) {
+            flowMoved = true;
+        }
+        flowX = flowDragOriginX + dx;
+        flowY = flowDragOriginY + dy;
+        Element canvas = document.querySelector("#flowCanvas");
+        if (canvas != null) {
+            canvas.getClassList().add("is-panning");
+        }
+        applyFlowTransform(document);
+    }
+
+    private void onFlowMouseUp(Event event) {
+        flowDragging = false;
+        Document document = getLinkedDocument();
+        Element canvas = document == null ? null : document.querySelector("#flowCanvas");
+        if (canvas != null) {
+            canvas.getClassList().remove("is-panning");
+        }
+    }
+
+    /** 把平移与缩放写到 {@code #flowWorld} 的行内样式上——整棵树的位移就靠这一条。 */
+    private void applyFlowTransform(Document document) {
+        Element world = document.querySelector("#flowWorld");
+        if (world == null) {
+            return;
+        }
+        world.setInlineStyleProperty("transform",
+                String.format(Locale.ROOT, "translate(%.2fpx,%.2fpx) scale(%.4f)", flowX, flowY, flowScale));
+    }
+
+    /**
+     * 把整棵树装进画布：装得下就居中，装不下就按最小 0.5 倍、贴着根节点那一端，剩下的靠拖拽看。
+     *
+     * <p>树的范围是把每个节点卡片的盒子并起来算的——{@code #flowWorld} 本身会被拉满画布宽，
+     * 量它只会得到画布宽度。卡片盒子是**带 transform 的视觉盒**（`getBoundingClientRect` 按
+     * CSSOM 语义返回变换后的盒子），所以除以当前 scale 才是没缩放的尺寸与偏移。
+     *
+     * <p>视图刚显示时盒子可能还是 0（布局没算完），那就下一 tick 再量，最多 {@link #FLOW_FIT_TRIES} 次。
+     */
+    private void fitFlow() {
+        if (!flowFitPending) {
+            return;
+        }
+        Document document = getLinkedDocument();
+        Element canvas = document == null ? null : document.querySelector("#flowCanvas");
+        Element world = document == null ? null : document.querySelector("#flowWorld");
+        if (canvas == null || world == null) {
+            flowFitPending = false;
+            return;
+        }
+        applyCanvasHeight(document, canvas);
+        Element.DOMRect canvasRect = canvas.getBoundingClientRect();
+        Element.DOMRect worldRect = world.getBoundingClientRect();
+        double[] bounds = treeBounds(document);
+        double canvasWidth = canvasRect.width;
+        double canvasHeight = canvasRect.height;
+        boolean measured = bounds != null && canvasWidth > 0.0D && canvasHeight > 0.0D && flowScale != 0.0D;
+        double worldWidth = measured ? bounds[2] / flowScale : 0.0D;
+        double worldHeight = measured ? bounds[3] / flowScale : 0.0D;
+        if (!measured || worldWidth <= 0.0D || worldHeight <= 0.0D) {
+            if (++flowFitTries < FLOW_FIT_TRIES) {
+                return;
+            }
+            flowFitTries = 0;
+            flowFitPending = false;
+            return;
+        }
+        flowFitTries = 0;
+        flowFitPending = false;
+        // 树在 world 坐标系里的左上角：卡片并集的左上角减掉 world 自己的原点，再除掉缩放
+        double originX = (bounds[0] - worldRect.x) / flowScale;
+        double originY = (bounds[1] - worldRect.y) / flowScale;
+        double room = 2.0D * FLOW_PADDING;
+        flowScale = Math.max(FLOW_FIT_MIN_SCALE, Math.min(1.0D,
+                Math.min((canvasWidth - room) / worldWidth, (canvasHeight - room) / worldHeight)));
+        double scaledWidth = worldWidth * flowScale;
+        double scaledHeight = worldHeight * flowScale;
+        // 装得下就把树居中；装不下就把根节点那一端贴在画布边上（方向决定是哪一边）
+        flowX = (scaledWidth <= canvasWidth - room
+                ? (canvasWidth - scaledWidth) / 2.0D
+                : ("left".equals(treeDir) ? canvasWidth - FLOW_PADDING - scaledWidth : FLOW_PADDING)) - originX * flowScale;
+        flowY = (scaledHeight <= canvasHeight - room
+                ? (canvasHeight - scaledHeight) / 2.0D
+                : ("up".equals(treeDir) ? canvasHeight - FLOW_PADDING - scaledHeight : FLOW_PADDING)) - originY * flowScale;
+        applyFlowTransform(document);
+    }
+
+    /**
+     * 整棵树的视觉范围（{@code {x, y, 宽, 高}}）；一个节点都没有时返回 null。
+     *
+     * <p>用卡片并集而不是某个容器：容器会被拉满画布，只有卡片自己是有实际大小的。
+     */
+    @Nullable
+    private static double[] treeBounds(Document document) {
+        double minX = Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        boolean any = false;
+        for (Element card : document.querySelectorAll("#treeChart .tree-card")) {
+            Element.DOMRect rect = card.getBoundingClientRect();
+            if (rect.width <= 0.0D || rect.height <= 0.0D) {
+                continue;
+            }
+            minX = Math.min(minX, rect.x);
+            minY = Math.min(minY, rect.y);
+            maxX = Math.max(maxX, rect.x + rect.width);
+            maxY = Math.max(maxY, rect.y + rect.height);
+            any = true;
+        }
+        return any ? new double[]{minX, minY, maxX - minX, maxY - minY} : null;
+    }
+
+    /**
+     * 画布高度按视口算：占满页面剩下的那块地方，别让画布长到窗口外面去。
+     *
+     * <p>写的是行内样式（盖过 CSS 里那个兜底值）；值没变就不写，免得每帧都触发一次样式重算。
+     */
+    private void applyCanvasHeight(Document document, Element canvas) {
+        Size viewport = document.getViewportSize();
+        double height = Math.max(FLOW_MIN_CANVAS_HEIGHT, viewport.height() - FLOW_CHROME_HEIGHT);
+        String value = String.format(Locale.ROOT, "%.0fpx", height);
+        if (value.equals(canvas.getInlineStylePropertyValue("height"))) {
+            return;
+        }
+        canvas.setInlineStyleProperty("height", value);
     }
 
     private void renderDetail(Document document, Map<String, SnapshotMeta> metas) {
@@ -732,16 +1183,36 @@ public final class RewindTreeScreen extends ApricityScreen {
 
     // ------------------------------------------------------------------ 卡片
 
+    /** 卡片左上角那个角色 / 序号徽章：自动是金色、快速是紫色，手动槽位是灰底的序号。 */
+    private static String slotBadgeClass(String slot) {
+        if (SnapshotLayout.SLOT_QUICK.equals(slot)) {
+            return "badge-purple";
+        }
+        if (SnapshotLayout.SLOT_AUTO.equals(slot)) {
+            return "badge-warning";
+        }
+        return "badge-ghost";
+    }
+
+    private static String slotBadgeLabel(String slot) {
+        if (SnapshotLayout.SLOT_QUICK.equals(slot)) {
+            return tr("rewind.ui.slot.badge.quick");
+        }
+        if (SnapshotLayout.SLOT_AUTO.equals(slot)) {
+            return tr("rewind.ui.slot.badge.auto");
+        }
+        return String.format(Locale.ROOT, "%02d", SnapshotLayout.manualIndex(slot));
+    }
+
     private String specialCard(String slot, SnapshotMeta meta) {
-        boolean quick = SnapshotLayout.SLOT_QUICK.equals(slot);
         StringBuilder html = new StringBuilder();
         html.append("<article class=\"card special-card").append(slot.equals(selectedSlot) ? " selected" : "")
                 .append("\" data-act=\"select\" data-slot=\"").append(slot).append("\" tabindex=\"0\" role=\"button\">");
         html.append("<div class=\"special-cover\" style=\"background:").append(coverColor(slot)).append("\">")
                 .append(coverImage(slot, meta)).append("</div>");
         html.append("<div class=\"special-body\">");
-        html.append("<div class=\"special-head\"><span class=\"badge ").append(quick ? "badge-purple" : "badge-warning")
-                .append("\">").append(text(tr(quick ? "rewind.ui.slot.badge.quick" : "rewind.ui.slot.badge.auto")))
+        html.append("<div class=\"special-head\"><span class=\"badge ").append(slotBadgeClass(slot))
+                .append("\">").append(text(slotBadgeLabel(slot)))
                 .append("</span><h4>").append(text(title(slot, meta))).append("</h4></div>");
         if (meta == null) {
             html.append("<p class=\"special-sub\">").append(text(tr("rewind.ui.slot.unused"))).append("</p>");
