@@ -27,6 +27,8 @@ import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.mixin.RollbackAccessMixins.SimpleRegionStorageAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.snapshot.SnapshotBlockStore;
+import cc.sighs.rewind.snapshot.SnapshotBlocks;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotManifest;
 import cc.sighs.rewind.snapshot.SnapshotMirror;
@@ -179,7 +181,12 @@ public final class InPlaceRollback {
             Rewind.beginDiscard();
 
             long stepNanos = System.nanoTime();
-            List<Target> targets = collectTargets(server, worldRoot, slotDir, result);
+            SnapshotBlocks snapshotBlocks = SnapshotBlocks.load(SnapshotLayout.blockMapFile(worldRoot, slot));
+            // 快照里块编码的 .mca 没有实体文件，读它的头部要过一个块存储会话；用完就关
+            List<Target> targets;
+            try (SnapshotBlockStore headerStore = SnapshotBlockIo.openStore(worldRoot)) {
+                targets = collectTargets(server, worldRoot, slotDir, headerStore, snapshotBlocks, result);
+            }
             unload(server, targets, result);
             drainUnloads(server);
             // 实体区块的卸载由区块状态驱动，靠 entityManager.tick() 推进，而且可能因为「实体还没读完」
@@ -196,8 +203,7 @@ public final class InPlaceRollback {
             result.storageMs = millisSince(stepNanos);
 
             stepNanos = System.nanoTime();
-            SnapshotMirror.Result mirror = SnapshotMirror.mirror(
-                    slotDir, worldRoot, SnapshotMirror.Direction.TO_WORLD, manifest, null);
+            SnapshotMirror.Result mirror = SnapshotBlockIo.restoreInto(worldRoot, slot, manifest);
             result.mirror = mirror.summary();
             result.mirrorCopied = mirror.copied;
             result.mirrorSkipped = mirror.skipped;
@@ -250,7 +256,8 @@ public final class InPlaceRollback {
      * </ul>
      * 所以代价与「真正改了多少区块」成正比，与视距无关。
      */
-    private static List<Target> collectTargets(MinecraftServer server, Path worldRoot, Path slotDir, Result result) {
+    private static List<Target> collectTargets(MinecraftServer server, Path worldRoot, Path slotDir,
+            SnapshotBlockStore store, SnapshotBlocks blocks, Result result) throws IOException {
         List<Target> targets = new ArrayList<>();
         Map<Path, int[]> headerCache = new HashMap<>();
         for (ServerLevel level : server.getAllLevels()) {
@@ -272,9 +279,9 @@ public final class InPlaceRollback {
                 result.scannedChunks++;
                 ChunkPos pos = chunk.getPos();
                 if (chunk.isUnsaved()
-                        || regionChunkChanged(liveDirs, snapshotDirs, pos, headerCache)
+                        || regionChunkChanged(store, slotDir, blocks, liveDirs, snapshotDirs, pos, headerCache)
                         || hasSaveableEntities(sections, pos)
-                        || snapshotHasEntities(snapshotDirs, pos, headerCache)) {
+                        || snapshotHasEntities(store, slotDir, blocks, snapshotDirs, pos, headerCache)) {
                     targets.add(new Target(level, pos));
                 }
             }
@@ -291,12 +298,13 @@ public final class InPlaceRollback {
     }
 
     /** 快照里的实体文件在这个区块有没有数据（{@code RegionFile.clear} 会把偏移归零，所以偏移非 0 就是有）。 */
-    private static boolean snapshotHasEntities(List<Path> snapshotDirs, ChunkPos pos, Map<Path, int[]> cache) {
+    private static boolean snapshotHasEntities(SnapshotBlockStore store, Path slotDir, SnapshotBlocks blocks,
+            List<Path> snapshotDirs, ChunkPos pos, Map<Path, int[]> cache) throws IOException {
         // liveRegionDirs 的顺序是「区块 / 实体 / POI」
         if (snapshotDirs.size() < 2) {
             return false;
         }
-        int[] header = readRegionHeader(cache, snapshotDirs.get(1).resolve(regionFileName(pos)));
+        int[] header = snapshotHeader(cache, store, slotDir, blocks, snapshotDirs.get(1), regionFileName(pos));
         return header[(pos.x & 31) + (pos.z & 31) * 32] != 0;
     }
 
@@ -329,19 +337,42 @@ public final class InPlaceRollback {
     }
 
     /** 任意一个存储里这个区块的偏移/时间戳与快照不一致就算变过。 */
-    private static boolean regionChunkChanged(List<Path> liveDirs, List<Path> snapshotDirs, ChunkPos pos,
-            Map<Path, int[]> cache) {
+    private static boolean regionChunkChanged(SnapshotBlockStore store, Path slotDir, SnapshotBlocks blocks,
+            List<Path> liveDirs, List<Path> snapshotDirs, ChunkPos pos, Map<Path, int[]> cache) throws IOException {
         String name = regionFileName(pos);
         int index = (pos.x & 31) + (pos.z & 31) * 32;
         int count = Math.min(liveDirs.size(), snapshotDirs.size());
         for (int i = 0; i < count; i++) {
             int[] live = readRegionHeader(cache, liveDirs.get(i).resolve(name));
-            int[] snapshot = readRegionHeader(cache, snapshotDirs.get(i).resolve(name));
+            int[] snapshot = snapshotHeader(cache, store, slotDir, blocks, snapshotDirs.get(i), name);
             if (live[index] != snapshot[index] || live[1024 + index] != snapshot[1024 + index]) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 快照里这个 region 文件的头部。
+     *
+     * <p>块编码的 .mca 在槽位里没有实体文件，所以得从块存储拼出来——反正只要前两个 4 KiB 块。
+     * 老格式的槽位（映射里没有这个文件）照旧直接读文件。
+     */
+    private static int[] snapshotHeader(Map<Path, int[]> cache, SnapshotBlockStore store, Path slotDir,
+            SnapshotBlocks blocks, Path snapshotDir, String name) throws IOException {
+        Path file = snapshotDir.resolve(name);
+        SnapshotBlocks.Entry entry = blocks == null ? null : blocks.get(SnapshotLayout.relativize(slotDir, file));
+        if (entry == null) {
+            return readRegionHeader(cache, file);
+        }
+        int[] cached = cache.get(file);
+        if (cached != null) {
+            return cached;
+        }
+        byte[] prefix = store.readPrefix(entry.hashes, 8192);
+        int[] header = decodeHeader(prefix);
+        cache.put(file, header);
+        return header;
     }
 
     /**
@@ -359,19 +390,27 @@ public final class InPlaceRollback {
             byte[] bytes = new byte[8192];
             try (InputStream in = Files.newInputStream(file)) {
                 if (in.readNBytes(bytes, 0, 8192) == 8192) {
-                    for (int i = 0; i < 2048; i++) {
-                        int base = i * 4;
-                        header[i] = ((bytes[base] & 0xFF) << 24)
-                                | ((bytes[base + 1] & 0xFF) << 16)
-                                | ((bytes[base + 2] & 0xFF) << 8)
-                                | (bytes[base + 3] & 0xFF);
-                    }
+                    header = decodeHeader(bytes);
                 }
             } catch (IOException e) {
                 Rewind.LOGGER.warn("Rewind: cannot read region header {}", file, e);
             }
         }
         cache.put(file, header);
+        return header;
+    }
+
+    /** 把 8 KiB 的 region 头部解析成 2048 个 int（前 1024 个偏移、后 1024 个时间戳，都是大端）。 */
+    private static int[] decodeHeader(byte[] bytes) {
+        int[] header = new int[2048];
+        int count = Math.min(2048, bytes.length / 4);
+        for (int i = 0; i < count; i++) {
+            int base = i * 4;
+            header[i] = ((bytes[base] & 0xFF) << 24)
+                    | ((bytes[base + 1] & 0xFF) << 16)
+                    | ((bytes[base + 2] & 0xFF) << 8)
+                    | (bytes[base + 3] & 0xFF);
+        }
         return header;
     }
 

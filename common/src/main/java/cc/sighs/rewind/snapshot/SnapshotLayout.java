@@ -21,6 +21,10 @@ public final class SnapshotLayout {
     public static final String INDEX_FILE_NAME = "index.properties";
     /** 槽位文件清单后缀，用于增量快照。 */
     public static final String MANIFEST_SUFFIX = ".manifest";
+    /** 槽位块映射文件后缀：按 4 KiB 块存储的文件每个一行（见 {@code SnapshotBlocks}）。 */
+    public static final String BLOCK_MAP_SUFFIX = ".blocks";
+    /** 共享块目录名，位于存档点根目录内：内容寻址的 4 KiB 块，所有槽位共用。 */
+    public static final String BLOCKS_DIR_NAME = "blocks";
     /** 槽位背包快照后缀，位于存档点根目录内、与槽位目录同级（不参与镜像）。 */
     public static final String INVENTORY_SUFFIX = ".inventory";
     /** 默认槽位：F7 / F8 使用的滚动槽位。 */
@@ -30,8 +34,10 @@ public final class SnapshotLayout {
     /**
      * 自动槽位，界面上那张「自动」卡片。
      *
-     * <p>它和别的槽位没有区别，只是被预留出来——当前没有任何代码会自动往里写存档点
-     * （「自动保存」是原版自己的事，Rewind 的存档点不掺和）。玩家可以手动覆盖它。
+     * <p>它和别的槽位没有区别，只是被 {@code AutoCheckpoint} 拿来承接「跟着原版自动保存建点」：
+     * 原版每次自动保存完，这里会被写一个 {@code source=autosave} 的存档点（挂点见
+     * {@code cc.sighs.mixin.AutoCheckpointMixins}），所以那张卡不用手动覆盖也会自己长出内容。
+     * 玩家也可以手动覆盖它。
      */
     public static final String SLOT_AUTO = "auto";
     /** 手动槽位数量，对应界面上的 8 张编号卡片。 */
@@ -55,6 +61,8 @@ public final class SnapshotLayout {
     private static final Pattern REGION_TEMP = Pattern.compile("tmp\\d+");
     /** NeoForge 异步 SavedData 写入的临时文件 {@code *.neoforge-tmp}。 */
     private static final Pattern NEOFORGE_TEMP = Pattern.compile(".+\\.neoforge-tmp");
+    /** Rewind 原子替换槽位文件时用的临时文件 {@code *.rewind-tmp}（见 {@code SnapshotMirror}）。 */
+    private static final Pattern REWIND_TEMP = Pattern.compile(".+\\.rewind-tmp");
 
     private SnapshotLayout() {
     }
@@ -73,6 +81,16 @@ public final class SnapshotLayout {
 
     public static Path manifestFile(Path worldRoot, String slot) {
         return snapshotRoot(worldRoot).resolve(slot + MANIFEST_SUFFIX);
+    }
+
+    /** 槽位的块映射文件（与槽位目录同级，不参与镜像，删槽位时要一起删）。 */
+    public static Path blockMapFile(Path worldRoot, String slot) {
+        return snapshotRoot(worldRoot).resolve(slot + BLOCK_MAP_SUFFIX);
+    }
+
+    /** 所有槽位共用的内容寻址块目录。 */
+    public static Path blocksRoot(Path worldRoot) {
+        return snapshotRoot(worldRoot).resolve(BLOCKS_DIR_NAME);
     }
 
     /** 槽位的背包快照文件（与槽位目录同级，不参与镜像，删槽位时要一起删）。 */
@@ -160,7 +178,7 @@ public final class SnapshotLayout {
     /**
      * 判断一个相对路径是否应该被排除。
      *
-     * <p>排除 {@code session.lock}、存档点目录自身，以及原版写盘留下的临时文件；
+     * <p>排除 {@code session.lock}、存档点目录自身，以及原版与 Rewind 自己写盘留下的临时文件；
      * 其余（含 .mcc 超大区块文件、datapacks/、advancements/、stats/ 等）都算存档状态。
      */
     public static boolean isExcluded(String relativePath) {
@@ -178,7 +196,7 @@ public final class SnapshotLayout {
         if (path.equals(LOCK_FILE_NAME)) {
             return true;
         }
-        if (NEOFORGE_TEMP.matcher(last).matches()) {
+        if (NEOFORGE_TEMP.matcher(last).matches() || REWIND_TEMP.matcher(last).matches()) {
             return true;
         }
         if (REGION_TEMP.matcher(last).matches()) {

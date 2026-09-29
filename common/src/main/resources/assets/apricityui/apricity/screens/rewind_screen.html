@@ -198,6 +198,11 @@
         /* 节点卡片：同一套节点，竖 / 横方向靠 order 决定时间落在标题右边还是最后一行 */
         .tree-card{width:340px;margin:0 8px;padding:10px 12px;gap:5px 8px;flex-direction:row;flex-wrap:wrap}
         .tree-chart .tree-card:hover{transform:none}
+        /* 「当前进度」那个额外节点：绿框、不响应悬停，一眼和真正的存档点区分开。
+           AUI 只画实线边框——`Style` 里根本没有 border-style 字段，简写里的 dashed 会被直接丢掉，
+           所以这里用颜色区分而不是虚线。 */
+        .ore-theme .tree-card.now-card{border-color:var(--green);cursor:default}
+        .tree-chart .tree-card.now-card:hover{border-color:var(--green)}
         .tree-head{order:1;flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px}
         .tree-head .slot-title{flex:1 1 auto;min-width:0}
         .tree-card .slot-clock{order:2;flex:0 0 auto}
@@ -487,6 +492,14 @@
                                                             <div class="tree-head"><span class="badge badge-ghost">02</span><h4 class="slot-title">幽晶深窟</h4></div>
                                                             <p class="tree-meta">9 小时前 · 25.9 MB · 深板岩洞窟</p>
                                                             <span class="slot-clock">第 18 天 10:00</span>
+                                                        </article>
+                                                    </li>
+                                                    <!-- 「当前进度」：树上永远多一个，挂在时间线的头下面；它不是槽位，不可点 -->
+                                                    <li class="tree-node">
+                                                        <article class="card slot-card tree-card now-card">
+                                                            <div class="tree-head"><span class="badge badge-success">现在</span><h4 class="slot-title">当前进度</h4></div>
+                                                            <p class="tree-meta">针叶林<span>·</span>80, 71, 2</p>
+                                                            <span class="slot-clock">第 7 天 18:30</span>
                                                         </article>
                                                     </li>
                                                 </ul>

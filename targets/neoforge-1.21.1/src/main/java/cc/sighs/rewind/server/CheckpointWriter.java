@@ -91,9 +91,16 @@ public final class CheckpointWriter {
         SnapshotInventory.of(flushed.inventory).save(SnapshotLayout.inventoryFile(world, slot));
 
         SnapshotManifest previousManifest = SnapshotManifest.load(manifestFile);
-        SnapshotMirror.Result mirror = SnapshotMirror.mirror(
-                world, SnapshotLayout.slotDir(world, slot), SnapshotMirror.Direction.TO_SNAPSHOT, previousManifest, null);
-        mirror.manifest.save(manifestFile);
+        // region / entities / poi 的 .mca 按 4 KiB 块存：换一个槽位建点只为真正变了的扇区付字节
+        SnapshotMirror.Result mirror;
+        try (SnapshotBlockIo blocks = SnapshotBlockIo.open(world, slot)) {
+            mirror = SnapshotMirror.mirror(
+                    world, SnapshotLayout.slotDir(world, slot), SnapshotMirror.Direction.TO_SNAPSHOT, previousManifest,
+                    null, blocks.context());
+            mirror.manifest.save(manifestFile);
+            // 块映射和清单一样，必须在把槽位标成 complete 之前落地；close() 才会把收的块写进 pack
+            blocks.save();
+        }
 
         SnapshotMeta complete = base.copy();
         complete.status = SnapshotLayout.STATUS_COMPLETE;
@@ -124,8 +131,7 @@ public final class CheckpointWriter {
         }
         // 用建点时记录的清单判断活动存档里哪些文件还是原样：没动过的不必回拷
         SnapshotManifest reference = SnapshotManifest.load(SnapshotLayout.manifestFile(worldRoot, slot));
-        SnapshotMirror.Result mirror = SnapshotMirror.mirror(
-                snapshotDir, worldRoot, SnapshotMirror.Direction.TO_WORLD, reference, null);
+        SnapshotMirror.Result mirror = SnapshotBlockIo.restoreInto(worldRoot, slot, reference);
         long millis = millisSince(startedNanos);
         Rewind.LOGGER.info("Rewind: restored slot {} into {} ({}) in {} ms", slot, worldRoot, mirror.summary(), millis);
         return new Result(null, mirror, millis);

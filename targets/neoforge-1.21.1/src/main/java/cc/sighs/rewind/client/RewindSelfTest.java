@@ -11,6 +11,8 @@ import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
 import cc.sighs.rewind.api.RewindResult;
 import cc.sighs.rewind.server.RewindServerConfig;
+import cc.sighs.rewind.snapshot.SnapshotBlockStore;
+import cc.sighs.rewind.snapshot.SnapshotBlocks;
 import cc.sighs.rewind.snapshot.SnapshotIndex;
 import cc.sighs.rewind.snapshot.SnapshotInventory;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
@@ -665,9 +667,14 @@ public final class RewindSelfTest {
             check(!Files.isDirectory(slotDir.resolve(SnapshotLayout.ROOT_DIR_NAME)), "snapshot must not contain itself");
 
             List<String> worldFiles = SnapshotMirror.listFiles(world);
-            List<String> snapshotFiles = SnapshotMirror.listFiles(slotDir);
+            // 块编码的 .mca 在槽位里没有实体文件，逻辑文件集合要把块映射并进来
+            SnapshotBlocks blocks = SnapshotBlocks.load(SnapshotLayout.blockMapFile(world, Rewind.SLOT));
+            List<String> snapshotFiles = new ArrayList<>(SnapshotMirror.listFiles(slotDir));
+            snapshotFiles.addAll(blocks.paths());
             check(worldFiles.size() == snapshotFiles.size(),
                     "snapshot file count " + snapshotFiles.size() + " != world file count " + worldFiles.size());
+            check(snapshotFiles.containsAll(worldFiles),
+                    "snapshot is missing " + worldFiles.stream().filter(file -> !snapshotFiles.contains(file)).toList());
             if (meta != null) {
                 check(meta.fileCount == snapshotFiles.size(),
                         "index fileCount " + meta.fileCount + " != snapshot files " + snapshotFiles.size());
@@ -676,12 +683,38 @@ public final class RewindSelfTest {
                 check(Files.size(world.resolve("level.dat")) == Files.size(slotDir.resolve("level.dat")),
                         "snapshot level.dat size mismatch");
             }
-            List<String> regions = SnapshotMirror.listFiles(slotDir.resolve("region"));
-            check(!regions.isEmpty(), "snapshot has no overworld region files");
+            // region 文件走 4 KiB 块存储：抽一个重建出来，逐字节跟世界里那份比
+            List<String> regions = new ArrayList<>();
+            for (String relative : blocks.paths()) {
+                if (relative.startsWith("region/")) {
+                    regions.add(relative);
+                }
+            }
+            check(!regions.isEmpty(), "the snapshot should keep the overworld region files in block storage");
             if (!regions.isEmpty()) {
                 String first = regions.get(0);
-                check(Files.size(slotDir.resolve("region").resolve(first)) == Files.size(world.resolve("region").resolve(first)),
-                        "snapshot region file size mismatch for " + first);
+                SnapshotBlocks.Entry entry = blocks.get(first);
+                Path rebuilt = Files.createTempFile("rewind-selftest", ".mca");
+                Path scratch = Files.createTempDirectory("rewind-selftest-blocks");
+                try (SnapshotBlockStore store = SnapshotBlockStore.open(SnapshotLayout.blocksRoot(world))) {
+                    store.decode(entry.hashes, entry.size, rebuilt);
+                    check(Files.size(rebuilt) == entry.size,
+                            "rebuilt " + first + " is " + Files.size(rebuilt) + " bytes, expected " + entry.size);
+                    // 把重建出来的文件再编码一次，块序列必须与记录逐块一致。这里不能拿世界的当前内容去比：
+                    // 快照写完之后服务器还在 tick，region 文件随时会被重新落盘（mtime 都变了），
+                    // 那是世界在往前走，不是快照错了。内容正确性由两轮回溯后的世界状态断言负责。
+                    try (SnapshotBlockStore scratchStore = SnapshotBlockStore.open(scratch)) {
+                        check(entry.hashes.equals(scratchStore.encode(rebuilt).hashes),
+                                "rebuilding " + first + " did not reproduce the recorded blocks");
+                    }
+                } finally {
+                    Files.deleteIfExists(rebuilt);
+                    try (var paths = Files.walk(scratch)) {
+                        for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                            Files.deleteIfExists(path);
+                        }
+                    }
+                }
             }
             // 界面要用的那几样：一次读完整张索引、槽位清单、背包快照
             check(RewindApi.slots().size() == SnapshotLayout.MANUAL_SLOT_COUNT + 2,
@@ -836,14 +869,18 @@ public final class RewindSelfTest {
         check(activeLabel != null && activeLabel.getClassList().contains("active"),
                 "the label of the active layout should be highlighted");
 
-        // 一个存档点 = 一个节点
+        // 一个存档点 = 一个节点，另外树上永远多一个「当前进度」
         Map<String, SnapshotMeta> metas = RewindApi.describeAll(world);
         List<Element> nodes = document.querySelectorAll("#treeChart .tree-node");
         List<Element> cards = document.querySelectorAll("#treeChart .tree-card");
-        check(nodes.size() == metas.size(),
-                "the timeline should show every checkpoint, got " + nodes.size() + " nodes for "
-                        + metas.size() + " checkpoints");
-        check(cards.size() == metas.size(), "each checkpoint should be one node, got " + cards.size());
+        List<Element> nowCards = document.querySelectorAll("#treeChart .now-card");
+        int expectedNodes = metas.size() + 1;
+        check(nodes.size() == expectedNodes,
+                "the timeline should show every checkpoint plus the current-position node, got " + nodes.size()
+                        + " nodes for " + metas.size() + " checkpoints");
+        check(cards.size() == expectedNodes, "each checkpoint should be one node, got " + cards.size());
+        check(nowCards.size() == 1, "the timeline should always carry exactly one current-position node, got "
+                + nowCards.size());
         List<Element> roots = document.querySelectorAll("#treeChart > .tree-branch > .tree-node");
         check(roots.size() == 1, "the timeline should hang off a single root, got " + roots.size());
 
@@ -860,6 +897,22 @@ public final class RewindSelfTest {
         String rootSlot = rootCard == null ? null : rootCard.getDataset().get("slot");
         check(Rewind.SLOT.equals(rootSlot),
                 "the root node should be the quick checkpoint, got " + rootSlot);
+
+        // 「当前进度」必须挂在时间线的头下面。这一轮里头是**自动存档**：它建在快速存档之后
+        // （VERIFY_AUTO 里那次「跟着原版自动保存建点」），所以世界现在站在自动存档上。
+        String head = RewindApi.currentSlot(world);
+        check(SnapshotLayout.SLOT_AUTO.equals(head),
+                "the timeline head should be the auto slot - it was the checkpoint written last, got \"" + head + "\"");
+        if (nowCards.size() == 1) {
+            Element nowNode = nowCards.get(0).closest(".tree-node");
+            Element branch = nowNode == null ? null : nowNode.getParentElement();
+            Element headNode = branch == null ? null : branch.getParentElement();
+            Element headCard = headNode == null ? null : headNode.querySelector(".tree-card");
+            String attachedTo = headCard == null ? null : headCard.getDataset().get("slot");
+            check(head.equals(attachedTo),
+                    "the current-position node should hang under the timeline head, expected \"" + head
+                            + "\", got \"" + attachedTo + "\"");
+        }
 
         // 方向：默认从上到下，点一下顺时针转 90°，按钮上的文字跟着换
         check(treeView != null && "down".equals(treeView.getAttribute("data-dir")),

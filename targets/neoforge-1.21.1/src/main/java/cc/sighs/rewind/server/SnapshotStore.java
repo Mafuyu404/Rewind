@@ -46,9 +46,12 @@ public final class SnapshotStore {
         }
         removed |= deleteRecursively(SnapshotLayout.slotDir(worldRoot, slot));
         removed |= Files.deleteIfExists(SnapshotLayout.manifestFile(worldRoot, slot));
+        removed |= Files.deleteIfExists(SnapshotLayout.blockMapFile(worldRoot, slot));
         removed |= Files.deleteIfExists(SnapshotLayout.inventoryFile(worldRoot, slot));
         if (removed) {
             Rewind.LOGGER.info("Rewind: deleted checkpoint {}", slot);
+            // 槽位没了，它独有的那些 4 KiB 块也就没人引用了
+            SnapshotBlockIo.collectGarbage(worldRoot);
         }
         return removed;
     }

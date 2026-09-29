@@ -75,7 +75,8 @@
   "rewind.ui.detail.empty": "选中左边任意一个槽位查看详情",
 
   "rewind.ui.tree.count": "节点 %s",
-  "rewind.ui.tree.empty": "还没有任何存档点。按 F7 建一个，它就成了这条时间线的根。",
+  "rewind.ui.tree.now": "当前进度",
+  "rewind.ui.tree.now.badge": "现在",
   "rewind.ui.tree.dir.down": "从上到下",
   "rewind.ui.tree.dir.right": "从左到右",
   "rewind.ui.tree.dir.up": "从下到上",

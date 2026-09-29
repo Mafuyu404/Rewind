@@ -234,6 +234,25 @@ public final class RewindApi {
         return SnapshotLayout.uiSlots();
     }
 
+    /**
+     * 世界当前站在哪个存档点上——时间线的「头」（索引里的 {@code head}）。
+     *
+     * <p>建点时它决定新节点的父节点，回溯之后移到被回溯到的槽位；界面上的「节点树布局」用它
+     * 把「当前进度」这个节点钉在对应那一支下面。
+     *
+     * @return 槽位名；还没建过点、或者头所在的槽位已经被删了时返回空串
+     */
+    public static String currentSlot(Path worldRoot) {
+        try {
+            SnapshotIndex index = SnapshotIndex.load(SnapshotLayout.indexFile(worldRoot));
+            String head = index.getHead();
+            return index.get(head) == null ? "" : head;
+        } catch (IOException e) {
+            Rewind.LOGGER.error("Rewind: failed to read snapshot index", e);
+            return "";
+        }
+    }
+
     /** 槽位的背包快照；没建过点或文件缺失时返回空快照。 */
     public static SnapshotInventory readInventory(Path worldRoot, String slot) {
         return SnapshotInventory.load(SnapshotLayout.inventoryFile(worldRoot, slot));

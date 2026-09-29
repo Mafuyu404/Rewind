@@ -88,6 +88,13 @@ public final class RewindTreeScreen extends ApricityScreen {
 
     /** 时间线的四个方向，与模板里 {@code #treeView[data-dir]} 的取值一一对应，按顺时针排。 */
     private static final String[] TREE_DIRS = {"down", "right", "up", "left"};
+    /**
+     * 「当前进度」这个额外节点的内部标记。
+     *
+     * <p>它不是一个槽位：以 {@code @} 开头，过不了 {@link SnapshotLayout#isValidSlotName}，
+     * 所以永远不会和磁盘上的槽位撞名，也不会被写进索引。
+     */
+    private static final String NOW_NODE = "@now";
     /** 流程图画布四周留白：装得下就居中，装不下就贴着根节点那一端。 */
     private static final double FLOW_PADDING = 20.0D;
     /** 自动装树时允许缩到的最小倍数（再小就看不清卡片上的字了，剩下靠拖拽）。 */
@@ -730,6 +737,10 @@ public final class RewindTreeScreen extends ApricityScreen {
      * <p>节点就是「有存档点的槽位」——空槽位不在时间线上。父槽位不存在、指向自己、
      * 或者父链绕成环的，都当成根：宁可断一条边，也不能让递归转不出来。
      *
+     * <p>树上**永远多一个** {@link #NOW_NODE}「当前进度」节点：它挂在时间线的头
+     * （{@link RewindApi#currentSlot}）下面，一眼就能看出当前这一局是从哪个分叉岔出来的；
+     * 头还没立起来（新世界、或头所在的槽位被删了）时它自己当根。
+     *
      * <p>顺带把画布高度按视口算好，并在节点数变了的时候请求重新装一次树。
      */
     private void renderTree(Document document, Map<String, SnapshotMeta> metas) {
@@ -756,33 +767,42 @@ public final class RewindTreeScreen extends ApricityScreen {
                 children.computeIfAbsent(parent, key -> new ArrayList<>()).add(slot);
             }
         }
+        Path world = worldRoot();
+        String head = world == null ? "" : RewindApi.currentSlot(world);
+        boolean headInTree = !head.isEmpty() && metas.containsKey(head);
+        if (headInTree) {
+            // 「当前进度」是头这一支的末端，排在它的其他子节点后面
+            children.computeIfAbsent(head, key -> new ArrayList<>()).add(NOW_NODE);
+        }
         Element count = document.querySelector("#treeCount");
         if (count != null) {
             count.setInnerText(tr("rewind.ui.tree.count", total));
         }
-        if (total == 0) {
-            chart.setInnerHTML("<div class=\"empty-note\">" + text(tr("rewind.ui.tree.empty")) + "</div>");
-        } else {
-            // 同一层里按建点时间排：时间线的先后顺序才看得出来
-            Comparator<String> bySavedAt = Comparator.comparingLong(slot -> savedAt(metas, slot));
-            roots.sort(bySavedAt);
-            for (List<String> siblings : children.values()) {
-                siblings.sort(bySavedAt);
+        // 同一层里按建点时间排：时间线的先后顺序才看得出来
+        Comparator<String> bySavedAt = Comparator.comparingLong(slot -> savedAt(metas, slot));
+        roots.sort(bySavedAt);
+        for (List<String> siblings : children.values()) {
+            siblings.sort(bySavedAt);
+            if (siblings.remove(NOW_NODE)) {
+                siblings.add(NOW_NODE);
             }
-            StringBuilder html = new StringBuilder("<ul class=\"tree-branch\">");
-            Set<String> emitted = new HashSet<>();
-            for (String root : roots) {
-                appendTreeNode(html, root, metas, children, emitted);
-            }
-            // 父链成环时兜底：没被画出来的节点自己当根，保证每个存档点都看得见
-            for (String slot : RewindApi.slots()) {
-                if (metas.containsKey(slot) && !emitted.contains(slot)) {
-                    appendTreeNode(html, slot, metas, children, emitted);
-                }
-            }
-            html.append("</ul>");
-            chart.setInnerHTML(html.toString());
         }
+        StringBuilder html = new StringBuilder("<ul class=\"tree-branch\">");
+        Set<String> emitted = new HashSet<>();
+        for (String root : roots) {
+            appendTreeNode(html, root, metas, children, emitted);
+        }
+        // 父链成环时兜底：没被画出来的节点自己当根，保证每个存档点都看得见
+        for (String slot : RewindApi.slots()) {
+            if (metas.containsKey(slot) && !emitted.contains(slot)) {
+                appendTreeNode(html, slot, metas, children, emitted);
+            }
+        }
+        if (!headInTree) {
+            html.append(nowNode());
+        }
+        html.append("</ul>");
+        chart.setInnerHTML(html.toString());
         if (total != treeNodes) {
             treeNodes = total;
             flowFitPending = treeMode;
@@ -796,7 +816,7 @@ public final class RewindTreeScreen extends ApricityScreen {
             return;
         }
         html.append("<li class=\"tree-node\">");
-        html.append(treeCard(slot, metas.get(slot)));
+        html.append(NOW_NODE.equals(slot) ? nowCard() : treeCard(slot, metas.get(slot)));
         List<String> kids = children.get(slot);
         if (kids != null && !kids.isEmpty()) {
             html.append("<ul class=\"tree-branch\">");
@@ -806,6 +826,43 @@ public final class RewindTreeScreen extends ApricityScreen {
             html.append("</ul>");
         }
         html.append("</li>");
+    }
+
+    /** {@link #NOW_NODE} 那一格的 HTML（含 {@code <li>}）。 */
+    private static String nowNode() {
+        return "<li class=\"tree-node\">" + nowCard() + "</li>";
+    }
+
+    /**
+     * 「当前进度」这个额外节点：世界现在站在哪儿。
+     *
+     * <p>它不是一个槽位——没有存档点可读可写，所以它既不可选也不可点（卡片上没有 {@code data-act}），
+     * 只负责把「现在」钉在时间线上。虚框和真正的存档点区分开。
+     */
+    private static String nowCard() {
+        Minecraft minecraft = Minecraft.getInstance();
+        LocalPlayer player = minecraft.player;
+        StringBuilder html = new StringBuilder();
+        html.append("<article class=\"card slot-card tree-card now-card\">");
+        html.append("<div class=\"tree-head\"><span class=\"badge badge-success\">")
+                .append(text(tr("rewind.ui.tree.now.badge"))).append("</span><h4 class=\"slot-title\">")
+                .append(text(tr("rewind.ui.tree.now"))).append("</h4></div>");
+        html.append("<p class=\"tree-meta\">");
+        if (player == null || minecraft.level == null) {
+            html.append(text(tr("rewind.ui.hud.unavailable")));
+        } else {
+            BlockPos position = player.blockPosition();
+            String biome = minecraft.level.getBiome(position)
+                    .unwrapKey()
+                    .map(key -> biomeName(key.location().toString()))
+                    .orElseGet(() -> tr("rewind.ui.biome.unknown"));
+            html.append(text(biome)).append("<span>·</span>")
+                    .append(text(position.getX() + ", " + position.getY() + ", " + position.getZ()));
+        }
+        html.append("</p><span class=\"slot-clock\">")
+                .append(text(minecraft.level == null ? "" : gameClock(minecraft.level.getGameTime())))
+                .append("</span></article>");
+        return html.toString();
     }
 
     /** 时间线上的节点卡片：角色 / 序号 + 名字 + 一行摘要 + 游戏内时间，比槽位卡片小一号。 */

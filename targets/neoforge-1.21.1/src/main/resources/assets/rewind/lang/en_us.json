@@ -75,7 +75,8 @@
   "rewind.ui.detail.empty": "Pick a slot on the left to see its details",
 
   "rewind.ui.tree.count": "%s nodes",
-  "rewind.ui.tree.empty": "No checkpoints yet. Press F7 to write one - it becomes the root of this timeline.",
+  "rewind.ui.tree.now": "Now",
+  "rewind.ui.tree.now.badge": "now",
   "rewind.ui.tree.dir.down": "Top to bottom",
   "rewind.ui.tree.dir.right": "Left to right",
   "rewind.ui.tree.dir.up": "Bottom to top",
