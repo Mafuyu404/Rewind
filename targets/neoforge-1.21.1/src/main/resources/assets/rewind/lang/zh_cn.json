@@ -70,6 +70,7 @@
   "rewind.ui.detail.biome": "生物群系",
   "rewind.ui.detail.position": "坐标",
   "rewind.ui.detail.size": "文件大小",
+  "rewind.ui.detail.save_size": "存档大小",
   "rewind.ui.detail.world": "世界",
   "rewind.ui.detail.status": "状态",
   "rewind.ui.detail.empty": "选中左边任意一个槽位查看详情",

@@ -39,6 +39,7 @@ import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.Tag;
+import net.minecraft.network.protocol.game.ClientboundSetCarriedItemPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ServerScoreboard;
 import net.minecraft.server.level.ChunkHolder;
@@ -776,6 +777,10 @@ public final class InPlaceRollback {
         } else {
             player.connection.teleport(position.x, position.y, position.z, player.getYRot(), player.getXRot(), Set.of());
         }
+
+        // 快捷栏选中槽位也得推给客户端：load() 只改了服务端这一份，客户端还停在它自己的槽位上。
+        // 物品栏内容是一起回滚的，两边槽位不一致就直接表现为「客户端拿着 A、服务端用的是 B」。
+        player.connection.send(new ClientboundSetCarriedItemPacket(player.getInventory().selected));
 
         // load() 只把 NBT 读进内存，效果列表不会自己同步；清一遍再逐个 addEffect 才会发给客户端
         List<MobEffectInstance> effects = new ArrayList<>(player.getActiveEffects());

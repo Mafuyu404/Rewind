@@ -93,14 +93,18 @@ public final class CheckpointWriter {
         SnapshotManifest previousManifest = SnapshotManifest.load(manifestFile);
         // region / entities / poi 的 .mca 按 4 KiB 块存：换一个槽位建点只为真正变了的扇区付字节
         SnapshotMirror.Result mirror;
-        try (SnapshotBlockIo blocks = SnapshotBlockIo.open(world, slot)) {
+        SnapshotBlockIo blocks = SnapshotBlockIo.open(world, slot);
+        try {
             mirror = SnapshotMirror.mirror(
                     world, SnapshotLayout.slotDir(world, slot), SnapshotMirror.Direction.TO_SNAPSHOT, previousManifest,
                     null, blocks.context());
             mirror.manifest.save(manifestFile);
-            // 块映射和清单一样，必须在把槽位标成 complete 之前落地；close() 才会把收的块写进 pack
-            blocks.save();
+        } finally {
+            // close() 才把这次收的块真正写进 pack
+            blocks.close();
         }
+        // 映射必须等块落盘之后再写：先写映射、崩在落盘之前，会留下指向不存在块的槽位（读不回来）
+        blocks.save();
 
         SnapshotMeta complete = base.copy();
         complete.status = SnapshotLayout.STATUS_COMPLETE;

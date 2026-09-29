@@ -44,7 +44,12 @@ public final class SnapshotBlockIo implements Closeable {
         return new SnapshotMirror.Blocks(store, previous, written);
     }
 
-    /** 把这次写出来的映射落盘。必须在索引被标成 {@code complete} 之前调用。 */
+    /**
+     * 把这次写出来的映射落盘。
+     *
+     * <p>必须在 {@link #close()}（块真正写进 pack）**之后**、索引被标成 {@code complete} 之前调用：
+     * 顺序反了会留下指向不存在块的映射，那种槽位读不回来。
+     */
     public void save() throws IOException {
         written.save(SnapshotLayout.blockMapFile(worldRoot, slot));
     }

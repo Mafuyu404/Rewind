@@ -440,6 +440,14 @@ public final class RewindSelfTest {
                     worldWasClosed = false;
                     CheckpointController.setInPlaceEnabled(expectInPlace);
                     CheckpointController.setFastRestartEnabled(cycle == 1);
+                    // 把客户端的快捷栏选中槽位挪走，好验证回滚之后它会被推回建点时的那个。
+                    // 只对原地回滚做：关世界重开那条路上客户端会重登，选中槽位由它自己那套逻辑收敛。
+                    if (expectInPlace && minecraft.player != null && baseline != null) {
+                        minecraft.player.getInventory().selected = (baseline.selectedSlot + 4) % 9;
+                        Rewind.LOGGER.info(
+                                "Rewind self-test: moved the client's hotbar selection to {} (baseline {})",
+                                minecraft.player.getInventory().selected, baseline.selectedSlot);
+                    }
                     Rewind.LOGGER.info("Rewind self-test: cycle {} will restore via the {} path", cycle,
                             expectInPlace ? "in-place" : "close-and-reopen");
                     pressKeyFromGui(minecraft, InputConstants.KEY_F8, "F8");
@@ -511,6 +519,14 @@ public final class RewindSelfTest {
                         "entities summoned after the checkpoint must be gone after the restore, got " + state.extra);
                 check(state.diamonds == baseline.diamonds,
                         "restored inventory mismatch: diamonds " + state.diamonds + " != " + baseline.diamonds);
+                // 快捷栏选中槽位：原地回滚之后服务端必须把它推回客户端，否则客户端显示/选中的物品
+                // 和服务端实际用的是两回事（物品栏内容是一起回滚的，这个错位不容易看出来）。
+                // 关世界重开那条路客户端会重登，选中槽位由它自己那套逻辑收敛，不在这里断言。
+                if (cycle == 1) {
+                    check(state.selectedSlot == baseline.selectedSlot,
+                            "restored hotbar selection mismatch: " + state.selectedSlot
+                                    + " != " + baseline.selectedSlot);
+                }
                 check(Math.abs(state.px - baseline.px) < 2.5D && Math.abs(state.pz - baseline.pz) < 2.5D,
                         "restored player position mismatch: " + state.describe() + " vs " + baseline.describe());
                 // dayTime 只能来自 level.dat，回溯后必须回到建点时的值（差几 tick 是回溯期间正常流逝）
@@ -817,6 +833,24 @@ public final class RewindSelfTest {
             if (backToQuick != null) {
                 backToQuick.click();
             }
+        }
+
+        // 保存时间只显示绝对时间（2026-09-30 00:18），不带「（15 分钟前）」那种补充
+        String savedAtLabel = Component.translatable("rewind.ui.detail.saved_at").getString();
+        Element savedAtRow = null;
+        for (Element row : document.querySelectorAll("#detailBody .list-group-item")) {
+            if (row.getTextContent().trim().startsWith(savedAtLabel)) {
+                savedAtRow = row;
+            }
+        }
+        check(savedAtRow != null, "the detail panel should show the saved-at row, got "
+                + document.querySelectorAll("#detailBody .list-group-item").size() + " rows");
+        if (savedAtRow != null) {
+            String value = savedAtRow.getTextContent().substring(savedAtLabel.length()).trim();
+            check(!savedAtRow.getTextContent().contains("（"),
+                    "the saved-at row should carry the absolute time only, got: " + value);
+            check(value.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}"),
+                    "the saved-at row should look like 2026-09-30 00:18, got: " + value);
         }
 
         verifyTreeSettings(document);
@@ -1236,6 +1270,8 @@ public final class RewindSelfTest {
                 }
             }
             state.diamonds = diamonds;
+            // 客户端的快捷栏选中槽位：服务端那份由 player.load 回滚，客户端这份得靠服务端推过来
+            state.selectedSlot = inventory.selected;
         }
         return state;
     }
@@ -1371,6 +1407,8 @@ public final class RewindSelfTest {
         private double py;
         private double pz;
         private int diamonds = -1;
+        /** 客户端的快捷栏选中槽位（原地回滚后必须和建点时的那个一致）。 */
+        private int selectedSlot = -1;
         private long dayTime;
 
         private String describe() {
@@ -1381,6 +1419,7 @@ public final class RewindSelfTest {
                     + " extra=" + extra
                     + " player=" + String.format(Locale.ROOT, "%.2f/%.2f/%.2f", px, py, pz)
                     + " diamonds=" + diamonds
+                    + " selectedSlot=" + selectedSlot
                     + " dayTime=" + dayTime;
         }
     }

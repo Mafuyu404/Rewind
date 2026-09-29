@@ -21,6 +21,7 @@ import cc.sighs.rewind.server.RewindServerConfig;
 import cc.sighs.rewind.snapshot.SnapshotInventory;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
+import cc.sighs.rewind.snapshot.SnapshotUsage;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.event.KeyEvent;
 import com.sighs.apricityui.event.MouseEvent;
@@ -543,7 +544,9 @@ public final class RewindTreeScreen extends ApricityScreen {
                         absoluteTime(meta.savedAtMillis) + "（" + relativeTime(meta.savedAtMillis) + "）"));
                 html.append(row("rewind.ui.detail.playtime", playtime(meta.playtimeTicks)));
                 html.append(row("rewind.ui.detail.biome", biomeName(meta.biomeId)));
-                html.append(row("rewind.ui.detail.size", sizeText(meta.totalBytes)));
+                long occupied = occupiedBytes(slot, meta);
+                html.append(row("rewind.ui.detail.size", sizeText(occupied < 0L ? meta.totalBytes : occupied)));
+                html.append(row("rewind.ui.detail.save_size", sizeText(meta.totalBytes)));
                 html.append(row("rewind.ui.detail.status", meta.status));
             }
             info.setInnerHTML(html.toString());
@@ -1167,13 +1170,14 @@ public final class RewindTreeScreen extends ApricityScreen {
                 .append(text(tr("rewind.ui.detail.inventory"))).append("</div>");
         html.append(inventoryHtml());
         html.append("<ul class=\"list-group mt-3\">");
-        html.append(row("rewind.ui.detail.saved_at",
-                absoluteTime(meta.savedAtMillis) + "（" + relativeTime(meta.savedAtMillis) + "）"));
+        html.append(row("rewind.ui.detail.saved_at", absoluteTime(meta.savedAtMillis)));
         html.append(row("rewind.ui.detail.playtime", playtime(meta.playtimeTicks)));
         html.append(row("rewind.ui.detail.biome", biomeName(meta.biomeId)));
         html.append(row("rewind.ui.detail.position",
                 String.format(Locale.ROOT, "%.0f, %.0f, %.0f", meta.playerX, meta.playerY, meta.playerZ)));
-        html.append(row("rewind.ui.detail.size", sizeText(meta.totalBytes)));
+        long occupied = occupiedBytes(selectedSlot, meta);
+        html.append(row("rewind.ui.detail.size", sizeText(occupied < 0L ? meta.totalBytes : occupied)));
+        html.append(row("rewind.ui.detail.save_size", sizeText(meta.totalBytes)));
         html.append("</ul>");
         html.append("<div class=\"detail-actions\">");
         html.append(actionButton(selectedSlot, "load", "button-secondary", tr("rewind.ui.action.load_full"), !meta.isComplete()));
@@ -1381,6 +1385,45 @@ public final class RewindTreeScreen extends ApricityScreen {
     private static Map<String, SnapshotMeta> loadMetas() {
         Path world = worldRoot();
         return world == null ? Map.of() : RewindApi.describeAll(world);
+    }
+
+    /** 「这个槽位实际占了多少磁盘」的缓存：键是槽位 + 它的建点时刻，变了才重新量。 */
+    private static String occupiedKey = "";
+    private static long occupiedValue = -1L;
+
+    /**
+     * 这个槽位自己的文件占了磁盘多少字节。
+     *
+     * <p>就是它目录里那些文件（外加清单 / 块映射 / 背包快照）——region 那些内容已经搬进跨槽位共享的
+     * 4 KiB 块存储，不属于任何一个槽位，所以这里只有几十 KB。内容合计看 {@link SnapshotMeta#totalBytes}。
+     * 一次目录遍历很便宜，但还是按「槽位 + 建点时刻」缓存，免得每帧都走一遍。
+     *
+     * @return 字节数；量不出来时返回 -1，调用方退回显示内容合计
+     */
+    private static long occupiedBytes(String slot, SnapshotMeta meta) {
+        if (slot == null || meta == null) {
+            return -1L;
+        }
+        String key = slot + "@" + meta.savedAtMillis;
+        if (key.equals(occupiedKey)) {
+            return occupiedValue;
+        }
+        long value = -1L;
+        Path world = worldRoot();
+        if (world != null) {
+            try {
+                Long measured = SnapshotUsage.occupiedBytes(world).get(slot);
+                if (measured != null) {
+                    value = measured;
+                }
+            } catch (Exception e) {
+                // 量不出来不是错误：界面退回显示内容合计就行
+                Rewind.LOGGER.warn("Rewind: failed to measure the disk usage of slot {}", slot, e);
+            }
+        }
+        occupiedKey = key;
+        occupiedValue = value;
+        return value;
     }
 
     /**

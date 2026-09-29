@@ -70,6 +70,7 @@
   "rewind.ui.detail.biome": "Biome",
   "rewind.ui.detail.position": "Position",
   "rewind.ui.detail.size": "Size",
+  "rewind.ui.detail.save_size": "Save size",
   "rewind.ui.detail.world": "World",
   "rewind.ui.detail.status": "Status",
   "rewind.ui.detail.empty": "Pick a slot on the left to see its details",
