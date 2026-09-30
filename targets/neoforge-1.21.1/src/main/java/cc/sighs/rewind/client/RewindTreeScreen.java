@@ -184,6 +184,12 @@ public final class RewindTreeScreen extends ApricityScreen {
     private boolean flowFitPending;
     /** 上一次铺进树里的节点数：变了才重新装一次视图，免得每次重画都把玩家的平移缩放抹掉。 */
     private int treeNodes = -1;
+    /**
+     * 「在此存档」那个节点这一次要写进的槽位（序号最小的空手动槽位）；全满了就是 null。
+     *
+     * <p>只在一次 {@link #renderTree} 里用：渲染前算好，节点卡片照着它决定标题与能不能点。
+     */
+    private String freeManualSlot;
 
     public RewindTreeScreen() {
         super(TEMPLATE);
@@ -415,6 +421,9 @@ public final class RewindTreeScreen extends ApricityScreen {
                 break;
             case "flow-reset":
                 flowFitPending = true;
+                break;
+            case "save-here":
+                saveToFirstFreeSlot(document);
                 break;
             default:
                 break;
@@ -774,9 +783,10 @@ public final class RewindTreeScreen extends ApricityScreen {
         String head = world == null ? "" : RewindApi.currentSlot(world);
         boolean headInTree = !head.isEmpty() && metas.containsKey(head);
         if (headInTree) {
-            // 「当前进度」是头这一支的末端，排在它的其他子节点后面
+            // 「在此存档」是头这一支的末端，排在它的其他子节点后面
             children.computeIfAbsent(head, key -> new ArrayList<>()).add(NOW_NODE);
         }
+        freeManualSlot = firstFreeSlot(metas);
         Element count = document.querySelector("#treeCount");
         if (count != null) {
             count.setInnerText(tr("rewind.ui.tree.count", total));
@@ -832,24 +842,32 @@ public final class RewindTreeScreen extends ApricityScreen {
     }
 
     /** {@link #NOW_NODE} 那一格的 HTML（含 {@code <li>}）。 */
-    private static String nowNode() {
+    private String nowNode() {
         return "<li class=\"tree-node\">" + nowCard() + "</li>";
     }
 
     /**
-     * 「当前进度」这个额外节点：世界现在站在哪儿。
+     * 「在此存档」这个额外节点：世界现在站在哪儿，以及点一下就能把当前进度存到哪儿。
      *
-     * <p>它不是一个槽位——没有存档点可读可写，所以它既不可选也不可点（卡片上没有 {@code data-act}），
-     * 只负责把「现在」钉在时间线上。虚框和真正的存档点区分开。
+     * <p>它不是一个槽位——没有存档点可读可写，所以它不可选（点了不会进详情面板）。但它**可以点**：
+     * 写进 {@link #freeManualSlot}（序号最小的空手动槽位），走的是「界面里覆盖」那条后台写盘路径
+     * （界面不退、不放过渡）。槽位全满时它变成一句「无空槽位」且不可点。
      */
-    private static String nowCard() {
+    private String nowCard() {
         Minecraft minecraft = Minecraft.getInstance();
         LocalPlayer player = minecraft.player;
+        boolean canSave = freeManualSlot != null;
         StringBuilder html = new StringBuilder();
-        html.append("<article class=\"card slot-card tree-card now-card\">");
+        html.append("<article class=\"card slot-card tree-card now-card")
+                .append(canSave ? "" : " is-full").append('"');
+        if (canSave) {
+            html.append(" data-act=\"save-here\" tabindex=\"0\" role=\"button\"");
+        }
+        html.append('>');
         html.append("<div class=\"tree-head\"><span class=\"badge badge-success\">")
                 .append(text(tr("rewind.ui.tree.now.badge"))).append("</span><h4 class=\"slot-title\">")
-                .append(text(tr("rewind.ui.tree.now"))).append("</h4></div>");
+                .append(text(tr(canSave ? "rewind.ui.tree.save_here" : "rewind.ui.tree.no_slot")))
+                .append("</h4></div>");
         html.append("<p class=\"tree-meta\">");
         if (player == null || minecraft.level == null) {
             html.append(text(tr("rewind.ui.hud.unavailable")));
@@ -866,6 +884,36 @@ public final class RewindTreeScreen extends ApricityScreen {
                 .append(text(minecraft.level == null ? "" : gameClock(minecraft.level.getGameTime())))
                 .append("</span></article>");
         return html.toString();
+    }
+
+    /** 序号最小的空手动槽位（{@code s1} 起）；8 个都满了返回 null。 */
+    @Nullable
+    private static String firstFreeSlot(Map<String, SnapshotMeta> metas) {
+        for (int index = 1; index <= SnapshotLayout.MANUAL_SLOT_COUNT; index++) {
+            String slot = SnapshotLayout.manualSlot(index);
+            if (!metas.containsKey(slot)) {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 时间线上那个「在此存档」被点了：把当前进度写进序号最小的空手动槽位。
+     *
+     * <p>没有空槽位时不动作（那个节点这会儿本来就不可点，这里只是兜底）。写盘走
+     * {@link #startBackgroundSave}：界面不退、不放过渡，做完由 {@link #tick()} 收回来重画。
+     */
+    private void saveToFirstFreeSlot(Document document) {
+        if (!usable(document)) {
+            return;
+        }
+        String slot = firstFreeSlot(loadMetas());
+        if (slot == null) {
+            log("rewind.ui.log.no_free_slot");
+            return;
+        }
+        startBackgroundSave(document, slot);
     }
 
     /** 时间线上的节点卡片：角色 / 序号 + 名字 + 一行摘要 + 游戏内时间，比槽位卡片小一号。 */
