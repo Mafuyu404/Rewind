@@ -147,7 +147,7 @@ F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（�
 - **按下 F7/F8 会先把当前界面摘掉**（`CheckpointController.closeScreen`）：过渡是整帧后处理（重采样整幅画面），界面开着既会挡在效果上面，也违反上面那条「过渡期间不得出现界面」。摘屏用的是 `setScreen(null)`，容器界面走原版 `removed()` 的正常关闭路径，不会丢东西。
 - **「没有存档点」不是失败路径**：F8 在没建过存档点时只写一条日志，不动玩家当前的界面（原来会走 `fail()` 把界面关掉）。
 
-- **所有过渡参数都在客户端配置里**：`RewindClientConfig`（`run/config/rewind-client.toml`，`ModConfig.Type.CLIENT`）管着淡入时长、存档/读档各自的淡出时长、饱和度倍数、模糊半径、读档的 settle tick。默认值与改造前写死的常量一致。值只在配置加载/重载时抄进 static 字段（后处理每帧都读，不能每帧查表），配置没加载成功时保持默认值。**加新的过渡可调项就往这里加**，别在 `RewindTransition` / 渲染器里再写死常量；着色器里的浓度/半径是 uniform（`SaturationBoost` / `BlurRadius`），由渲染器每帧从配置灌进去。
+- **所有过渡参数都在客户端配置里**：`RewindClientConfig`（`run/config/rewind-client.toml`，`ModConfig.Type.CLIENT`）管着淡入时长、存档/读档各自的淡出时长、饱和度倍数、模糊半径、读档的 settle tick。默认值与改造前写死的常量一致。值只在配置加载/重载时抄进 static 字段（后处理每帧都读，不能每帧查表），配置没加载成功时保持默认值。**加新的过渡可调项就往这里加**，别在 `RewindTransition` / 渲染器里再写死常量；着色器里的浓度/半径是 uniform（`SaturationBoost` / `BlurRadius`），由渲染器每帧从配置灌进去。其中「存档过渡强度」（`saturationBoost`）与「读档过渡强度」（`blurRadius`）在界面上有滚动条（「快速存档」卡的「设置」里），可调范围就是这里的 `MIN_/MAX_SATURATION_BOOST` 与 `MIN_/MAX_BLUR_RADIUS`——**范围只在配置类里写一份**，界面照着读；界面拖动时走 `previewXxx`（只改 static 字段，当场见效、不落盘），松手走 `commitXxx`（写进 spec 并 `save()`）。
 - **过渡包络**：`RewindTransition` 用真实时间推进 0 → 1 → 0（存档 = 饱和度提高，读档 = 高斯模糊）。`isFadeInDone()` 用来卡「等效果满强度之后再动手」，这样真正危险的动作玩家看不到。时长全部来自 `RewindClientConfig`；`HOLD_LIMIT_SECONDS`（25s）不是可调项，是「任何异常路径都不该让效果一直挂着」的兜底。另外读档「世界回来之后、开始淡出之前」那段等待不再是一个固定 tick 数：判据是**客户端已加载的区块数连续两 tick 不再增长**（`CheckpointController.REVEALING`，常量 `REVEAL_STABLE_TICKS`），配置里的 `restoreSettleTicks` 退化成**上限**。原来固定等 10 tick（0.5 秒），而这段时间玩家其实已经能看见世界、手里的东西也回来了——多糊的每一 tick 都是白等；现在 in-place 回滚那条路只等 3-4 tick（0.15-0.2 秒），读档完成后总共还糊 ≈ 0.2-0.25 秒。日志里有一行 `Rewind: reveal settled after N ticks (chunks=..., stable=..., cap=...)` 可以核对。
 
 注意那个上限是从**进入 REVEALING 阶段**算起的（含世界还没回来的 tick）：关世界重开那条回退路径上，客户端拿到世界时 `phaseTicks` 往往已经超过上限，于是「世界一出现就收」——这和改动前一样（改动前那 10 tick 也是被这些空 tick 吃掉的），所以那条路的行为没变。
@@ -166,10 +166,18 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 
 **界面上不放任何提示**：所有反馈（写完了 / 没存档点 / 局域网开着 / 名字不合法……）只写日志，文案走 `rewind.ui.log.*`——和模组别处一致（F7/F8 也是只写日志，不往聊天框发东西）。
 
-- **排序默认按槽位序号**（`SortMode.INDEX`，模板里 `#sort` 的第一个选项也标了 `selected`），所以卡片默认就是固定的 `s1..s8` 顺序；「最新」那个角标只是标出哪个槽位最新，不会把顺序挪走。详情面板里的字段是「保存时间 / 游玩时长 / 生物群系 / 坐标 / 文件大小 / 存档大小」——「世界」和「状态」这两行只在设置弹窗里有。**「文件大小」是这个槽位自己的文件**（`SnapshotUsage.occupiedBytes`：槽位目录 + 清单 + 块映射 + 背包快照），**只有几十 KB**，因为 region / entities / poi 的内容已经搬进跨槽位共享的 `blocks/` 目录了；**「存档大小」是这份存档点内容的合计**（`SnapshotMeta.totalBytes`），才是整个世界的量级。两个数差得远不是 bug——「删掉这个槽位能腾出多少」又是第三个量（要减掉共享块的分摊），别拿「文件大小」当它。「保存时间」**只写绝对时间**（`2026-09-30 00:18`），不要再加上「（15 分钟前）」那种相对时间——相对时间是卡片上的写法（`.slot-line` / `.tree-meta`）。
+- **排序默认按槽位序号**（`SortMode.INDEX`，模板里 `#sort` 的第一个选项也标了 `selected`），所以卡片默认就是固定的 `s1..s8` 顺序；「最新」那个角标只是标出哪个槽位最新，不会把顺序挪走。详情面板里的字段是「保存时间 / 游玩时长 / 生物群系 / 坐标 / 文件大小 / 存档大小」（「世界」和「状态」不再显示：设置弹窗里只放设置项，不重复槽位详情）。**「文件大小」是这个槽位自己的文件**（`SnapshotUsage.occupiedBytes`：槽位目录 + 清单 + 块映射 + 背包快照），**只有几十 KB**，因为 region / entities / poi 的内容已经搬进跨槽位共享的 `blocks/` 目录了；**「存档大小」是这份存档点内容的合计**（`SnapshotMeta.totalBytes`），才是整个世界的量级。两个数差得远不是 bug——「删掉这个槽位能腾出多少」又是第三个量（要减掉共享块的分摊），别拿「文件大小」当它。「保存时间」**只写绝对时间**（`2026-09-30 00:18`），不要再加上「（15 分钟前）」那种相对时间——相对时间是卡片上的写法（`.slot-line` / `.tree-meta`）。
 
 - **「自动存档」是「跟着原版自动保存建点」的 Rewind 槽位**：原版每次自动保存完，就往 `auto` 槽位写一个存档点（见下面「自动存档点」一节）。所以那张卡不用手动覆盖也会自己长出内容。
-- **设置弹窗**：自动 / 快速这两个固定角色槽位的第三个按钮。自动那张卡里是状态 + **唯一一个可调项**——「跟着原版自动保存建点」的开关（`data-act="toggle-auto"`，改完立刻落盘）；快速那张卡只有状态。手动槽位不走这里，仍然是「重命名」。
+- **设置弹窗**：自动 / 快速这两个固定角色槽位的第三个按钮。手动槽位不走这里，仍然是「重命名」。
+  - **配置项一律用主题自带的控件**（`ore.css` 里 `.form-group` / `.form-label` / `.form-help` / `.form-input` / `.input-group` / `.slider` / `.button`），**不要在页面里另写一套控件样式**。弹窗内容由 Java 侧铺进 `#settingsInfo`，**里面只有设置项本身**——不要再往里塞「槽位详情」那几行（世界 / 保存时间 / 游玩时长 / 生物群系 / 大小 / 状态）：那些是详情面板的事，设置弹窗只负责改设置。
+  - **自动存档**那张卡：状态 + **两个可调项**——「跟着原版自动保存建点」的开关（`data-act="toggle-auto"`）与「自动保存间隔（分钟）」（`#autoInterval` 输入框 + `data-act="apply-interval"`，两者包在主题的 `.input-group` 里，输入框自适应、按钮定宽）。两个都是改完立刻落盘、然后重开一次弹窗刷新。
+  - **快速存档**那张卡：状态 + **两条过渡强度滑块**（`#saturationBoost` / `#blurRadius`）+ 一个「改键」按钮（`data-act="open-keys"`）。滑块就是**主题那个 `.slider`**（`div.slider` > `div.slider-process` + `span.slider-thumb`，宽度 / 位置按值写成行内百分比），当前值写在它下面的 `.form-help` 里。
+    > **主题的滑块只是视觉**：它是 div，没有行为，拖动得自己驱动（`onSliderMouseDown/Move/Up`，按下 + 拖动按光标位置算比例，松手落盘）。**拖动期间只改内存里的值**（`previewXxx`，后处理每帧读的就是那两个 static 字段，所以当场能看到效果），**松手才落盘**（`commitXxx`）——拖一次会来一串事件，每个都写配置会连带触发配置文件监听重载、刷一屏日志。它改的是 `RewindClientConfig` 的饱和度倍数与模糊半径。
+  - 「改键」打开的是 `RewindKeyBindsScreen`——原版按键绑定页，**列表被筛成只有 Rewind 那两个热键**（加上它们那条分类标题，一共 3 行）。筛的地方是 `cc.sighs.mixin.KeyBindsListMixins`（挂在 mixins.json 的 `client` 段）：`KeyBindsList` 的构造函数是照着 `Options.keyMappings` 这一整份数组铺列表的，所以那里 `@Redirect` 掉这次 `getfield`，只在自己那一页返回 `{snapshotKey, restoreKey}` 这个新数组——别的按键连条目都不会建，分类标题也只出现一次，`maxNameWidth` 同样只按这两条算。从原版「选项 → 按键」进去走的是同一个构造函数，但那时 `keyBindsScreen` 不是 `RewindKeyBindsScreen`，原样放行。
+    > 为什么不是「铺完再删」：`addEntry` / `clearEntries` / `removeEntry` 都是 `AbstractSelectionList` 的 **protected** 方法，跨包调不到；`@WrapOperation` 又要求处理器参数类型与原方法**完全一致**，那个 `AbstractSelectionList$Entry` 同样是 protected、够不着（`@WrapOperation` 不接受 `Object` 这样的父类型，实测会报 invalid signature）。换数据源这条路绕开了这两件事。
+    > **只按身份（`==`）挑那两个热键**：按分类挑会把 F9「打开时间树」也带进来。`RewindClient` 还没注册按键映射时返回 `options.keyMappings` 兜底。
+  > 「重开弹窗」= 给 `#settingsInfo` 重设 `innerHTML`，里面所有节点都换成新的：**之前抓住的那个按钮引用当场作废**（点它没有任何反应）。自测里改完一项再点另一项时，必须重新 `querySelector`。滑块那三个鼠标监听也是每次现挂的（它们不是模板里的静态元素）。
 
 - **页面完全由 Java 侧驱动**。模板是 `common/src/main/resources/assets/apricityui/apricity/screens/rewind_screen.html`（AUI 的基准目录就是 `assets/apricityui/apricity/`，别的模组放同路径也能被扫到，namespace 必须是 `apricityui`）。页面里的 `<script>` **已经删掉**：AUI 的页面脚本与 `global.js` 都要求 KubeJS 在场（`ScriptService` 里被 `KubeJSSupport.loaded()` 挡着），没有 KubeJS 时静默不执行——所以交互只能靠 Java 侧：`Document.addEventListener("click", ...)`（实际挂在 `body` 上，点击会冒泡上来）、`Element.closest("[data-act]")`、`getDataset()`、`classList.add("open")`、`setInnerHTML(...)`。模板里那些静态卡片只是「没接上数据时的样子」，每次渲染都被整体替换。
 - **整页字体是微软雅黑**：原来的 `OreRegular` / `OreDisplay` 是远程 webfont，游戏里一直加载不到（AUI 日志里 `font family unavailable`），页面走的本来就是 fallback；现在把两个 `@font-face` 去掉、所有 `font-family` 改成 `"Microsoft YaHei","微软雅黑",...`。
@@ -225,7 +233,11 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 - `AutoCheckpoint.onVanillaAutosave` 已经在服务端线程上，会跳过四种情形：开关关着、正在回溯（`Rewind.isDiscarding()`，那会儿的世界状态马上要被丢掉）、局域网开放或专用服务器、世界里没有玩家。
 - **自动存档和快速存档是两个独立槽位**，谁都不碰谁：自动建点只写 `SnapshotLayout.SLOT_AUTO`（`auto`），F7 / F8 与界面只写 `DEFAULT_SLOT`（`quick`）或玩家在界面上选的那个槽位。改这条链时注意别让任何一边落到另一个槽位名上——自测里有断言钉着它（自动建点前后快速槽位的 `savedAtMillis` 必须不变，且两个槽位的 `savedAtMillis` 不相同）。
 - **代价是一次卡顿**：建点 = 强制落盘 + 增量拷贝，跑在服务端线程上，几十到几百毫秒，存档越大越明显。所以它可关：`RewindServerConfig`（COMMON 配置，`run/config/rewind-common.toml` 的 `autoCheckpoint.enabled`，默认开），界面上「自动存档」卡的「设置」里是同一个开关。它在模组构造阶段注册（不是客户端 setup），因为 COMMON 配置两边都要有。
-- **改开关要落盘**：FML 4 的 `ModConfig` 上没有 `save()`，入口是 `modConfig.getLoadedConfig().save()`。
+- **改开关要落盘**：FML 4 的 `ModConfig` 上没有 `save()`，入口是 `modConfig.getLoadedConfig().save()`（两个可调项共用一个私有 `save()`）。
+- **自动保存间隔（`autoCheckpoint.intervalMinutes`，默认 5 = 原版）直接改原版的自动保存间隔**：`AutoCheckpointMixins$MinecraftServerAutosave` 在 `MinecraftServer.computeNextAutosaveInterval` 的返回处按「配置值 / 5 分钟」**等比缩放**原版算出来的 tick 数。等比而不是直接返回固定值，是为了留下原版的**冲刺**行为——`tickrate` 被拉高时原版会算出一个更短的间隔来防止内存涨爆，缩放之后这个行为跟着一起保留（原版那句是 `max(100, (int)(tickrate * 300))`，那个 `300` 是**秒**，也就是 5 分钟）。
+  > 同一个 mixin 还在 `tickServer` 的开头每 tick 把倒计时（`@Shadow ticksUntilAutosave`）压到配置值以内：世界刚开、或者间隔刚被改小的时候，倒计时还停在原版那个 5 分钟上，不压一下设置就不生效。**只压不抬**——原版冲刺时算出来的更短间隔要留着。代价是「把间隔改大」不会立刻拉长已经在跑的倒计时，那一次自动保存会来得比配置值早一点。
+  > 间隔**只在「跟着原版自动保存建点」开着时才作用到原版上**（`RewindServerConfig.autoSaveIntervalTicks()` 关着时返回 0，两个注入都直接放行）——关着的时候改它没有意义，原版该多久存一次还是多久。
+  > 自测里测这个间隔**只用比默认值大的数**（30 分钟、以及超出上限的 99）：改成比 5 分钟小会把倒计时压下来，后面那一轮就可能凭空插一次真自动保存，把回溯的耗时断言搅黄。「分钟 → tick」的换算按 `autoSaveIntervalMinutes() * TICKS_PER_MINUTE` 直接查，不靠真等。
 - **自测**（第 1 轮 `VERIFY_AUTO`）：关掉开关 → 删掉 auto 槽位 → 跑一次 `saveEverything(true, false, false)` → 断言槽位仍然空；打开开关 → 再跑一次 → 断言槽位写出来了、`source=autosave`。随后 `VERIFY_TREE` 里还会在界面上点一次那个开关，断言配置真的翻了、再翻回来。
 
 ### 曾经的问题：AUI 屏幕文档里画不出图片（neoforge-1.21.1）

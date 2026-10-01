@@ -18,14 +18,20 @@ import cc.sighs.rewind.snapshot.SnapshotInventory;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 import cc.sighs.rewind.snapshot.SnapshotMirror;
+import cc.sighs.mixin.KeyBindsListMixins;
 import com.mojang.blaze3d.platform.InputConstants;
+import com.sighs.apricityui.event.Event;
+import com.sighs.apricityui.event.MouseEvent;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
+import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.loader.Loader;
 import com.sighs.apricityui.render.ImageDrawer;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.client.gui.screens.options.controls.KeyBindsList;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
@@ -73,6 +79,8 @@ public final class RewindSelfTest {
     private static int managePhase;
     /** 「时间树」那一轮的子步骤：0 = 档案布局，1 = 已切到节点树布局、等布局算完。 */
     private static int treePhase;
+    /** 进入当前子步骤的 tick：等待时长按「进入之后过了几拍」算，不能拿 stageTicks 当绝对阈值。 */
+    private static int treePhaseStart;
     /** 覆盖 / 删除这两条路用的探针槽位：建完就删，跑完不留痕迹。 */
     private static final String PROBE_SLOT = SnapshotLayout.manualSlot(1);
     /** 自动建点之前快速槽位的 savedAt，用来断言「自动存档不许碰快速槽位」。 */
@@ -92,6 +100,8 @@ public final class RewindSelfTest {
     private static final int TREE_SCREEN_SETTLE_TICKS = 50;
     /** 切到节点树布局之后再等这么久：新铺出来的节点卡片又是一批没光栅过的文字。 */
     private static final int TREE_TIMELINE_SETTLE_TICKS = 90;
+    /** 打开「自动存档」的设置弹窗之后再等这么久才截图：弹窗是上一帧才画出来的，里面的字也要等光栅。 */
+    private static final int TREE_SETTINGS_SETTLE_TICKS = 80;
 
     private enum Stage {
         WAIT_WORLD,
@@ -352,6 +362,7 @@ public final class RewindSelfTest {
                     }
                     Rewind.LOGGER.info("Rewind self-test: opening the time tree");
                     treePhase = 0;
+                    treePhaseStart = stageTicks;
                     RewindTreeScreen.open();
                     return;
                 }
@@ -368,24 +379,76 @@ public final class RewindSelfTest {
                 }
                 if (treePhase == 0) {
                     // 档案布局：卡片、详情面板、背包快照、设置弹窗
-                    if (stageTicks < TREE_SCREEN_SETTLE_TICKS) {
+                    if (stageTicks - treePhaseStart < TREE_SCREEN_SETTLE_TICKS) {
                         return;
                     }
                     verifyTree(tree);
                     screenshotTree(minecraft, "rewind-tree");
                     treePhase = 1;
-                    openTimeline(tree);
+                    treePhaseStart = stageTicks;
+                    // 把「自动存档」的设置弹窗重新打开并留着：隔几拍截一张图，给人眼看看那两个配置项
+                    Document timelineDoc = tree.getLinkedDocument();
+                    Element settings = timelineDoc == null ? null : timelineDoc.querySelector("#specialGrid [data-slot=\""
+                            + SnapshotLayout.SLOT_AUTO + "\"] [data-act=\"settings\"]");
+                    check(settings != null, "the auto card should offer a settings button");
+                    if (settings != null) {
+                        settings.click();
+                    }
                     return;
                 }
                 if (treePhase == 1) {
+                    // 弹窗刚打开那一帧还没画出来（截图读的是上一帧），而且弹窗里的字也要等光栅
+                    if (stageTicks - treePhaseStart < TREE_SETTINGS_SETTLE_TICKS) {
+                        return;
+                    }
+                    screenshotTree(minecraft, "rewind-auto-settings");
+                    Document settingsDoc = tree.getLinkedDocument();
+                    Element close = settingsDoc == null
+                            ? null
+                            : settingsDoc.querySelector("#modalSettings [data-act=\"modal-close\"]");
+                    if (close != null) {
+                        close.click();
+                    }
+                    treePhase = 2;
+                    treePhaseStart = stageTicks;
+                    // 再打开「快速存档」的设置：那两条过渡强度滚动条也要人眼看一眼
+                    Element quickSettings = settingsDoc == null
+                            ? null
+                            : settingsDoc.querySelector("#specialGrid [data-slot=\"" + Rewind.SLOT
+                                    + "\"] [data-act=\"settings\"]");
+                    check(quickSettings != null, "the quick card should offer a settings button");
+                    if (quickSettings != null) {
+                        quickSettings.click();
+                    }
+                    return;
+                }
+                if (treePhase == 2) {
+                    if (stageTicks - treePhaseStart < TREE_SETTINGS_SETTLE_TICKS) {
+                        return;
+                    }
+                    screenshotTree(minecraft, "rewind-quick-settings");
+                    Document quickDoc = tree.getLinkedDocument();
+                    Element closeQuick = quickDoc == null
+                            ? null
+                            : quickDoc.querySelector("#modalSettings [data-act=\"modal-close\"]");
+                    if (closeQuick != null) {
+                        closeQuick.click();
+                    }
+                    treePhase = 3;
+                    treePhaseStart = stageTicks;
+                    openTimeline(tree);
+                    return;
+                }
+                if (treePhase == 3) {
                     // 节点树布局：切过去之后要等布局算完、fitFlow 把树装进画布（它下一 tick 才动手），
                     // 再等新铺出来的节点文字光栅完
-                    if (stageTicks < TREE_TIMELINE_SETTLE_TICKS) {
+                    if (stageTicks - treePhaseStart < TREE_TIMELINE_SETTLE_TICKS) {
                         return;
                     }
                     verifyTimeline(tree);
                     screenshotTree(minecraft, "rewind-timeline");
-                    treePhase = 2;
+                    treePhase = 4;
+                    treePhaseStart = stageTicks;
                     return;
                 }
                 minecraft.setScreen(null);
@@ -857,6 +920,8 @@ public final class RewindSelfTest {
         verifyAutoCard(document);
         verifyAutoSettings(document);
         verifyCover(document);
+        // 最后才做这一趟：它会把界面换成原版屏再换回来，回来时文档是重建过的（见方法注释）
+        verifyQuickKeys(tree);
         Rewind.LOGGER.info("Rewind self-test: time tree verified (special={}, manual={}, chips={}, cells={}, items={})",
                 special.size(), manual.size(), chips.size(), cells, items);
     }
@@ -1060,15 +1125,65 @@ public final class RewindSelfTest {
         if (toggle == null) {
             return;
         }
-        toggle.click();
+
+        // 第二个配置项：自动保存间隔。它只在「跟随」开着时作用到原版上
+        Element interval = document.querySelector("#modalSettings #autoInterval");
+        Element apply = document.querySelector("#modalSettings [data-act=\"apply-interval\"]");
+        check(interval != null && apply != null,
+                "the auto settings should offer the autosave interval (input=" + interval + " apply=" + apply + ")");
+        if (interval != null && apply != null) {
+            check(RewindServerConfig.autoSaveIntervalMinutes() == RewindServerConfig.DEFAULT_AUTO_SAVE_INTERVAL_MINUTES,
+                    "the autosave interval should default to the vanilla "
+                            + RewindServerConfig.DEFAULT_AUTO_SAVE_INTERVAL_MINUTES + " minutes, got "
+                            + RewindServerConfig.autoSaveIntervalMinutes());
+            // 注意这里只测**比默认值大**的间隔：改成比 5 分钟小会把原版的自动保存倒计时压下来
+            // （见 AutoCheckpointMixins 里那个 clamp），这一轮后面就可能凭空插一次真自动保存，
+            // 把回溯的耗时断言搅黄。小间隔的换算在下面按「分钟 × TICKS_PER_MINUTE」直接查。
+            interval.setValue("30");
+            apply.click();
+            check(RewindServerConfig.autoSaveIntervalMinutes() == 30,
+                    "applying the interval should store 30 minutes, got "
+                            + RewindServerConfig.autoSaveIntervalMinutes());
+            check(RewindServerConfig.autoSaveIntervalTicks() == 30 * RewindServerConfig.TICKS_PER_MINUTE,
+                    "30 minutes should be " + (30 * RewindServerConfig.TICKS_PER_MINUTE) + " ticks, got "
+                            + RewindServerConfig.autoSaveIntervalTicks());
+            // 夹范围：超出上限会被夹回来（同样不碰倒计时）
+            Element clamped = document.querySelector("#modalSettings #autoInterval");
+            Element applyClamped = document.querySelector("#modalSettings [data-act=\"apply-interval\"]");
+            if (clamped != null && applyClamped != null) {
+                clamped.setValue("99");
+                applyClamped.click();
+                check(RewindServerConfig.autoSaveIntervalMinutes() == RewindServerConfig.MAX_AUTO_SAVE_INTERVAL_MINUTES,
+                        "an out-of-range interval should be clamped to "
+                                + RewindServerConfig.MAX_AUTO_SAVE_INTERVAL_MINUTES + ", got "
+                                + RewindServerConfig.autoSaveIntervalMinutes());
+            }
+        }
+
+        // 上面那几次「应用」会重开弹窗，弹窗里的节点全是新铺的：之前抓住的那个 toggle 已经不在文档里了
+        Element toggleNow = document.querySelector("#modalSettings [data-act=\"toggle-auto\"]");
+        check(toggleNow != null, "the follow-autosave toggle is missing after applying the interval");
+        if (toggleNow == null) {
+            return;
+        }
+        toggleNow.click();
         check(RewindServerConfig.autoCheckpointEnabled() != before,
                 "clicking the toggle should flip the follow-autosave setting");
+        // 关着的时候间隔不该碰原版（0 = 让原版按自己的 5 分钟走）
+        check(RewindServerConfig.autoCheckpointEnabled()
+                        ? RewindServerConfig.autoSaveIntervalTicks() == RewindServerConfig.autoSaveIntervalMinutes()
+                                * RewindServerConfig.TICKS_PER_MINUTE
+                        : RewindServerConfig.autoSaveIntervalTicks() == 0,
+                "the autosave interval should only reach vanilla while the toggle is on, got "
+                        + RewindServerConfig.autoSaveIntervalTicks() + " ticks");
         Element again = document.querySelector("#modalSettings [data-act=\"toggle-auto\"]");
         if (again != null) {
             again.click();
         }
         check(RewindServerConfig.autoCheckpointEnabled() == before,
                 "the toggle should flip back, leaving the setting as it was");
+        // 把间隔改回默认值：后面几轮还要靠原版自动保存建点，别把它的节奏改了
+        RewindServerConfig.setAutoSaveIntervalMinutes(RewindServerConfig.DEFAULT_AUTO_SAVE_INTERVAL_MINUTES);
         Element close = document.querySelector("#modalSettings [data-act=\"modal-close\"]");
         if (close != null) {
             close.click();
@@ -1093,12 +1208,117 @@ public final class RewindSelfTest {
         check(modalOpen(document, "modalSettings"), "clicking settings should open the settings modal");
         Element info = document.querySelector("#settingsInfo");
         check(info != null && !info.getTextContent().isBlank(), "the settings modal should describe the slot");
+
+        // 快速槽的三个设置项：两条过渡强度滑块（主题的 .slider）+ 改键入口
+        List<Element> sliders = document.querySelectorAll("#modalSettings #settingsInfo .slider");
+        check(sliders.size() == 2, "the quick settings should offer both transition sliders, got " + sliders.size());
+        Element saturation = document.querySelector("#modalSettings #saturationBoost");
+        Element blur = document.querySelector("#modalSettings #blurRadius");
+        check(saturation != null && blur != null, "the transition sliders should carry their ids");
+        if (saturation != null) {
+            // 滑块画出来的位置要和配置里的值对得上（process 的宽度就是它）
+            Element process = saturation.querySelector(".slider-process");
+            double shown = process == null ? Double.NaN : parsePercent(process.getInlineStylePropertyValue("width"));
+            double expected = RewindClientConfig.saturationBoost() / RewindClientConfig.MAX_SATURATION_BOOST * 100.0D;
+            check(Math.abs(shown - expected) < 1.0D,
+                    "the saturation slider should show the current config value, got " + shown + "% vs " + expected + "%");
+            // 像玩家那样拖一下：按下 → 松手。位置取轨道正中 = 量程中点
+            Element.DOMRect rect = saturation.getBoundingClientRect();
+            check(rect.width > 0.0D, "the saturation slider has no width while the modal is open");
+            float before = RewindClientConfig.saturationBoost();
+            if (rect.width > 0.0D) {
+                double middle = rect.x + rect.width / 2.0D;
+                saturation.dispatchEvent(new MouseEvent("mousedown", new Position(middle, rect.y), 0));
+                check(Math.abs(RewindClientConfig.saturationBoost()
+                                - RewindClientConfig.MAX_SATURATION_BOOST / 2.0F) < 0.2F,
+                        "dragging the saturation slider should preview the mid value, got "
+                                + RewindClientConfig.saturationBoost());
+                saturation.dispatchEvent(new MouseEvent("mouseup", new Position(middle, rect.y), 0));
+                check(Math.abs(RewindClientConfig.saturationBoost()
+                                - RewindClientConfig.MAX_SATURATION_BOOST / 2.0F) < 0.2F,
+                        "releasing the saturation slider should commit the value, got "
+                                + RewindClientConfig.saturationBoost());
+            }
+            RewindClientConfig.commitSaturationBoost(before);
+            check(Math.abs(RewindClientConfig.saturationBoost() - before) < 0.001F,
+                    "the saturation should be back where it started, got " + RewindClientConfig.saturationBoost());
+        }
+        if (blur != null) {
+            float before = RewindClientConfig.blurRadius();
+            RewindClientConfig.commitBlurRadius(blur == null ? before : before + 1.0F);
+            check(Math.abs(RewindClientConfig.blurRadius() - (before + 1.0F)) < 0.001F,
+                    "the blur radius should be settable through the config, got " + RewindClientConfig.blurRadius());
+            RewindClientConfig.commitBlurRadius(before);
+        }
+
         Element close = document.querySelector("#modalSettings [data-act=\"modal-close\"]");
         check(close != null, "the settings modal has no close button");
         if (close != null) {
             close.click();
         }
         check(!modalOpen(document, "modalSettings"), "closing should hide the settings modal");
+    }
+
+    /**
+     * 「改键」那个按钮：点下去该开一个只列 Rewind 两个热键的按键绑定页（本质是原版那一页，
+     * 列表被 {@code KeyBindsListMixins} 筛过）。
+     *
+     * <p>放在 {@code verifyTree} 的最后跑：这一趟会把界面换成原版屏再换回来，换回来时时间树的文档
+     * 是重建过的——之前抓的那些节点引用全作废，所以后面的断言都得重新取。
+     */
+    private static void verifyQuickKeys(RewindTreeScreen tree) {
+        Document document = tree.getLinkedDocument();
+        if (document == null) {
+            return;
+        }
+        Element settings = document.querySelector(
+                "#specialGrid [data-slot=\"" + Rewind.SLOT + "\"] [data-act=\"settings\"]");
+        if (settings == null) {
+            return;
+        }
+        settings.click();
+        Element keys = document.querySelector("#modalSettings [data-act=\"open-keys\"]");
+        check(keys != null, "the quick settings should offer a rebind button");
+        if (keys == null) {
+            return;
+        }
+        keys.click();
+        Minecraft minecraft = Minecraft.getInstance();
+        Screen opened = minecraft.screen;
+        check(opened instanceof RewindKeyBindsScreen,
+                "the rebind button should open the filtered key binds screen, got " + opened);
+        if (opened instanceof RewindKeyBindsScreen) {
+            KeyBindsList list = ((KeyBindsListMixins.KeyBindsScreenAccess) opened).rewind$list();
+            int rows = list == null ? -1 : list.children().size();
+            long keyRows = list == null ? -1L : list.children().stream()
+                    .filter(entry -> entry instanceof KeyBindsList.KeyEntry)
+                    .count();
+            // 一条分类标题 + 两条按键
+            check(rows == 3 && keyRows == 2,
+                    "the key binds screen should list only the two quick-save hotkeys, got " + rows
+                            + " row(s), " + keyRows + " of them key bindings");
+            Rewind.LOGGER.info("Rewind self-test: the filtered key binds screen has {} row(s), {} key binding(s)",
+                    rows, keyRows);
+        }
+        // 换回时间树：不换回去，这一轮剩下的阶段会一直等不到界面
+        minecraft.setScreen(tree);
+    }
+
+    private static float parseFloat(String raw) {
+        try {
+            return Float.parseFloat(raw == null ? "" : raw.trim());
+        } catch (NumberFormatException e) {
+            return Float.NaN;
+        }
+    }
+
+    /** {@code "19.0%"} → {@code 19.0}；解析不了给 NaN。 */
+    private static double parsePercent(String raw) {
+        try {
+            return Double.parseDouble(raw == null ? "" : raw.trim().replace("%", ""));
+        } catch (NumberFormatException e) {
+            return Double.NaN;
+        }
     }
 
     /**

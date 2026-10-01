@@ -396,6 +396,12 @@ public final class RewindTreeScreen extends ApricityScreen {
             case "toggle-auto":
                 toggleAutoCheckpoint(document);
                 break;
+            case "apply-interval":
+                applyInterval(document);
+                break;
+            case "open-keys":
+                openKeyBinds(document);
+                break;
             case "toggle-inventory":
                 // 背包快照：默认只显示一行快捷栏，点标题展开完整背包
                 inventoryExpanded = !inventoryExpanded;
@@ -535,30 +541,54 @@ public final class RewindTreeScreen extends ApricityScreen {
         if (info != null) {
             StringBuilder html = new StringBuilder();
             if (SnapshotLayout.SLOT_AUTO.equals(slot)) {
-                // 自动存档这张卡唯一的可调项：跟着原版自动保存建点
+                // 自动存档这张卡的两个可调项：跟着原版自动保存建点、以及自动保存间隔
                 boolean enabled = RewindServerConfig.autoCheckpointEnabled();
-                html.append("<li class=\"list-group-item\"><span class=\"text-muted\">")
-                        .append(text(tr("rewind.ui.settings.auto.toggle"))).append("</span>")
+                html.append("<div class=\"form-group\"><label class=\"form-label\">")
+                        .append(text(tr("rewind.ui.settings.auto.toggle"))).append("</label>")
                         .append("<button class=\"button button-small ")
                         .append(enabled ? "button-secondary" : "button-tertiary")
                         .append("\" data-act=\"toggle-auto\">")
                         .append(text(tr(enabled ? "rewind.ui.settings.auto.on" : "rewind.ui.settings.auto.off")))
-                        .append("</button></li>");
+                        .append("</button></div>");
+                html.append("<div class=\"form-group\"><label class=\"form-label\" for=\"autoInterval\">")
+                        .append(text(tr("rewind.ui.settings.auto.interval"))).append("</label>")
+                        .append("<div class=\"input-group\">")
+                        .append("<input class=\"form-input\" id=\"autoInterval\" maxlength=\"2\" value=\"")
+                        .append(RewindServerConfig.autoSaveIntervalMinutes()).append("\">")
+                        .append("<button class=\"button button-secondary\" data-act=\"apply-interval\">")
+                        .append(text(tr("rewind.ui.action.apply"))).append("</button>")
+                        .append("</div></div>");
             }
-            if (meta == null) {
-                html.append(row("rewind.ui.detail.status", tr("rewind.ui.slot.unused")));
-            } else {
-                html.append(row("rewind.ui.detail.world", meta.worldName));
-                html.append(row("rewind.ui.detail.saved_at",
-                        absoluteTime(meta.savedAtMillis) + "（" + relativeTime(meta.savedAtMillis) + "）"));
-                html.append(row("rewind.ui.detail.playtime", playtime(meta.playtimeTicks)));
-                html.append(row("rewind.ui.detail.biome", biomeName(meta.biomeId)));
-                long occupied = occupiedBytes(slot, meta);
-                html.append(row("rewind.ui.detail.size", sizeText(occupied < 0L ? meta.totalBytes : occupied)));
-                html.append(row("rewind.ui.detail.save_size", sizeText(meta.totalBytes)));
-                html.append(row("rewind.ui.detail.status", meta.status));
+            if (SnapshotLayout.SLOT_QUICK.equals(slot)) {
+                // 快速槽的三个项：两种过渡的强度（主题的滑块）+ 改键入口
+                html.append(sliderGroup("rewind.ui.settings.quick.saturation", "saturationBoost",
+                        RewindClientConfig.saturationBoost(),
+                        RewindClientConfig.MIN_SATURATION_BOOST, RewindClientConfig.MAX_SATURATION_BOOST));
+                html.append(sliderGroup("rewind.ui.settings.quick.blur", "blurRadius",
+                        RewindClientConfig.blurRadius(),
+                        RewindClientConfig.MIN_BLUR_RADIUS, RewindClientConfig.MAX_BLUR_RADIUS));
+                html.append("<div class=\"form-group\"><label class=\"form-label\">")
+                        .append(text(tr("rewind.ui.settings.quick.keys"))).append("</label>")
+                        .append("<button class=\"button button-small button-tertiary\" data-act=\"open-keys\">")
+                        .append(text(tr("rewind.ui.settings.quick.keys_button"))).append("</button></div>");
             }
             info.setInnerHTML(html.toString());
+            // 间隔那个输入框是这一趟刚铺进去的，回车提交要在这里现挂（和重命名弹窗那个不一样，
+            // 那个是模板里的静态元素，在 bind() 里挂过了）
+            Element interval = document.querySelector("#autoInterval");
+            if (interval != null) {
+                interval.addEventListener("keydown", event -> {
+                    if (event instanceof KeyEvent key && key.keyCode == GLFW.GLFW_KEY_ENTER) {
+                        applyInterval(document);
+                    }
+                });
+            }
+            // 主题那条滑块是纯视觉的 div，拖动得自己驱动（按下 / 拖动 / 松手）
+            for (Element slider : document.querySelectorAll("#settingsInfo .slider")) {
+                slider.addEventListener("mousedown", this::onSliderMouseDown);
+                slider.addEventListener("mousemove", this::onSliderMouseMove);
+                slider.addEventListener("mouseup", this::onSliderMouseUp);
+            }
         }
         Element note = document.querySelector("#settingsNote");
         if (note != null) {
@@ -569,12 +599,172 @@ public final class RewindTreeScreen extends ApricityScreen {
         openModal(document, "modalSettings");
     }
 
-    /** 「自动存档」卡上那个开关：跟着原版自动保存建点。改完立刻落盘，并重画弹窗里那一行。 */
-    private void toggleAutoCheckpoint(Document document) {
+    /** 正在拖的那条过渡强度滑块；null 表示没在拖。 */
+    private Element draggingSlider;
+
+    /**
+     * 设置弹窗里一条「过渡强度」：用主题自带的那条滑块（{@code .slider} 的 div 版），
+     * 当前值写在它下面的 {@code .form-help} 里。
+     *
+     * <p>主题的滑块只是**视觉**（轨道 + 进度 + 滑块头），拖动得自己驱动——见 {@link #onSliderMouseDown}。
+     * 上下限写在 {@code data-min} / {@code data-max} 上，拖的时候照着算。
+     */
+    private static String sliderGroup(String labelKey, String id, float value, float min, float max) {
+        String percent = percentOf(value, min, max);
+        String shown = formatSliderValue(value);
+        return "<div class=\"form-group\"><label class=\"form-label\">" + text(tr(labelKey))
+                + "</label><div class=\"slider\" id=\"" + id + "\" role=\"slider\""
+                + " data-min=\"" + formatSliderValue(min) + "\" data-max=\"" + formatSliderValue(max) + "\""
+                + " aria-valuenow=\"" + shown + "\">"
+                + "<div class=\"slider-process\" style=\"width:" + percent + "\"></div>"
+                + "<span class=\"slider-thumb\" style=\"left:" + percent + "\"></span>"
+                + "</div><div class=\"form-help\" id=\"" + id + "Value\">" + shown + "</div></div>";
+    }
+
+    /** 滚动条上的数字统一一位小数（1.5 / 13.0）。 */
+    private static String formatSliderValue(float value) {
+        return String.format(Locale.ROOT, "%.1f", value);
+    }
+
+    /** 值 → 滑块上的百分比（主题的 {@code .slider-process} 宽度 / {@code .slider-thumb} 位置）。 */
+    private static String percentOf(double value, double min, double max) {
+        double fraction = max <= min ? 0.0D : Math.max(0.0D, Math.min(1.0D, (value - min) / (max - min)));
+        return String.format(Locale.ROOT, "%.1f%%", fraction * 100.0D);
+    }
+
+    /** 强度只留一位小数：拖着走的时候别让数值抖出一长串小数。 */
+    private static double roundSliderValue(double value) {
+        return Math.round(value * 10.0D) / 10.0D;
+    }
+
+    /**
+     * 按光标位置把滑块拖到新位置：改主题那条滑块的进度 / 滑块头、下面那个数字，以及内存里的值。
+     *
+     * <p>拖动期间只改内存（{@code previewXxx}），松手才落盘——拖一次会来一串事件，每个都写配置
+     * 会连带触发配置文件监听重载。
+     */
+    private void dragSliderTo(Element slider, double clientX) {
+        Element.DOMRect rect = slider.getBoundingClientRect();
+        if (rect.width <= 0.0D) {
+            return;
+        }
+        double min = parseSlider(slider.getDataset().get("min"));
+        double max = parseSlider(slider.getDataset().get("max"));
+        double fraction = Math.max(0.0D, Math.min(1.0D, (clientX - rect.x) / rect.width));
+        float value = (float) roundSliderValue(min + fraction * (max - min));
+        String percent = percentOf(value, min, max);
+        slider.setAttribute("aria-valuenow", formatSliderValue(value));
+        Element process = slider.querySelector(".slider-process");
+        if (process != null) {
+            process.setInlineStyleProperty("width", percent);
+        }
+        Element thumb = slider.querySelector(".slider-thumb");
+        if (thumb != null) {
+            thumb.setInlineStyleProperty("left", percent);
+        }
+        Element readout = slider.getNextElementSibling();
+        if (readout != null) {
+            readout.setTextContent(formatSliderValue(value));
+        }
+        previewTransition(slider, value);
+    }
+
+    private void onSliderMouseDown(Event event) {
+        if (!(event instanceof MouseEvent mouse) || !(event.target instanceof Element target)) {
+            return;
+        }
+        Element slider = target.closest(".slider");
+        if (slider == null) {
+            return;
+        }
+        draggingSlider = slider;
+        dragSliderTo(slider, mouse.clientX);
+    }
+
+    private void onSliderMouseMove(Event event) {
+        Element slider = draggingSlider;
+        if (slider == null || !(event instanceof MouseEvent mouse)) {
+            return;
+        }
+        dragSliderTo(slider, mouse.clientX);
+    }
+
+    /** 松手：把滑块当前的值写进配置并落盘。 */
+    private void onSliderMouseUp(Event event) {
+        Element slider = draggingSlider;
+        draggingSlider = null;
+        if (slider == null) {
+            return;
+        }
+        commitTransition(slider, (float) parseSlider(slider.getAttribute("aria-valuenow")));
+    }
+
+    private static void previewTransition(Element slider, float value) {
+        if ("saturationBoost".equals(slider.id)) {
+            RewindClientConfig.previewSaturationBoost(value);
+        } else if ("blurRadius".equals(slider.id)) {
+            RewindClientConfig.previewBlurRadius(value);
+        }
+    }
+
+    private static void commitTransition(Element slider, float value) {
+        if ("saturationBoost".equals(slider.id)) {
+            RewindClientConfig.commitSaturationBoost(value);
+        } else if ("blurRadius".equals(slider.id)) {
+            RewindClientConfig.commitBlurRadius(value);
+        }
+    }
+
+    private static double parseSlider(String raw) {
+        try {
+            return Double.parseDouble(raw == null ? "" : raw.trim().replace("%", ""));
+        } catch (NumberFormatException e) {
+            return 0.0D;
+        }
+    }
+
+    /**
+     * 打开按键绑定页，只列 Rewind 那两个热键。
+     *
+     * <p>先把设置弹窗收掉：那一页会盖住整个界面，按 Esc 回来时时间树会重新 {@code init} 一遍，
+     * 弹窗留着反而会以「开着」的样子回来。
+     */
+    private void openKeyBinds(Document document) {
+        closeModals(document);
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.setScreen(new RewindKeyBindsScreen(minecraft.screen, minecraft.options));
+    }
+
+    /** 「自动存档」卡上那个开关：跟着原版自动保存建点。改完立刻落盘，并重画弹窗里那一行。 */    private void toggleAutoCheckpoint(Document document) {
         boolean enabled = !RewindServerConfig.autoCheckpointEnabled();
         RewindServerConfig.setAutoCheckpointEnabled(enabled);
         log(enabled ? "rewind.ui.log.auto_on" : "rewind.ui.log.auto_off");
         // 弹窗里那一行（开关状态 + 按钮配色）要跟着变，重开一次最省事
+        openSettings(document, SnapshotLayout.SLOT_AUTO);
+    }
+
+    /**
+     * 「自动保存间隔」那一项：把输入框里的分钟数写进配置（立刻落盘）。
+     *
+     * <p>这个值只在「跟着原版自动保存建点」开着时生效——那会儿它会直接改原版的自动保存间隔
+     * （见 {@code AutoCheckpointMixins$MinecraftServerAutosave}）；关着的时候原版还是它自己的 5 分钟。
+     */
+    private void applyInterval(Document document) {
+        Element input = document.querySelector("#autoInterval");
+        String raw = input == null || input.getValue() == null ? "" : input.getValue().trim();
+        int minutes;
+        try {
+            minutes = Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            log("rewind.ui.log.interval_invalid",
+                    RewindServerConfig.MIN_AUTO_SAVE_INTERVAL_MINUTES,
+                    RewindServerConfig.MAX_AUTO_SAVE_INTERVAL_MINUTES);
+            openSettings(document, SnapshotLayout.SLOT_AUTO);
+            return;
+        }
+        RewindServerConfig.setAutoSaveIntervalMinutes(minutes);
+        log("rewind.ui.log.interval_set", RewindServerConfig.autoSaveIntervalMinutes());
+        // 夹过范围之后输入框里该显示的是夹过的值，重开一次最省事
         openSettings(document, SnapshotLayout.SLOT_AUTO);
     }
 

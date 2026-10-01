@@ -28,6 +28,10 @@
     "InPlaceGuardMixins$ChunkMapRecreationGuard",
     "AutoCheckpointMixins$MinecraftServerAutosave"
   ],
+  "client": [
+    "KeyBindsListMixins$OnlyRewindKeys",
+    "KeyBindsListMixins$KeyBindsScreenAccess"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

@@ -24,6 +24,12 @@ public final class RewindClientConfig {
     public static final float DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05F;
     public static final float DEFAULT_BLUR_RADIUS = 13.0F;
     public static final int DEFAULT_RESTORE_SETTLE_TICKS = 10;
+    /** 「存档过渡强度」的可调范围（就是配置里那个饱和度倍数）。 */
+    public static final float MIN_SATURATION_BOOST = 0.0F;
+    public static final float MAX_SATURATION_BOOST = 8.0F;
+    /** 「读档过渡强度」的可调范围（就是配置里那个模糊半径，像素）。 */
+    public static final float MIN_BLUR_RADIUS = 0.0F;
+    public static final float MAX_BLUR_RADIUS = 64.0F;
 
     private static ModConfigSpec.DoubleValue fadeIn;
     private static ModConfigSpec.DoubleValue saturationFadeOut;
@@ -31,6 +37,9 @@ public final class RewindClientConfig {
     private static ModConfigSpec.DoubleValue blurFadeOut;
     private static ModConfigSpec.DoubleValue blurRadius;
     private static ModConfigSpec.IntValue restoreSettleTicks;
+    private static ModConfigSpec spec;
+    /** 保存下来的配置对象：界面上拖完滚动条要立刻落盘。 */
+    private static volatile ModConfig modConfig;
 
     private static float fadeInSeconds = DEFAULT_FADE_IN_SECONDS;
     private static float saturationFadeOutSeconds = DEFAULT_SATURATION_FADE_OUT_SECONDS;
@@ -60,7 +69,8 @@ public final class RewindClientConfig {
         saturationBoost = builder
                 .comment("存档过渡满强度时的饱和度倍数（在 1 的基础上再加这么多）：1.5 = 2.5 倍。",
                         "再往上调，偏暗的通道会先被截断、开始出现色块，不是越大越好。")
-                .defineInRange("saturationBoost", (double) DEFAULT_SATURATION_BOOST, 0.0D, 8.0D);
+                .defineInRange("saturationBoost", (double) DEFAULT_SATURATION_BOOST,
+                        (double) MIN_SATURATION_BOOST, (double) MAX_SATURATION_BOOST);
 
         blurFadeOut = builder
                 .comment("读档过渡的淡出时长（秒）：世界回来之后模糊消失得有多快。")
@@ -69,7 +79,8 @@ public final class RewindClientConfig {
         blurRadius = builder
                 .comment("读档过渡满强度时的模糊半径（像素）：着色器按这个距离做 13 抽样高斯。",
                         "画面分辨率越高，同样的像素半径看起来越轻。")
-                .defineInRange("blurRadius", (double) DEFAULT_BLUR_RADIUS, 0.0D, 64.0D);
+                .defineInRange("blurRadius", (double) DEFAULT_BLUR_RADIUS,
+                        (double) MIN_BLUR_RADIUS, (double) MAX_BLUR_RADIUS);
 
         restoreSettleTicks = builder
                 .comment("读档时「世界已经回来」之后、开始淡出之前，等区块到位的**上限**（20 tick = 1 秒）。",
@@ -78,10 +89,20 @@ public final class RewindClientConfig {
                 .defineInRange("restoreSettleTicks", DEFAULT_RESTORE_SETTLE_TICKS, 0, 200);
 
         builder.pop();
-        container.registerConfig(ModConfig.Type.CLIENT, builder.build());
+        spec = builder.build();
+        container.registerConfig(ModConfig.Type.CLIENT, spec);
 
-        modBus.addListener(ModConfigEvent.Loading.class, event -> apply());
-        modBus.addListener(ModConfigEvent.Reloading.class, event -> apply());
+        modBus.addListener(ModConfigEvent.Loading.class, RewindClientConfig::onConfigEvent);
+        modBus.addListener(ModConfigEvent.Reloading.class, RewindClientConfig::onConfigEvent);
+    }
+
+    private static void onConfigEvent(ModConfigEvent event) {
+        // 这个事件对所有配置都会来一次，先认一下是不是自己那份
+        if (event.getConfig().getSpec() != spec) {
+            return;
+        }
+        modConfig = event.getConfig();
+        apply();
     }
 
     private static void apply() {
@@ -135,5 +156,60 @@ public final class RewindClientConfig {
 
     public static int restoreSettleTicks() {
         return restoreSettleTicksValue;
+    }
+
+    /**
+     * 「存档过渡强度」拖动中：只改内存里的值，**不落盘**。
+     *
+     * <p>滚动条拖一次会来一串 {@code input} 事件，每个都落盘会连带触发配置文件监听重载、刷一屏日志。
+     * 拖完（{@code change}）再 {@link #commitSaturationBoost}。
+     */
+    public static void previewSaturationBoost(float boost) {
+        saturationBoostValue = clamp(boost, MIN_SATURATION_BOOST, MAX_SATURATION_BOOST);
+    }
+
+    /** 「存档过渡强度」拖完了：写进配置并落盘。后处理每帧读的就是这个 static 字段，所以立刻见效。 */
+    public static void commitSaturationBoost(float boost) {
+        previewSaturationBoost(boost);
+        if (saturationBoost != null) {
+            saturationBoost.set((double) saturationBoostValue);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: transition saturationBoost={} (set)", saturationBoostValue);
+    }
+
+    /** 「读档过渡强度」拖动中：只改内存里的值，不落盘。 */
+    public static void previewBlurRadius(float radius) {
+        blurRadiusValue = clamp(radius, MIN_BLUR_RADIUS, MAX_BLUR_RADIUS);
+    }
+
+    /** 「读档过渡强度」拖完了：写进配置并落盘。 */
+    public static void commitBlurRadius(float radius) {
+        previewBlurRadius(radius);
+        if (blurRadius != null) {
+            blurRadius.set((double) blurRadiusValue);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: transition blurRadius={} (set)", blurRadiusValue);
+    }
+
+    private static float clamp(float value, float min, float max) {
+        if (!Float.isFinite(value)) {
+            return min;
+        }
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static void save() {
+        ModConfig current = modConfig;
+        if (current == null) {
+            return;
+        }
+        try {
+            // FML 4 的 ModConfig 上没有 save()，落盘入口在 loadedConfig 上
+            current.getLoadedConfig().save();
+        } catch (Throwable t) {
+            Rewind.LOGGER.error("Rewind: failed to save the client config after a settings change", t);
+        }
     }
 }
