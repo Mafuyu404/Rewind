@@ -9,6 +9,12 @@ file('../../gradle.properties').withInputStream { properties.load(it) }
 file('gradle.properties').withInputStream { properties.load(it) }
 properties.each { key, value -> ext.set(key.toString(), value.toString()) }
 
+// 本地端到端自测用的可选运行参数，不传就不生效：
+//   -PrwQuickPlay=<存档目录名>  直接把客户端开进某个单人世界（--quickPlaySingleplayer）
+//   -PrwSelfTest=true          打开模组内置自测（客户端 -Drewind.selftest / 服务端 -Drewind.servertest）
+def rewindQuickPlay = project.findProperty('rwQuickPlay')
+def rewindSelfTest = project.findProperty('rwSelfTest')
+
 group = mod_group_id
 version = mod_version
 
@@ -26,10 +32,21 @@ neoForge {
     runs {
         client {
             client()
+            if (rewindQuickPlay) {
+                programArgument '--quickPlaySingleplayer'
+                programArgument rewindQuickPlay.toString()
+            }
+            if (rewindSelfTest) {
+                systemProperty 'rewind.selftest', rewindSelfTest.toString()
+            }
         }
         server {
             server()
             programArgument '--nogui'
+            // 同一个 -PrwSelfTest=true：客户端跑单人世界的自测，专用服务器跑 RewindServerSelfTest
+            if (rewindSelfTest) {
+                systemProperty 'rewind.servertest', rewindSelfTest.toString()
+            }
         }
     }
 
@@ -40,8 +57,20 @@ neoForge {
     }
 }
 
+repositories {
+    maven {
+        url = 'https://maven.sighs.cc/repository/maven-public/'
+    }
+}
+
 dependencies {
     implementation project(':common')
+    // 主版本（neoforge-1.21.1）里还有一句 `additionalRuntimeClasspath project(':common')`：那边的
+    // dev 运行走 FML 的 legacy classpath，common 不是独立 mod，不显式挂进去就会 NoClassDefFoundError。
+    // 26.1 的 ModDevGradle 已经没有这条 classpath 了（VersionCapabilities.legacyClasspath() 为 false，
+    // 声明这个配置会直接报 "there is no additional classpath anymore for Minecraft 26.1.2"），
+    // dev 运行直接用标准 runtimeClasspath，所以 `implementation project(':common')` 就是全部所需。
+    implementation 'com.sighs:ApricityUI-neoforge-26.1:1.2.4'
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -63,7 +92,10 @@ tasks.named('processResources', ProcessResources).configure {
 }
 
 tasks.named('jar', Jar).configure {
-    from project(':common').sourceSets.main.output
+    // common 的资源已经通过 gradle/target-conventions/publish.gradle 里的
+    // sourceSets.main.resources.srcDir 并进来了，这里只需要补它的 class，
+    // 否则同一份共享资源会在 jar 里出现两次（Gradle 会直接报 duplicate）。
+    from project(':common').sourceSets.main.output.classesDirs
 }
 
 tasks.withType(JavaCompile).configureEach {

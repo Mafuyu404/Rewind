@@ -1,0 +1,41 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "cc.sighs.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "RollbackDiscardMixins$ChunkMapDiscard",
+    "RollbackDiscardMixins$ServerChunkCacheDiscard",
+    "RollbackDiscardMixins$PlayerListDiscard",
+    "RollbackDiscardMixins$EntityDiscard",
+    "RollbackDiscardMixins$DataStorageDiscard",
+    "RollbackDiscardMixins$RegionFileDiscard",
+    "RollbackDiscardMixins$SavedDataDiscard",
+    "RollbackDiscardMixins$SinglePlayerSaveDiscard",
+    "RollbackDiscardMixins$LevelDataDiscard",
+    "RollbackAccessMixins$ChunkMapAccess",
+    "RollbackAccessMixins$DistanceManagerAccess",
+    "RollbackAccessMixins$ServerChunkCacheAccess",
+    "RollbackAccessMixins$ChunkStorageAccess",
+    "RollbackAccessMixins$IOWorkerAccess",
+    "RollbackAccessMixins$RegionFileStorageAccess",
+    "RollbackAccessMixins$SectionStorageAccess",
+    "RollbackAccessMixins$EntityStorageAccess",
+    "RollbackAccessMixins$ServerLevelAccess",
+    "RollbackAccessMixins$EntitySectionManagerAccess",
+    "RollbackAccessMixins$DimensionDataStorageAccess",
+    "InPlaceGuardMixins$ChunkMapRecreationGuard",
+    "AutoCheckpointMixins$MinecraftServerAutosave"
+  ],
+  "client": [
+    "ClientFrameMixins",
+    "ClientInputMixins",
+    "ClientScreenMixins",
+    "ClientWorldLoadMixins",
+    "KeyBindsListMixins$OnlyRewindKeys",
+    "KeyBindsListMixins$KeyBindsScreenAccess"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

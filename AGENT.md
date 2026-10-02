@@ -10,11 +10,31 @@ targets/<loader>-<mc-version>/  一个独立的加载器 + Minecraft 版本工�
 gradle/target-conventions/      所有 target 共用的构建约定
 ```
 
-- `common` 只放 Java 8 兼容、无 Minecraft/loader 依赖的业务逻辑、DTO、算法和测试。
-- `targets/*` 只放该 target 的入口、注册、事件、Minecraft API、Mixin、网络、渲染和 metadata。
-- 不要在 `common` 引用 `net.minecraft.*`、Forge、NeoForge、Fabric、Mixin 或渲染/网络 API。
+- `common` 只放 Java 8 兼容、无 Minecraft/loader 依赖的业务逻辑、DTO、算法、SPI 接口和测试。
+- `targets/*` 只放该 target 的入口、注册、事件、Minecraft API、Mixin、网络、渲染、metadata，以及 SPI 的平台实现。
+- 不要在 `common` 引用 `net.minecraft.*`、Forge、NeoForge、Fabric、Mixin 或渲染/网络 API。需要平台能力时，通过 `cc.sighs.rewind.common.spi.RewindPlatform` 暴露，由 target 实现并在模组构造阶段 `RewindPlatforms.install(...)` 装进来。
+- 共享逻辑一律放 common（例如存档点引擎 `cc.sighs.rewind.common.core.CheckpointWriter`、槽位记录 `cc.sighs.rewind.common.store.SnapshotStore`、对外门面 `cc.sighs.rewind.api.RewindApi`）；target 不要复制一份。
 - 不要用运行时版本判断、反射或同名 class 覆盖来兼容不同 target；不同 API 应由各 target 的适配器实现。
 - 一个发布 jar 只对应一个 loader 与一个 Minecraft 版本，禁止 universal jar。
+- `cc.sighs.rewind.api`、`cc.sighs.rewind.snapshot`、`cc.sighs.rewind.common.*` 三个包整体归 common，target 里不要再出现同名包——dev 下 common 的 jar 是独立自动模块，两边导出同一个包会以 `ResolutionException: Modules ... export package ...` 启动失败。
+
+### SPI 边界
+
+common 需要平台能力时只经 `cc.sighs.rewind.common.spi.RewindPlatform`（一个 target 一份实现，构造阶段用 `RewindPlatforms.install(...)` 装一次）：
+
+| 接口方法 | 用途 | 实现要点 |
+| --- | --- | --- |
+| `modVersion()` | 元数据展示 | 读加载器的 mod 容器版本，失败退化成 `unknown` |
+| `worldRoot(server)` | 活动存档目录 | 取 `level.dat` 所在目录 |
+| `isSameThread(server)` | 同步入口的线程校验 | 服务器线程判定 |
+| `isDedicatedServer / isPublished / hasPlayers` | 自动建点的跳过条件 | 服务器状态 |
+| `flushForCheckpoint(server, slot, source)` | 强制落盘 + 采集展示元数据与背包快照 | 版本相关，最容易随 MC 版本变 |
+| `supportsInPlaceRollback()` | 有没有原地回滚 | 没有就返回 false；`RewindApi.rollbackInPlace` 直接失败，客户端回退到「关世界 → 覆盖 → 重开」 |
+| `rollbackInPlace(server, worldRoot, slot)` | 原地回滚引擎 | 依赖原版内部结构，按版本各写一份 |
+
+参数里的服务器对象对 common 是不透明的 `Object`，实现方自己转型。`RewindApi` / `CheckpointWriter` / `AutoCheckpoint` 全靠这个接口拿世界根、线程判定、落盘与回滚能力。
+
+新增一个 `(loader, MC 版本)` target 时，除了独立 Gradle 工程与 metadata，还要提供：① 一份 `RewindPlatform` 实现；② `cc.sighs.mixin` 下挂到该版本原版方法上的 Mixin（回滚窗口跳过落盘、区块重建守卫、自动保存挂点）；③ 客户端入口与事件注册、过渡渲染、时间树界面；④ 版本专属资源（mixins 配置、shader、loader metadata）。共享的存档点引擎、槽位格式、索引与时间线逻辑不需要复制。
 
 ## 文件与配置约定
 
@@ -60,7 +80,25 @@ cd targets\forge-1.20.1
 
 根项目的 `-PallTargets=true build` 只覆盖前三个 JDK 21 target，不能替代 NeoForge 26.1 的独立构建。
 
-### 本地端到端自测（neoforge-1.21.1）
+### target 支持状态
+
+四个 target 现在都有完整实现：共享逻辑在 common，各 target 提供平台实现（`RewindPlatform`）、Mixin 与客户端。
+
+| Target | MC / 加载器 | 客户端 AUI | 原地回滚 | 客户端钩子（NeoForge 事件的替代物） |
+| --- | --- | --- | --- | --- |
+| `neoforge-1.21.1` | 1.21.1 / NeoForge | 1.2.5.4 | 有 | NeoForge 原生事件（`RenderFrameEvent` 等） |
+| `neoforge-26.1` | 26.1 / NeoForge | 1.2.4 | 有 | NeoForge 原生事件；`GuiGraphicsExtractor` / `Identifier` / `SavedDataStorage` 等 26.1 改名已消化 |
+| `forge-1.20.1` | 1.20.1 / Forge | 1.2.4-hotfix | 有 | `TickEvent.RenderTickEvent` 代替帧 Pre/Post；`MinecraftForge.EVENT_BUS`；mixin 走 jar manifest 的 `MixinConfigs` |
+| `fabric-1.20.1` | 1.20.1 / Fabric | 1.2.4 | 有 | 自写客户端 mixin：帧 Pre/Post 挂 `Minecraft.runTick`、原始按键挂 `KeyboardHandler.keyPress`、拦加载屏挂 `Minecraft.setScreen`；其余走 Fabric API 事件 |
+
+四条已知的跨 target 差异（改代码前先看）：
+
+- **配置文件**：NeoForge 两个 target 用 `ModConfigSpec`（`run/config/rewind-{common,client}.toml`）；Fabric 没有配置系统，`RewindServerConfig` / `RewindClientConfig` 是手写的 properties 实现（`config/rewind-{common,client}.properties`），**没有「外部改文件自动重载」**，只有界面上的 setter 会立刻落盘。
+- **自动保存间隔**：1.20.1 原版没有 `computeNextAutosaveInterval` / `ticksUntilAutosave`，两个 1.20.1 target 改用 `@ModifyConstant` 替换 `tickServer` 里写死的 `6000`（`require = 0` 软挂点，挂不上只是「间隔设置不生效」）。
+- **AUI 版本**：除 1.21.1 外都是 1.2.4 系。DOM / 容器 API 与 1.2.5.4 同构（已 javap 核对），但 1.2.5.2 之前那个「flat document 里画不出 `<img>`」的老问题在 1.2.4 上可能仍在——时间树封面可能退回纯色块（页面接线与 `hasCover` 判定是好的，见「曾经的问题」一节）。
+- **原地回滚引擎按版本各一份**：四个 target 各有一份 `InPlaceRollback`，依赖的原版内部结构不同（1.20.1 没有 `SimpleRegionStorage` / `generationRefCount`，26.1 的 `ChunkMap` 改继承 `SimpleRegionStorage`、`DimensionDataStorage` 改名 `SavedDataStorage`、`SavedData.save` 消失）。三份新引擎与 1.21.1 那份**步骤顺序与保护条件一致**，差异逐条写在各自的类注释里。
+
+### 本地端到端自测
 
 ```powershell
 cd targets\neoforge-1.21.1
@@ -71,25 +109,40 @@ cd targets\neoforge-1.21.1
 
 `-PrwQuickPlay=<存档目录名>` 追加 `--quickPlaySingleplayer`，`-PrwSelfTest=true` 打开模组内置自测（建存档点 → 改世界 → 回溯 → 校验世界状态）。结论看 `run/logs/latest.log` 里的 `REWIND_SELFTEST PASS` / `REWIND_SELFTEST FAIL:`，自测跑完会自行退出客户端。两个参数都不传时 `runClient` 行为不变。
 
+四个 target 都支持这两个参数（client run 设 `-Drewind.selftest`，server run 设 `-Drewind.servertest`）。跑之前要把测试世界与 `testdata/rewind_test` 备好；`testdata` 是**按版本**各一份，差异只在数据包格式：
+
+- 1.20.1（fabric / forge）：函数目录是 `data/<ns>/functions/`（复数），`pack.mcmeta` 的 `pack_format` = 15。
+- 1.21.1：`function/`（单数），`pack_format` = 48。
+- 26.1：`function/`，`pack_format` = 101，gamerule 名改成 snake_case（`send_command_feedback`）。
+
+自测的原地回滚断言统一挂在 `RewindPlatforms.get().supportsInPlaceRollback()` 门控上：支持时跑完整断言，不支持时打 SKIPPED 日志并让服务端自测收尾输出 `PASS (partial: ...)`。四个 target 现在都返回 true，所以会走完整分支（`forge-1.20.1` 的 `-PrwSelfTest` 还额外跑一遍 `runServer` 的专用服务器自测）。
+
 改 target 构建时容易踩的两个坑，只在 dev 运行下暴露：
 
-- **common 的类进不了 MOD_CLASSES**：ModDevGradle 只把 `neoForge { mods { ... } }` 里声明的 sourceSet 输出交给 FML，`implementation project(':common')` 不会进入游戏真正使用的 legacy classpath。target 需要额外声明 `additionalRuntimeClasspath project(':common')`（见 `targets/neoforge-1.21.1/build.gradle`），否则 dev 下会 `NoClassDefFoundError`。
+- **common 的类进不了 MOD_CLASSES**：ModDevGradle 只把 `neoForge { mods { ... } }` 里声明的 sourceSet 输出交给 FML，`implementation project(':common')` 不会进入游戏真正使用的 legacy classpath。使用 legacy classpath 的 target 需要额外声明 `additionalRuntimeClasspath project(':common')`（见 `targets/neoforge-1.21.1/build.gradle`），否则 dev 下会 `NoClassDefFoundError`。**NeoForge 26.1 起 ModDevGradle 已经取消这条 classpath**（`VersionCapabilities.legacyClasspath()` 为 false，声明它会直接报 `there is no additional classpath anymore for Minecraft 26.1.2`）；那边 dev 运行直接用标准 `runtimeClasspath`，`implementation project(':common')` 就够了。
 - **包名不能与 target 重叠**：dev 下 common 的 jar 是独立自动模块，若它的包与 target 模组模块的包同名（例如都在 `cc.sighs`），ModLauncher 会以 `ResolutionException: Modules ... export package ...` 启动失败。
 
-### 存档 / 读档 API（neoforge-1.21.1）
+### 存档 / 读档 API
 
-对外入口是 `cc.sighs.rewind.api.RewindApi`，结果类型是 `cc.sighs.rewind.api.RewindResult`。分层：
+**下面这一组行为契约对四个 target 都成立**（描述取自 1.21.1 的实现；各 target 的加载器/版本差异见「target 支持状态」）。对外入口是 `cc.sighs.rewind.api.RewindApi`，结果类型是 `cc.sighs.rewind.api.RewindResult`。分层：
 
 ```
-api       RewindApi / RewindResult        对外门面；不引用任何 net.minecraft.client.* 类
-server    CheckpointWriter / WorldFlush   纯机制：落盘、镜像、索引、背包快照
-          SnapshotStore                   槽位记录的删除与改名
-          AutoCheckpoint / RewindServerConfig  跟着原版自动保存建点（mixin 挂点 + 开关）
-          InPlaceRollback                 原地回滚引擎
-client    CheckpointController            客户端策略：过渡、界面、失败回退、状态机
-          RewindTreeScreen                「时间树」管理界面（Java 侧驱动 AUI 的 HTML）
-          RewindClient / RewindCommands   热键与命令，只做转交
+common/api        RewindApi / RewindResult        对外门面；不引用任何 net.minecraft.* 类
+common/core       CheckpointWriter                纯机制：索引、清单、块映射、镜像编排、时间线边
+                  AutoCheckpoint                  「跟着原版自动保存建点」的策略与跳过条件
+common/store      SnapshotStore / SnapshotBlockIo 槽位记录的删除改名、块存储会话
+common/spi        RewindPlatform / FlushOutcome    平台能力接口（世界根、线程判定、落盘、原地回滚）
+                  RollbackOutcome / RewindPlatforms  结果类型与平台实现的持有者
+common/snapshot   Snapshot*                       槽位文件格式、索引、镜像、块存储、背包快照
+target/server     WorldFlush / NeoForgeRewindPlatform  强制落盘 + 玩家展示信息；SPI 的 NeoForge 1.21.1 实现
+                  InPlaceRollback                 原地回滚引擎（吃原版内部结构，按版本各写一份）
+                  RewindServerConfig / RewindVersion  配置落盘与 mod 版本号（值存 common）
+client            CheckpointController            客户端策略：过渡、界面、失败回退、状态机
+                  RewindTreeScreen                「时间树」管理界面（Java 侧驱动 AUI 的 HTML）
+                  RewindClient / RewindCommands   热键与命令，只做转交
 ```
+
+`server` 之外的共享部分都在 common；target 侧只留「平台怎么接」和「原版内部长什么样」。`RewindPlatform` 的参数是各平台自己的服务器对象（不透明的 `Object`），target 在模组构造阶段 `RewindPlatforms.install(new NeoForgeRewindPlatform())` 装好，`RewindApi` 才拿得到世界根、线程判定与落盘/回滚能力。
 
 - **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
 - **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位；时间树界面上的「读取」走的就是它们（「覆盖」不走——它要界面一直开着，见「时间树」一节）。
@@ -104,15 +157,18 @@ client    CheckpointController            客户端策略：过渡、界面、�
 
 ### 回滚窗口与快速重启（neoforge-1.21.1）
 
-F8 回溯分三步：关世界 → 用快照覆盖存档文件 → 重新开世界。前两步之间那段「世界马上要被整体覆盖」的时间叫**回滚窗口**，由 `Rewind.beginDiscard()` / `endDiscard()` 标记（`CheckpointController` 在按下 F8 时打开、快照写完后关闭，失败路径也会关）：
+F8 回溯分三步：关世界 → 用快照覆盖存档文件 → 重新开世界。前两步之间那段「世界马上要被整体覆盖」的时间叫**回滚窗口**，由 `RewindState.beginDiscard()` / `endDiscard()`（common；target 的 `Rewind` 只是转发门面）标记（`CheckpointController` 在按下 F8 时打开、快照写完后关闭，失败路径也会关）：
 
 - 窗口内所有世界落盘由 `cc.sighs.mixin.RollbackDiscardMixins` 跳过：区块 / 实体 / 玩家数据 / 维度数据 / region 写入 / level.dat，同时跳过 `stopServer` 那个「排空 chunkMap」的循环；关句柄与释放 `session.lock` 不受影响。**改动任何保存路径时要回来对照这些注入点**——漏掉的写入虽然随后会被快照覆盖，但会把文件 mtime 改脏，让反向增量还原误判成「变了」而白拷一遍。
+  > 26.1 上的对应物：`SavedData.save(File, HolderLookup$Provider)` 已删除，存档数据的写盘汇点变成 `SavedDataStorage.scheduleSave()`；level.dat 那条从 `saveDataTag(RegistryAccess, WorldData, CompoundTag)` 变成了私有的 `saveLevelData(CompoundTag)`（两条公开入口都汇到它）。其余目标签名不变。
 - 重新开世界走**快速重启**：复用上一轮的 `LayeredRegistryAccess` 与 `ReloadableServerResources`（重建世界时它们不会被关闭），只重读 level.dat（`LevelStorageSource.getLevelDataAndDimensions` + 重新 bake DIMENSIONS 层），再自己驱动 `Minecraft.doWorldLoad`，从而跳过 `WorldLoader.load` 的数据包 / 注册表 / 配方 / 战利品 / 标签 / 函数重载。任何一步失败都会自动退回 `WorldOpenFlows.openWorld`（见 `CheckpointController.tryFastRestart`）。
 - 回溯时的文件回拷是**反向增量**：用建点时记录的清单判断活动存档里哪些文件还是原样，只回拷真正被改写过的，并把回拷文件的 mtime 拨回建点时的值（`SnapshotMirror.Direction.TO_WORLD`）。
 
-### 原地回滚（neoforge-1.21.1）
+### 原地回滚
 
 F8 默认走**原地回滚**（`cc.sighs.rewind.server.InPlaceRollback`）：世界不关、客户端不重登，在活着的集成服务器里把世界倒回存档点。整段跑在服务端线程上，客户端只轮询 `CheckpointController` 的几个标记（`Phase.ROLLING_BACK`）。失败会自动退回上面那条「关世界 → 覆盖 → 重开」的老路。
+
+`neoforge-26.1` 也接了同一份引擎：`NeoForge261RewindPlatform.supportsInPlaceRollback()` 返回 true，`rollbackInPlace` 走 26.1 版的 `InPlaceRollback`。步骤顺序、保护条件、`Result` 口径与 1.21.1 完全一致，换掉的只是原版内部入口——`DimensionDataStorage` → `SavedDataStorage`（缓存键变成 `SavedDataType<?>`）、`Raids.getFileId()/factory()` → `Raids.TYPE`、记分板改走 `ServerScoreboard.load(Packed)`、`player.load(CompoundTag)` → `player.load(ValueInput)`（维度读 `ServerPlayer.SavedPosition`）、天气从 level.dat 挪进服务器级 `WeatherData` SavedData、时间字段 `GameTime/DayTime` 变成单个 `Time`、出生点变成 `LevelData.RespawnData`。存档数据一律「作废缓存 → 从已被快照覆盖的磁盘重新读」，所以不硬编码 `data/*.dat` 的路径（26.1 的 SavedData 落盘是 `<dataFolder>/<namespace>/<path>.dat`）。逐条对照写在 `targets/neoforge-26.1/.../InPlaceRollback.java` 与 `RollbackAccessMixins.java` 的类注释里。
 
 顺序（每一步都有非它不可的理由，改之前先读 `InPlaceRollback` 的类注释）：
 

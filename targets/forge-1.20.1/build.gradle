@@ -9,6 +9,13 @@ file('../../gradle.properties').withInputStream { properties.load(it) }
 file('gradle.properties').withInputStream { properties.load(it) }
 properties.each { key, value -> ext.set(key.toString(), value.toString()) }
 
+// 本地端到端自测用的可选运行参数，不传就不生效：
+//   -PrwQuickPlay=<存档目录名>  直接把客户端开进某个单人世界（--quickPlaySingleplayer）
+//   -PrwSelfTest=true          打开模组内置自测：client run 设 -Drewind.selftest=true，
+//                              server run 设 -Drewind.servertest=true
+def rewindQuickPlay = project.findProperty('rwQuickPlay')
+def rewindSelfTest = project.findProperty('rwSelfTest')
+
 group = mod_group_id
 version = mod_version
 
@@ -27,10 +34,21 @@ legacyForge {
     runs {
         client {
             client()
+            if (rewindQuickPlay) {
+                programArgument '--quickPlaySingleplayer'
+                programArgument rewindQuickPlay.toString()
+            }
+            if (rewindSelfTest) {
+                systemProperty 'rewind.selftest', rewindSelfTest.toString()
+            }
         }
         server {
             server()
             programArgument '--nogui'
+            // 同一个 -PrwSelfTest=true：客户端跑单人世界的自测，专用服务器跑 RewindServerSelfTest
+            if (rewindSelfTest) {
+                systemProperty 'rewind.servertest', rewindSelfTest.toString()
+            }
         }
     }
 
@@ -47,11 +65,44 @@ sourceSets.main.output.dir(
 )
 
 repositories {
+    maven {
+        url = 'https://maven.sighs.cc/repository/maven-public/'
+    }
     mavenCentral()
 }
 
 dependencies {
     implementation project(':common')
+    implementation 'com.sighs:ApricityUI-forge-1.20.1:1.2.4-hotfix'
+    // Mixin 注解处理器必须显式挂在 annotationProcessor 上：java 插件会把 -processorpath 设成这个
+    // 配置（而不是编译类路径），不声明的话处理器根本不会跑，`mixin { add ... }` 声明的 refmap /
+    // tsrg 不会生成，reobfJar 会因为找不到映射文件直接失败。版本与 Forge 用户 dev 里跑的那份一致；
+    // gson / guava / ASM 是处理器自己的运行期依赖（-processorpath 是独立的一条，不会自动带上编译类路径）。
+    annotationProcessor 'org.spongepowered:mixin:0.8.5'
+    annotationProcessor 'com.google.code.gson:gson:2.10.1'
+    annotationProcessor 'com.google.guava:guava:31.1-jre'
+    annotationProcessor 'org.ow2.asm:asm:9.7'
+    annotationProcessor 'org.ow2.asm:asm-tree:9.7'
+    annotationProcessor 'org.ow2.asm:asm-commons:9.7'
+    annotationProcessor 'org.ow2.asm:asm-util:9.7'
+    annotationProcessor 'org.ow2.asm:asm-analysis:9.7'
+}
+
+// Mixin 接线（Forge 1.20.1 的走法与 NeoForge 不同）：
+//   * 「有哪些 mixin 配置」在发行版里靠 jar manifest 的 MixinConfigs 声明（Mixin 的
+//     MixinPlatformAgentDefault 会读容器的这个属性），Forge/FML 自己不解析它——见下面的 jar manifest；
+//   * dev 运行时 mod 是从目录（MOD_CLASSES）加载的，没有 manifest，所以 MDG 的 mixin 扩展用
+//     `--mixin.config <配置文件>` 通过程序参数告诉 Mixin，并顺便打开 refmap 重映射
+//     （mixin.env.remapRefMap / mixin.env.refMapRemappingFile 系统属性）；
+//   * `add` 让 Mixin 注解处理器在编译期生成 refmap（named → srg），既挂进 compileJava 的
+//     -A 选项，也自动塞进 jar，供发行版的 SRG 运行环境解析注入目标用。名字与
+//     rewind.mixins.json 里的 "refmap" 字段一致。
+mixin {
+    config 'rewind.mixins.json'
+    // 客户端注入单独一份配置：它的 `required` 是 false，挂点对不上时退化成「功能缺失」而不是崩启动
+    // （见 rewind.client.mixins.json 与 KeyBindsListMixins）。
+    config 'rewind.client.mixins.json'
+    add sourceSets.main, 'rewind.refmap.json'
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -70,6 +121,13 @@ tasks.named('processResources', ProcessResources).configure {
     inputs.properties replaceProperties
     filesMatching('META-INF/mods.toml') {
         expand replaceProperties + [project: project]
+    }
+}
+
+tasks.named('jar', Jar).configure {
+    // Forge 1.20.1 靠 jar manifest 的 MixinConfigs 发现 mixin 配置（逗号分隔多个）。
+    manifest {
+        attributes 'MixinConfigs': 'rewind.mixins.json,rewind.client.mixins.json'
     }
 }
 

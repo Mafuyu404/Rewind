@@ -1,0 +1,42 @@
+package cc.sighs.rewind.client;
+
+import net.minecraft.client.gui.screens.GenericMessageScreen;
+import net.minecraft.client.gui.screens.LevelLoadingScreen;
+import net.minecraft.client.gui.screens.ProgressScreen;
+import net.neoforged.neoforge.client.event.ScreenEvent;
+
+/**
+ * 过渡期间的「无界面」处理。
+ *
+ * <p>回溯要走原版「关世界 → 重开世界」那条路，原版在这条路上会依次挂 {@code GenericMessageScreen}
+ * （保存中）、{@code LevelLoadingScreen}（区块网格）这些加载屏。过渡要求全程没有任何界面，
+ * 所以在 {@link ScreenEvent.Opening} 里把它们拦掉——画面由 {@link RewindTransitionRenderer} 负责，
+ * 玩家看到的是「画面糊住 → 换世界 → 化开」。拦截只在过渡进行期间生效；一旦过渡结束（或失败），
+ * 原版行为完全恢复。
+ *
+ * <p>26.1 的改动：{@code ReceivingLevelScreen} 已经没了（下载地形那段现在由 {@code LoadingOverlay}
+ * 这种 overlay 承担，它不是 Screen，本来也不会走这条拦截），{@code LevelLoadingScreen} 仍在，
+ * 但构造函数换成了 {@code (LevelLoadTracker, Reason)}。
+ *
+ * <p>注意 {@code Minecraft.setScreen(null)} 在关世界过程中会抛异常，所以关世界时仍然传一个屏对象进去，
+ * 靠这里拦下它，既不开界面也不会踩到那个断言。
+ */
+public final class RewindScreens {
+    private RewindScreens() {
+    }
+
+    public static void onScreenOpening(ScreenEvent.Opening event) {
+        if (!RewindTransition.isActive()) {
+            return;
+        }
+        // 后处理不可用时不要拦：让原版加载屏照常显示，总比露出一段黑屏好
+        if (!RewindTransitionRenderer.isEffectAvailable()) {
+            return;
+        }
+        if (event.getNewScreen() instanceof GenericMessageScreen
+                || event.getNewScreen() instanceof LevelLoadingScreen
+                || event.getNewScreen() instanceof ProgressScreen) {
+            event.setCanceled(true);
+        }
+    }
+}

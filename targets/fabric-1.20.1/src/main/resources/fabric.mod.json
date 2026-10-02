@@ -8,12 +8,14 @@
   "license": "${mod_license}",
   "environment": "*",
   "entrypoints": {
-    "main": ["cc.sighs.RewindFabric"]
+    "main": ["cc.sighs.RewindFabric"],
+    "client": ["cc.sighs.RewindFabricClient"]
   },
+  "mixins": ["rewind.mixins.json"],
   "depends": {
     "fabricloader": ">=${fabric_loader_version}",
     "minecraft": "~${minecraft_version}",
-    "java": ">=17"
+    "java": ">=17",
+    "fabric-api": "*"
   }
 }
-

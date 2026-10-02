@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,7 @@ import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.mixin.RollbackAccessMixins.SimpleRegionStorageAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.store.SnapshotBlockIo;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
 import cc.sighs.rewind.snapshot.SnapshotBlocks;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
@@ -424,8 +426,11 @@ public final class InPlaceRollback {
         for (Target target : targets) {
             guards.computeIfAbsent(target.level, level -> new LongOpenHashSet()).add(target.pos.toLong());
         }
-        guards.forEach((level, positions) ->
-                Rewind.beginUnloadGuard(level.getChunkSource().chunkMap, positions));
+        guards.forEach((level, positions) -> {
+            long[] sorted = positions.toLongArray();
+            Arrays.sort(sorted);
+            Rewind.beginUnloadGuard(level.getChunkSource().chunkMap, sorted);
+        });
 
         int unloadedLevel = ChunkLevel.MAX_LEVEL + 1;
         for (Target target : targets) {

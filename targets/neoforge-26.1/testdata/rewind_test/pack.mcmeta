@@ -1,0 +1,6 @@
+{
+  "pack": {
+    "pack_format": 101,
+    "description": "Rewind 端到端自测用的世界装置（F7 建点 / F8 回溯 / 校验）"
+  }
+}

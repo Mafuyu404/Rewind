@@ -1,6 +1,8 @@
 package cc.sighs;
 
 import cc.sighs.rewind.client.RewindClient;
+import cc.sighs.rewind.common.spi.RewindPlatforms;
+import cc.sighs.rewind.server.NeoForgeRewindPlatform;
 import cc.sighs.rewind.server.RewindServerConfig;
 import cc.sighs.rewind.server.RewindServerSelfTest;
 import net.neoforged.api.distmarker.Dist;
@@ -14,6 +16,8 @@ public final class RewindNeoForge121 {
     public static final String MOD_ID = "rewind";
 
     public RewindNeoForge121(IEventBus modBus) {
+        // common 侧所有需要碰 Minecraft 的能力都通过这个平台实现接入；必须在任何 RewindApi 调用之前装好。
+        RewindPlatforms.install(new NeoForgeRewindPlatform());
         // 服务端行为的配置两边都要有（COMMON），所以放在 dist 判定之外
         ModList.get().getModContainerById(MOD_ID)
                 .ifPresent(container -> RewindServerConfig.register(container, modBus));

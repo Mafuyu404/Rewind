@@ -37,6 +37,10 @@ sourceSets.main.output.dir(
 
 repositories {
     mavenCentral()
+    // ApricityUI：时间树界面用的 HTML/JS 驱动界面库
+    maven {
+        url = 'https://maven.sighs.cc/repository/maven-public/'
+    }
 }
 
 dependencies {
@@ -44,7 +48,35 @@ dependencies {
     mappings loom.officialMojangMappings()
     modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+    // 界面库（客户端轮次才会用上；先挂着，免得界面类写完再补依赖）
+    modImplementation "com.sighs:ApricityUI-fabric-1.20.1:1.2.4"
     implementation project(':common')
+}
+
+// 本地端到端自测用的可选运行参数，不传就不生效（和主版本 neoforge-1.21.1 的两条一一对应）：
+//   -PrwQuickPlay=<存档目录名>  直接把客户端开进某个单人世界（--quickPlaySingleplayer）
+//   -PrwSelfTest=true          打开模组内置自测（client 设 -Drewind.selftest=true，
+//                              server 设 -Drewind.servertest=true）
+def rewindQuickPlay = project.findProperty('rwQuickPlay')
+def rewindSelfTest = project.findProperty('rwSelfTest')
+
+loom {
+    runs {
+        client {
+            if (rewindQuickPlay) {
+                programArgs '--quickPlaySingleplayer', rewindQuickPlay.toString()
+            }
+            if (rewindSelfTest) {
+                vmArg "-Drewind.selftest=${rewindSelfTest}"
+            }
+        }
+        server {
+            // 同一个 -PrwSelfTest=true：客户端跑单人世界的自测，专用服务器跑 RewindServerSelfTest
+            if (rewindSelfTest) {
+                vmArg "-Drewind.servertest=${rewindSelfTest}"
+            }
+        }
+    }
 }
 
 tasks.named('processResources', ProcessResources).configure {

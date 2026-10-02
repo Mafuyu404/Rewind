@@ -1,0 +1,14 @@
+{
+  "required": false,
+  "minVersion": "0.8.5",
+  "package": "cc.sighs.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "rewind.refmap.json",
+  "client": [
+    "KeyBindsListMixins$OnlyRewindKeys",
+    "KeyBindsListMixins$KeyBindsScreenAccess"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

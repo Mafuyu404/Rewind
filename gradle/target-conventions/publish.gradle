@@ -21,9 +21,13 @@ def publishMinecraftVersion = [
                 .orElse(providers.gradleProperty('neoforge_261_minecraft_version'))
 ][publishLoader]
 
+// 一个 loader 的生产 jar 由谁产出不一样：Fabric 走 loom 的 remapJar，legacyforge 走 reobfJar
+// （它的 `jar` 是 devlibs 里的 named 映射 jar，发布出去会在生产环境坏掉），NeoForge 直接用 jar。
 def publishFile = tasks.findByName('remapJar') != null ?
         tasks.named('remapJar').flatMap { it.archiveFile } :
-        tasks.named('jar', Jar).flatMap { it.archiveFile }
+        tasks.findByName('reobfJar') != null ?
+                tasks.named('reobfJar').flatMap { it.archiveFile } :
+                tasks.named('jar', Jar).flatMap { it.archiveFile }
 def curseforgeProjectId = providers.provider { findProperty('publish_curseforge_project_id')?.toString() }
         .orElse(providers.environmentVariable('CURSEFORGE_PROJECT_ID'))
 def modrinthProjectId = providers.provider { findProperty('publish_modrinth_project_id')?.toString() }

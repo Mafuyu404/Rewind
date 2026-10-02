@@ -1,6 +1,7 @@
 package cc.sighs.rewind.server;
 
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.config.AutoCheckpointSettings;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.config.ModConfig;
@@ -13,27 +14,25 @@ import net.neoforged.neoforge.common.ModConfigSpec;
  * <p>目前只有一项：「跟着原版自动保存建点」。它是 COMMON 配置而不是 CLIENT，因为建点发生在服务端
  * 线程上，跟玩家有没有客户端没关系。
  *
- * <p>值在配置加载/重载时抄进 static 字段，读的时候就是普通字段访问——原版每次自动保存都会问一次，
- * 不适合每次都去查配置表。配置没加载成功时保持默认值，功能照常按默认值工作。
+ * <p>默认值、可调范围与「分钟 → tick」的换算都在 common 的 {@link AutoCheckpointSettings} 里；
+ * 本类只负责 NeoForge 的 {@code ModConfigSpec} 读写与落盘，界面/Mixin 读到的都是那一份共享值。
  */
 public final class RewindServerConfig {
     /** 「跟着原版自动保存建点」的默认值。 */
-    public static final boolean DEFAULT_AUTO_CHECKPOINT = true;
+    public static final boolean DEFAULT_AUTO_CHECKPOINT = AutoCheckpointSettings.DEFAULT_AUTO_CHECKPOINT;
     /** 原版自动保存间隔的默认值（分钟）——原版自己就是 5 分钟。 */
-    public static final int DEFAULT_AUTO_SAVE_INTERVAL_MINUTES = 5;
+    public static final int DEFAULT_AUTO_SAVE_INTERVAL_MINUTES = AutoCheckpointSettings.DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
     /** 自动保存间隔的可调范围（分钟）。 */
-    public static final int MIN_AUTO_SAVE_INTERVAL_MINUTES = 1;
-    public static final int MAX_AUTO_SAVE_INTERVAL_MINUTES = 60;
+    public static final int MIN_AUTO_SAVE_INTERVAL_MINUTES = AutoCheckpointSettings.MIN_AUTO_SAVE_INTERVAL_MINUTES;
+    public static final int MAX_AUTO_SAVE_INTERVAL_MINUTES = AutoCheckpointSettings.MAX_AUTO_SAVE_INTERVAL_MINUTES;
     /** 一分钟多少 tick（原版 20 tps）；{@link #autoSaveIntervalTicks()} 就是「分钟数 × 这个」。 */
-    public static final int TICKS_PER_MINUTE = 20 * 60;
+    public static final int TICKS_PER_MINUTE = AutoCheckpointSettings.TICKS_PER_MINUTE;
 
     private static ModConfigSpec.BooleanValue autoCheckpointEnabled;
     private static ModConfigSpec.IntValue autoSaveIntervalMinutes;
     private static ModConfigSpec spec;
     /** 保存下来的配置对象：界面上改完开关要立刻落盘。 */
     private static volatile ModConfig modConfig;
-    private static volatile boolean autoCheckpointEnabledValue = DEFAULT_AUTO_CHECKPOINT;
-    private static volatile int autoSaveIntervalMinutesValue = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
 
     private RewindServerConfig() {
     }
@@ -75,28 +74,26 @@ public final class RewindServerConfig {
 
     private static void apply() {
         try {
-            autoCheckpointEnabledValue = autoCheckpointEnabled == null
-                    ? DEFAULT_AUTO_CHECKPOINT
-                    : autoCheckpointEnabled.get();
-            autoSaveIntervalMinutesValue = autoSaveIntervalMinutes == null
-                    ? DEFAULT_AUTO_SAVE_INTERVAL_MINUTES
-                    : clampMinutes(autoSaveIntervalMinutes.get());
+            AutoCheckpointSettings.apply(
+                    autoCheckpointEnabled == null ? DEFAULT_AUTO_CHECKPOINT : autoCheckpointEnabled.get(),
+                    autoSaveIntervalMinutes == null
+                            ? DEFAULT_AUTO_SAVE_INTERVAL_MINUTES
+                            : autoSaveIntervalMinutes.get());
         } catch (Throwable t) {
-            autoCheckpointEnabledValue = DEFAULT_AUTO_CHECKPOINT;
-            autoSaveIntervalMinutesValue = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
+            AutoCheckpointSettings.apply(DEFAULT_AUTO_CHECKPOINT, DEFAULT_AUTO_SAVE_INTERVAL_MINUTES);
         }
         Rewind.LOGGER.info("Rewind: auto checkpoint enabled={} interval={} min",
-                autoCheckpointEnabledValue, autoSaveIntervalMinutesValue);
+                AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes());
     }
 
     /** 跟着原版自动保存建点是不是开着。 */
     public static boolean autoCheckpointEnabled() {
-        return autoCheckpointEnabledValue;
+        return AutoCheckpointSettings.autoCheckpointEnabled();
     }
 
     /** 配置里的自动保存间隔（分钟，已夹到范围内）。 */
     public static int autoSaveIntervalMinutes() {
-        return autoSaveIntervalMinutesValue;
+        return AutoCheckpointSettings.autoSaveIntervalMinutes();
     }
 
     /**
@@ -106,12 +103,12 @@ public final class RewindServerConfig {
      * 每次原版要算下一次自动保存的间隔时都会问一次这里，所以是个普通字段读，不查配置表。
      */
     public static int autoSaveIntervalTicks() {
-        return autoCheckpointEnabledValue ? autoSaveIntervalMinutesValue * TICKS_PER_MINUTE : 0;
+        return AutoCheckpointSettings.autoSaveIntervalTicks();
     }
 
     /** 改这个开关并立刻落盘（界面上「自动存档」卡的「设置」按钮走这里）。 */
     public static void setAutoCheckpointEnabled(boolean enabled) {
-        autoCheckpointEnabledValue = enabled;
+        AutoCheckpointSettings.setAutoCheckpointEnabled(enabled);
         if (autoCheckpointEnabled != null) {
             autoCheckpointEnabled.set(enabled);
         }
@@ -121,17 +118,14 @@ public final class RewindServerConfig {
 
     /** 改自动保存间隔（分钟）并立刻落盘。值会被夹到 {@link #MIN_AUTO_SAVE_INTERVAL_MINUTES} - {@link #MAX_AUTO_SAVE_INTERVAL_MINUTES}。 */
     public static void setAutoSaveIntervalMinutes(int minutes) {
-        autoSaveIntervalMinutesValue = clampMinutes(minutes);
+        AutoCheckpointSettings.setAutoSaveIntervalMinutes(minutes);
+        int clamped = AutoCheckpointSettings.autoSaveIntervalMinutes();
         if (autoSaveIntervalMinutes != null) {
-            autoSaveIntervalMinutes.set(autoSaveIntervalMinutesValue);
+            autoSaveIntervalMinutes.set(clamped);
         }
         save();
         Rewind.LOGGER.info("Rewind: auto save interval = {} min ({} ticks)",
-                autoSaveIntervalMinutesValue, autoSaveIntervalTicks());
-    }
-
-    private static int clampMinutes(int minutes) {
-        return Math.max(MIN_AUTO_SAVE_INTERVAL_MINUTES, Math.min(MAX_AUTO_SAVE_INTERVAL_MINUTES, minutes));
+                clamped, AutoCheckpointSettings.autoSaveIntervalTicks());
     }
 
     private static void save() {

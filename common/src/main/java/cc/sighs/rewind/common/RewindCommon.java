@@ -8,6 +8,9 @@ package cc.sighs.rewind.common;
  * 导出同一个包，ModLauncher 会直接报 {@code ResolutionException: Modules ... export package ...}。
  */
 public final class RewindCommon {
+    /** 模组 id，与根 {@code gradle.properties} 的 {@code mod_id} 一致。 */
+    public static final String MOD_ID = "rewind";
+
     private RewindCommon() {
     }
 }
