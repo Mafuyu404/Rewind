@@ -70,7 +70,7 @@ dependencies {
     // 26.1 的 ModDevGradle 已经没有这条 classpath 了（VersionCapabilities.legacyClasspath() 为 false，
     // 声明这个配置会直接报 "there is no additional classpath anymore for Minecraft 26.1.2"），
     // dev 运行直接用标准 runtimeClasspath，所以 `implementation project(':common')` 就是全部所需。
-    implementation 'com.sighs:ApricityUI-neoforge-26.1:1.2.4'
+    implementation 'com.sighs:ApricityUI-neoforge-26.1:1.2.6'
 }
 
 tasks.named('processResources', ProcessResources).configure {

@@ -379,6 +379,14 @@ public final class CheckpointController {
                     }
                     return;
                 }
+                // 「关世界重开」那条路的秒表到这里才停：世界真的回来了，这才是这条路走完的时刻
+                // （openWorld 返回 ≠ 世界回来，见 finishReopen 的注释）。原地回滚不走这里，
+                // 它的耗时在 finishRollback 里已经记好了（restoreStartedNanos 为 0）。
+                if (restoreStartedNanos != 0L) {
+                    lastRestoreMillis = millisSince(restoreStartedNanos);
+                    restoreStartedNanos = 0L;
+                    Rewind.LOGGER.info("Rewind: world is back after {} ms (close-and-reopen)", lastRestoreMillis);
+                }
                 // 等区块到位再淡出：判据是「客户端已加载的区块数不再增长」（连续两 tick 没涨）。
                 // 原来这里是固定等 restoreSettleTicks（默认 10 tick = 0.5 秒），而这段时间玩家其实已经
                 // 能看见世界、手里的东西也回来了，多糊的每一 tick 都是白等；现在配置里的那个值改成
@@ -566,9 +574,9 @@ public final class CheckpointController {
         long reopenStartedNanos = System.nanoTime();
 
         if (fastRestartEnabled && tryFastRestart(minecraft, levelId)) {
-            Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (fast restart)",
+            Rewind.LOGGER.info("Rewind: reopen handed off in {} ms (fast restart)",
                     millisSince(reopenStartedNanos));
-            finishReopen(minecraft);
+            finishReopen();
             return;
         }
 
@@ -585,14 +593,16 @@ public final class CheckpointController {
         }
         // openWorld 返回时 ClientLevel 可能还没建好——客户端要等后续 tick 处理完登录包才会 setLevel，
         // 所以这里不能拿 level 判成败（真正失败会走上面传入的 onFail 回调）。
-        Rewind.LOGGER.info("Rewind: reopen phase finished in {} ms (vanilla path)", millisSince(reopenStartedNanos));
-        finishReopen(minecraft);
+        Rewind.LOGGER.info("Rewind: reopen handed off in {} ms (vanilla path)", millisSince(reopenStartedNanos));
+        finishReopen();
     }
 
-    private static void finishReopen(Minecraft minecraft) {
+    private static void finishReopen() {
         lastRestoreInPlace = false;
-        lastRestoreMillis = restoreStartedNanos == 0L ? -1L : millisSince(restoreStartedNanos);
-        restoreStartedNanos = 0L;
+        // 秒表不在这里停。26.1 的 WorldOpenFlows.openWorld 是异步的（读 level.dat 那一步走
+        // thenAcceptAsync 回主线程接着跑），它返回时世界往往还没回来，在这里停表会把
+        // 「关世界重开」算成几十毫秒。真正的终点是 Phase.REVEALING 里第一次看到世界回来的那一刻，
+        // 见 tick() 里那段。1.21.1 的 openWorld 是阻塞的，所以那边旧代码没问题。
         beginReveal();
         succeed("rewind.msg.restored", workerSummary);
     }

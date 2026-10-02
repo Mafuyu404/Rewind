@@ -104,10 +104,11 @@
         .inv-caret{display:inline-block;width:14px}
         /* 展开时快捷栏（第四行）和上面三行背包之间的间隔 */
         .inv-gap{height:12px}
-        /* 背包快照的格子：内置主题是固定 44px 宽（9 列 = 420px），比详情面板还宽、会横向溢出；
-           这里压成 28px、间隙 2px（9 列 = 268px）。物品用 AUI 的 <item> 画，图标就是它默认的 16px。 */
-        .ore-theme .inventory-grid{grid-template-columns:repeat(9,28px);gap:2px}
-        .ore-theme .inventory-grid .slot{width:28px;height:28px;border-width:2px;box-shadow:inset 2px 2px #4d4e50,inset -2px -2px #b2b3b5}
+        /* 背包快照的格子：主题是固定 44px 九列，在详情面板里会横向溢出；
+           改为按栏宽等分（repeat(9,1fr)），槽位用 aspect-ratio:1/1 跟着栏宽缩放——
+           既不溢出，也不会像原来那样被硬压成 28px 那么小。物品用 AUI 的 <item> 画。 */
+        .ore-theme .inventory-grid{grid-template-columns:repeat(9,1fr)}
+        .ore-theme .slot{width:auto;height:auto;position:relative;aspect-ratio:1/1}
         .stat-row{display:flex;justify-content:space-between;gap:10px}
         .scroll-area{max-height:480px;overflow-y:auto;padding-right:4px}
         .scroll-area::-webkit-scrollbar{width:12px}

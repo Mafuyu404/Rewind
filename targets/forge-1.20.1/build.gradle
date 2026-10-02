@@ -73,7 +73,13 @@ repositories {
 
 dependencies {
     implementation project(':common')
-    implementation 'com.sighs:ApricityUI-forge-1.20.1:1.2.4-hotfix'
+    // AUI 的发行 jar 是 SRG 名（1.20.1 的 class 名是官方名、方法/字段名是 m_xxxxx_/f_xxxxx_），
+    // 而 dev 运行时是 named（MenuScreens.register 之类）。挂在普通 implementation 上只会原样进
+    // classpath，不会 remap，于是 AUI 内部对 MC 方法的调用在 dev 下全是 NoSuchMethodError
+    // （典型：MenuScreens.m_96206_）。MDG legacyforge 会为 implementation/runtimeOnly/compileOnly/
+    // api/compileOnlyApi 各自动建一个「同名前面加 mod」的 remapping 配置（modImplementation …），
+    // 把里面的 SRG 产物经 RemappingTransform 转成 named 再回灌给原配置，所以 mod 依赖必须写在这里。
+    modImplementation 'com.sighs:ApricityUI-forge-1.20.1:1.2.6'
     // Mixin 注解处理器必须显式挂在 annotationProcessor 上：java 插件会把 -processorpath 设成这个
     // 配置（而不是编译类路径），不声明的话处理器根本不会跑，`mixin { add ... }` 声明的 refmap /
     // tsrg 不会生成，reobfJar 会因为找不到映射文件直接失败。版本与 Forge 用户 dev 里跑的那份一致；

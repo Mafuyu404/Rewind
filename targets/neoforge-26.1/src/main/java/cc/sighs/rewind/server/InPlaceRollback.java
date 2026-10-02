@@ -68,6 +68,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.SavedDataStorage;
 import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.level.storage.TagValueInput;
@@ -196,13 +197,20 @@ public final class InPlaceRollback {
     public static Result run(MinecraftServer server, Path worldRoot, String slot) throws Exception {
         Result result = new Result();
         long startedNanos = System.nanoTime();
+        // 回滚窗口先关掉，而且要在做任何别的事之前。RewindApi 在调进来之前就把它打开了，而窗口开着的时候
+        // RegionFileStorage.write 会被整段取消（见 RollbackDiscardMixins）。26.1 的 ChunkMap.saveChunksEagerly
+        // 会先把区块的 unsaved 标记清掉、再异步落盘，如果这次异步写正好落在这个窗口里，它就被静默丢掉：
+        // 内存里「已经不脏」、磁盘上「也没变」，这个区块从两个判据里同时消失，回滚当它没改过——表现为
+        // 「世界回滚成功了，但某个区块原样留在改后的状态」。
+        // 所以窗口只留到真正开始覆盖文件之前（下面的 beginDiscard 重新打开），中间这一段
+        // （读槽位清单 / 追平写入 / 找受影响区块）必须让写入正常落地。
+        Rewind.endDiscard();
         Path slotDir = SnapshotLayout.slotDir(worldRoot, slot);
         SnapshotManifest manifest = SnapshotManifest.load(SnapshotLayout.manifestFile(worldRoot, slot));
 
         try {
             // 先把「已经排队但还没落盘」的写入落下去：这类区块在内存里已经不是 unsaved、磁盘上又还没变，
             // 两个判据都会漏掉它。这段时间世界不会 tick（我们就在服务端线程上），所以不会再有新的写入插进来。
-            Rewind.endDiscard();
             flushWorkers(server);
             Rewind.beginDiscard();
 
@@ -810,12 +818,19 @@ public final class InPlaceRollback {
     }
 
     /**
-     * 玩家状态从快照的 playerdata 读回来；原版没有「重读玩家」的入口，只能 load 之后手动补齐客户端同步。
+     * 玩家状态从快照的玩家数据文件读回来；原版没有「重读玩家」的入口，只能 load 之后手动补齐客户端同步。
+     *
+     * <p>26.1 把玩家数据从 {@code playerdata/<uuid>.dat} 搬到了 {@code players/data/<uuid>.dat}
+     * （{@code LevelResource.PLAYER_DATA_DIR}）。这里不写死目录名：按原版那套算出玩家数据目录，
+     * 再换算成快照槽位里的相对路径，免得版本一挪位置就整段静默失效（{@code restored=0}，
+     * 表现就是「世界回去了、玩家自己的位置和背包没回去」）。
      */
     private static int restorePlayers(MinecraftServer server, Path slotDir) throws IOException {
         int restored = 0;
+        Path worldRoot = server.getWorldPath(LevelResource.LEVEL_DATA_FILE).getParent();
+        Path relativePlayerData = worldRoot.relativize(server.getWorldPath(LevelResource.PLAYER_DATA_DIR));
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            Path file = slotDir.resolve("playerdata").resolve(player.getUUID() + ".dat");
+            Path file = slotDir.resolve(relativePlayerData).resolve(player.getUUID() + ".dat");
             if (!Files.isRegularFile(file)) {
                 continue;
             }

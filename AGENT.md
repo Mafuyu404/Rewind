@@ -86,16 +86,16 @@ cd targets\forge-1.20.1
 
 | Target | MC / 加载器 | 客户端 AUI | 原地回滚 | 客户端钩子（NeoForge 事件的替代物） |
 | --- | --- | --- | --- | --- |
-| `neoforge-1.21.1` | 1.21.1 / NeoForge | 1.2.5.4 | 有 | NeoForge 原生事件（`RenderFrameEvent` 等） |
-| `neoforge-26.1` | 26.1 / NeoForge | 1.2.4 | 有 | NeoForge 原生事件；`GuiGraphicsExtractor` / `Identifier` / `SavedDataStorage` 等 26.1 改名已消化 |
-| `forge-1.20.1` | 1.20.1 / Forge | 1.2.4-hotfix | 有 | `TickEvent.RenderTickEvent` 代替帧 Pre/Post；`MinecraftForge.EVENT_BUS`；mixin 走 jar manifest 的 `MixinConfigs` |
-| `fabric-1.20.1` | 1.20.1 / Fabric | 1.2.4 | 有 | 自写客户端 mixin：帧 Pre/Post 挂 `Minecraft.runTick`、原始按键挂 `KeyboardHandler.keyPress`、拦加载屏挂 `Minecraft.setScreen`；其余走 Fabric API 事件 |
+| `neoforge-1.21.1` | 1.21.1 / NeoForge | 1.2.6 | 有 | NeoForge 原生事件（`RenderFrameEvent` 等） |
+| `neoforge-26.1` | 26.1 / NeoForge | 1.2.6 | 有 | NeoForge 原生事件；`GuiGraphicsExtractor` / `Identifier` / `SavedDataStorage` 等 26.1 改名已消化 |
+| `forge-1.20.1` | 1.20.1 / Forge | 1.2.6 | 有 | `TickEvent.RenderTickEvent` 代替帧 Pre/Post；`MinecraftForge.EVENT_BUS`；mixin 走 jar manifest 的 `MixinConfigs` |
+| `fabric-1.20.1` | 1.20.1 / Fabric | 1.2.6 | 有 | 自写客户端 mixin：帧 Pre/Post 挂 `Minecraft.runTick`、原始按键挂 `KeyboardHandler.keyPress`、拦加载屏挂 `Minecraft.setScreen`；其余走 Fabric API 事件 |
 
 四条已知的跨 target 差异（改代码前先看）：
 
 - **配置文件**：NeoForge 两个 target 用 `ModConfigSpec`（`run/config/rewind-{common,client}.toml`）；Fabric 没有配置系统，`RewindServerConfig` / `RewindClientConfig` 是手写的 properties 实现（`config/rewind-{common,client}.properties`），**没有「外部改文件自动重载」**，只有界面上的 setter 会立刻落盘。
 - **自动保存间隔**：1.20.1 原版没有 `computeNextAutosaveInterval` / `ticksUntilAutosave`，两个 1.20.1 target 改用 `@ModifyConstant` 替换 `tickServer` 里写死的 `6000`（`require = 0` 软挂点，挂不上只是「间隔设置不生效」）。
-- **AUI 版本**：除 1.21.1 外都是 1.2.4 系。DOM / 容器 API 与 1.2.5.4 同构（已 javap 核对），但 1.2.5.2 之前那个「flat document 里画不出 `<img>`」的老问题在 1.2.4 上可能仍在——时间树封面可能退回纯色块（页面接线与 `hasCover` 判定是好的，见「曾经的问题」一节）。
+- **AUI 版本**：四个 target 统一 `1.2.6`（坐标分别是 `ApricityUI-{neoforge-1.21.1,neoforge-26.1,forge-1.20.1,fabric-1.20.1}`）。时间树用到的 DOM / 容器 API 在 1.2.4 → 1.2.6 之间保持同构（编译期已核），而 1.2.5.2 之前的「flat document 里画不出 `<img>`」的老问题在 1.2.6 上已不存在——四个 target 的时间树封面都应该能画出来（见「曾经的问题」一节）。
 - **原地回滚引擎按版本各一份**：四个 target 各有一份 `InPlaceRollback`，依赖的原版内部结构不同（1.20.1 没有 `SimpleRegionStorage` / `generationRefCount`，26.1 的 `ChunkMap` 改继承 `SimpleRegionStorage`、`DimensionDataStorage` 改名 `SavedDataStorage`、`SavedData.save` 消失）。三份新引擎与 1.21.1 那份**步骤顺序与保护条件一致**，差异逐条写在各自的类注释里。
 
 ### 本地端到端自测
@@ -116,6 +116,21 @@ cd targets\neoforge-1.21.1
 - 26.1：`function/`，`pack_format` = 101，gamerule 名改成 snake_case（`send_command_feedback`）。
 
 自测的原地回滚断言统一挂在 `RewindPlatforms.get().supportsInPlaceRollback()` 门控上：支持时跑完整断言，不支持时打 SKIPPED 日志并让服务端自测收尾输出 `PASS (partial: ...)`。四个 target 现在都返回 true，所以会走完整分支（`forge-1.20.1` 的 `-PrwSelfTest` 还额外跑一遍 `runServer` 的专用服务器自测）。
+
+### 进游戏自测：各 target 的实测坑位
+
+四个 target 都用 `-PrwQuickPlay=<存档名> -PrwSelfTest=true` 实测跑通过（`REWIND_SELFTEST PASS` / `REWIND_SERVERTEST PASS`）。这些坑都是跑起来之后才暴露的，改这些地方前先看：
+
+- **fabric 的 loom run 配置是 `programArgs`，不是 `programArgument`**（后者是 ModDevGradle 的 DSL）。写错不会让 `build` 失败，只会在 `runClient` / `runServer` 时直接 `BUILD FAILED in 1s`。
+- **AUI fabric 的 SPI provider 是坏的**：`FabricAnnotationScanner` 只有 private 无参构造器，AUI 却用 `ServiceLoader.findFirst()` 取它 → `NoSuchMethodException`，客户端与专用服务器都起不来。`targets/fabric-1.20.1` 用 `cc.sighs.mixin.AuiFabricAnnotationScanMixins` 把那处调用重定向成反射构造绕开；AUI 上游修好后可删。neoforge / forge 的同名 provider 都是 public，不受影响。
+- **forge 的 mod 依赖必须用 `modImplementation`**，不能是 `implementation`：1.20.1 Forge 的发行 jar 是 SRG、dev 是 named，`implementation` 不做 remap → 既有 `NoSuchMethodError: MenuScreens.m_96206_` 这类崩溃，也会让 `RewindTreeScreen` 里覆盖 `ApricityScreen` 的方法**一个都不生效**。
+- **forge 需要 `pack.mcmeta`**（`pack_format` = 15）：没有它 Forge 会弹 `LoadingErrorScreen`（`failed to load a valid ResourcePackInfo`）并跳过 `setInitialScreen`，quickPlay 永远进不了世界。
+- **1.20.1 的着色器名字**：`ShaderInstance(ResourceProvider, String, VertexFormat)` 把名字拼成 `shaders/core/<name>.json` 且固定去 `minecraft` 命名空间找，传 `rewind:rewind_transition` 会直接抛 `ResourceLocationException`。1.20.1 的 `RewindTransitionRenderer` 传裸名 + 一个重定向到 `rewind` 命名空间的 `ResourceProvider`，json 里的 `vertex` / `fragment` 也是裸名。
+- **1.20.1 的 level.dat 时间键是 `Time`**，不是 `GameTime`（后者只是 getter 名）；`InPlaceRollback.restoreWorldData` 读错键就静默不还原世界时间。
+- **26.1 的维度目录是 `dimensions/<ns>/<path>/`**（主世界 `dimensions/minecraft/overworld`），玩家数据在 `players/data/`；凡是用 `region/`、`playerdata` 拼路径的地方都要按 `LevelResource` / `DimensionType.getStorageFolder` 算，别写死。
+- **26.1 的 `openWorld` 是异步的**（读 level.dat 走 `thenAcceptAsync`）：「关世界重开」的耗时必须在 `REVEALING` 阶段等到世界真的回来才停表，否则会算出几十毫秒的假数字。
+- **26.1 的 `ChunkMap.saveChunksEagerly` 先清 `unsaved` 再异步落盘**：回滚窗口开着的几毫秒里若这次异步写被丢掉，就会出现「内存不脏 + 磁盘没变」→ 回滚什么都不做还报成功。`InPlaceRollback.run` 把 `endDiscard()` 提到最前面，把窗口从毫秒级压到几纳秒。
+- **跑自测的窗口要有焦点**：26.1 的 `pauseIfInactive()` 会在 `closeScreen` 摘屏那一帧立刻挂回 `PauseScreen`（自测已把 `pauseOnLostFocus` 置 false，`RewindScreens` 在过渡期间也拦 `PauseScreen`）。
 
 改 target 构建时容易踩的两个坑，只在 dev 运行下暴露：
 
@@ -246,7 +261,7 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
 - **平时世界是暂停的，写盘期间放行**：`isPauseScreen()` 返回 `savingSlot == null`——管理界面开着时世界停住（不然站在危险的地方翻存档点会挨打），但后台写盘必须让服务端线程能跑，所以那几百毫秒放行。删除 / 改名仍然走客户端线程的文件操作（不占服务端线程），并且在写盘期间会被 `usable()` 挡掉：那会儿世界是活的，自动建点随时可能落盘，客户端线程再去改同一张索引就会打架。**别把它们改成 `server.execute(...)`**，没必要，也会让删除/改名变成异步的。
 - **卡片封面是建点时抓的截图**：`CheckpointWriter.create` 往 `CoverRequest` 里留一条待办（中立的小盒子，服务端线程写、客户端渲染线程取，两边不用互相引用），客户端 `CoverCapture` 在下一帧的 `RenderFrameEvent` 上兑现——那会儿服务端正忙在落盘和拷贝上、世界不 tick，所以抓到的就是存档点那一刻的画面。抓帧那一帧把 `options.hideGui` 和当前界面都临时摘掉，封面里因此既没有 HUD / 手持物、也没有界面。抓帧注册在 `EventPriority.HIGHEST`，必须抢在过渡后处理之前读那一帧，否则封面会带上存档过渡的饱和度。
 - **封面存在 `<gameDir>/apricity/rewind/covers/<存档目录名>/<槽位>-<毫秒>.png`**，页面用 `/rewind/covers/...`（AUI 的根相对路径，`/` 开头 = 相对 `apricity` 根）引用它。放这儿而不是存档目录里，是因为 AUI 只认资源包和 `<gameDir>/apricity/`，任意绝对路径解析不了。文件名带建点时刻（就是索引里的 `savedAtMillis`），是因为 **AUI 按路径缓存贴图、同一个路径换内容不会重读**——每建一次点就换一个名字，页面按索引里的时刻拼出当前那一个；写新的时把旧的一起删掉，删槽位时也删（封面不在存档目录里，`SnapshotStore` 带不上它，是界面上那条删除路径单独清的）。没有截图时退回纯色块（`COVER_COLORS`），封面框也不盖黑色渐变阴影（原来那个 `.cover-shade` 已经删掉）。
-- **封面用 `<img class="cover-shot">`**（`object-fit:cover`，比封面框大的部分由封面框的 `overflow:hidden` 裁掉）。页面这一侧的接线是好的：自测会断言 `<img>` 在、`src` 指向当前那一版封面、`ImageDrawer.isTextureReady` 返回 true。（AUI 1.2.5.1 上这张图看不见，1.2.5.2 起正常——见「曾经的问题：AUI 屏幕文档里画不出图片」。）
+- **封面用 `<img class="cover-shot">`**（`object-fit:cover`，比封面框大的部分由封面框的 `overflow:hidden` 裁掉）。页面这一侧的接线是好的：自测会断言 `<img>` 在、`src` 指向当前那一版封面、`ImageDrawer.isTextureReady` 返回 true。（这个 bug 只在 AUI ≤ 1.2.5.1 上出现，1.2.5.2 起正常，四个 target 现在都用 1.2.6——见「曾经的问题：AUI 屏幕文档里画不出图片」。）
 - **背包快照**：建点时 `WorldFlush` 把非空栏位抓成「栏位序号 → 原版 SNBT」（`ItemStack.saveOptional`），存到与槽位目录同级的 `<槽位>.inventory`（不参与镜像；`SnapshotInventory` 负责读写，一行一条、TAB 分隔）。详情面板把每格喂给 AUI 的 `<item>` 元素——它认 SNBT，数量也由它自己画，所以不要另外加数量角标。
 - **背包快照默认折叠，只显示一行快捷栏**（9 格）。「背包快照」四个字左边是折叠/展开箭头（`▶` / `▼`，点整行切换，`data-act="toggle-inventory"`，状态是 `RewindTreeScreen.inventoryExpanded`，每次开界面都是折叠的）。展开后是「背包三行 + 快捷栏一行」——**快捷栏按原版习惯放在第四行**，中间用 `.inv-gap`（12px）把快捷栏和背包槽位分开；护甲与副手有东西才在快捷栏下面再起一行。
 - **HUD 的「已游玩」**读的是集成服务端玩家的 `play_time` 统计（客户端的 `LocalPlayer` 身上没有这个统计）；界面开着时世界暂停，读一个 int 不会打架。
@@ -296,7 +311,9 @@ F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所�
   > 自测里测这个间隔**只用比默认值大的数**（30 分钟、以及超出上限的 99）：改成比 5 分钟小会把倒计时压下来，后面那一轮就可能凭空插一次真自动保存，把回溯的耗时断言搅黄。「分钟 → tick」的换算按 `autoSaveIntervalMinutes() * TICKS_PER_MINUTE` 直接查，不靠真等。
 - **自测**（第 1 轮 `VERIFY_AUTO`）：关掉开关 → 删掉 auto 槽位 → 跑一次 `saveEverything(true, false, false)` → 断言槽位仍然空；打开开关 → 再跑一次 → 断言槽位写出来了、`source=autosave`。随后 `VERIFY_TREE` 里还会在界面上点一次那个开关，断言配置真的翻了、再翻回来。
 
-### 曾经的问题：AUI 屏幕文档里画不出图片（neoforge-1.21.1）
+### 曾经的问题：AUI 屏幕文档里画不出图片（已修复）
+
+> 四个 target 现在统一用 AUI **1.2.6**（≥ 1.2.5.2），下面这段只是历史记录。
 
 **已经随 AUI 1.2.5.2 消失，这里留个记录。** 在 AUI 1.2.5.1 上，时间树卡片与详情面板的封面（`<img class="cover-shot" src="/rewind/covers/...">`）抓图、存盘、页面接线都是好的，但画面上看不到、只剩纯色块：`<img>` 在 DOM 里且 `src` 正确，`Style.backgroundImage` 有值、`ImageDrawer.isTextureReady(...)` 返回 true（贴图确实解码并上传了），给显式宽高、关深度测试、确认 `commitDraws()` 都无效，而同一个屏幕里的形状、渐变、文字、AUI 的 `<item>` 都画得出来。当时的结论是「AUI 的 flat document 里贴图 blit 会丢，`<img>` / `background-image` / `<sprite>` / `border-image` 都走这条路」。
 

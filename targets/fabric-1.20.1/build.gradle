@@ -49,7 +49,7 @@ dependencies {
     modImplementation "net.fabricmc:fabric-loader:${fabric_loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
     // 界面库（客户端轮次才会用上；先挂着，免得界面类写完再补依赖）
-    modImplementation "com.sighs:ApricityUI-fabric-1.20.1:1.2.4"
+    modImplementation "com.sighs:ApricityUI-fabric-1.20.1:1.2.6"
     implementation project(':common')
 }
 
@@ -71,6 +71,7 @@ loom {
             }
         }
         server {
+            programArgs '--nogui'
             // 同一个 -PrwSelfTest=true：客户端跑单人世界的自测，专用服务器跑 RewindServerSelfTest
             if (rewindSelfTest) {
                 vmArg "-Drewind.servertest=${rewindSelfTest}"
@@ -78,6 +79,9 @@ loom {
         }
     }
 }
+
+// AUI fabric 的 SPI provider bug 由 cc/sighs/mixin/AuiFabricAnnotationScanMixins 绕开（见该类注释），
+// 这里不需要再动 loom 的 access widener 校验。
 
 tasks.named('processResources', ProcessResources).configure {
     def replaceProperties = [

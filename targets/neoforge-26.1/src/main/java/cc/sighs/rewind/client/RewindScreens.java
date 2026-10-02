@@ -2,6 +2,7 @@ package cc.sighs.rewind.client;
 
 import net.minecraft.client.gui.screens.GenericMessageScreen;
 import net.minecraft.client.gui.screens.LevelLoadingScreen;
+import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.ProgressScreen;
 import net.neoforged.neoforge.client.event.ScreenEvent;
 
@@ -18,6 +19,12 @@ import net.neoforged.neoforge.client.event.ScreenEvent;
  * 这种 overlay 承担，它不是 Screen，本来也不会走这条拦截），{@code LevelLoadingScreen} 仍在，
  * 但构造函数换成了 {@code (LevelLoadTracker, Reason)}。
  *
+ * <p>暂停屏也要拦：原版在窗口失去焦点时会自己挂一个 {@code PauseScreen}
+ * （{@code Minecraft#pauseIfInactive}，{@code pauseOnLostFocus} 开着时每帧都试），
+ * 而过渡一开始就把当前界面摘掉了（见 {@code CheckpointController.closeScreen}），
+ * 于是「刚摘掉界面」的那一帧正好是它出手的时机——不拦的话过渡画面上会浮出一层暂停菜单。
+ * 过渡是短时的整帧后处理，这期间不接受任何界面，玩家按 ESC 也不会有反应。
+ *
  * <p>注意 {@code Minecraft.setScreen(null)} 在关世界过程中会抛异常，所以关世界时仍然传一个屏对象进去，
  * 靠这里拦下它，既不开界面也不会踩到那个断言。
  */
@@ -33,7 +40,8 @@ public final class RewindScreens {
         if (!RewindTransitionRenderer.isEffectAvailable()) {
             return;
         }
-        if (event.getNewScreen() instanceof GenericMessageScreen
+        if (event.getNewScreen() instanceof PauseScreen
+                || event.getNewScreen() instanceof GenericMessageScreen
                 || event.getNewScreen() instanceof LevelLoadingScreen
                 || event.getNewScreen() instanceof ProgressScreen) {
             event.setCanceled(true);

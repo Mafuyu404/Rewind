@@ -25,7 +25,8 @@
     "RollbackAccessMixins$EntitySectionManagerAccess",
     "RollbackAccessMixins$DimensionDataStorageAccess",
     "InPlaceGuardMixins$ChunkMapRecreationGuard",
-    "AutoCheckpointMixins$MinecraftServerAutosave"
+    "AutoCheckpointMixins$MinecraftServerAutosave",
+    "AuiFabricAnnotationScanMixins"
   ],
   "client": [
     "ClientFrameMixins",

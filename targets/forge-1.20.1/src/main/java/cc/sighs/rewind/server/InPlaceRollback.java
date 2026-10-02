@@ -733,7 +733,17 @@ public final class InPlaceRollback {
         }
     }
 
-    /** 时间 / 天气 / 出生点来自 level.dat；原地回滚不改磁盘上的 level.dat，直接把值写进活着的 WorldData。 */
+    /**
+     * 时间 / 天气 / 出生点来自 level.dat；原地回滚不改磁盘上的 level.dat，直接把值写进活着的 WorldData。
+     *
+     * <p><b>NBT 键名</b>：游戏刻在 level.dat 里的键是 {@code "Time"} 而不是 {@code "GameTime"}——
+     * 见 1.20.1 {@code PrimaryLevelData.createTag}（{@code putLong("Time", this.gameTime)}）；
+     * {@code "GameTime"} 只是 {@code getGameTime()} 那个 getter 的名字，磁盘上从来不存在这个键。
+     * 日刻的键 {@code "DayTime"} 与 getter 同名，没有这个坑。
+     * {@code ServerLevel.getGameTime()} 读的是 {@code Level.levelData}，对主世界就是
+     * {@code MinecraftServer.worldData.overworldData()}（{@code PrimaryLevelData}），所以
+     * {@code overworld.getLevelData()} 上的 {@code setGameTime} 写的就是它。
+     */
     private static boolean restoreWorldData(MinecraftServer server, Path slotDir) throws IOException {
         Path file = slotDir.resolve("level.dat");
         if (!Files.isRegularFile(file)) {
@@ -742,8 +752,8 @@ public final class InPlaceRollback {
         CompoundTag data = NbtIo.readCompressed(file.toFile()).getCompound("Data");
         ServerLevel overworld = server.overworld();
         if (overworld.getLevelData() instanceof ServerLevelData levelData) {
-            if (data.contains("GameTime", 99)) {
-                levelData.setGameTime(data.getLong("GameTime"));
+            if (data.contains("Time", 99)) {
+                levelData.setGameTime(data.getLong("Time"));
             }
             if (data.contains("DayTime", 99)) {
                 levelData.setDayTime(data.getLong("DayTime"));

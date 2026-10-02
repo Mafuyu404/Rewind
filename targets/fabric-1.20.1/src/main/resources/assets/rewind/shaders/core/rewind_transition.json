@@ -1,6 +1,6 @@
 {
-    "vertex": "rewind:rewind_transition",
-    "fragment": "rewind:rewind_transition",
+    "vertex": "rewind_transition",
+    "fragment": "rewind_transition",
     "attributes": [
         "Position"
     ],

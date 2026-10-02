@@ -14,6 +14,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.ShaderInstance;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.resources.ResourceProvider;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL30;
 
@@ -41,8 +43,18 @@ public final class RewindTransitionRenderer {
     private static final float MAX_FRAME_SECONDS = 0.1F;
     /** 着色器里的效果编号，必须和 rewind_transition.fsh 保持一致。 */
     private static final int MODE_SATURATION = 1;
-    /** 着色器资源名；1.20.1 的 {@code ShaderInstance} 直接吃这个字符串。 */
-    private static final String SHADER_LOCATION = "rewind:rewind_transition";
+    /**
+     * 着色器裸名（**不带命名空间**）。
+     *
+     * <p>1.20.1 的 {@code ShaderInstance(ResourceProvider, String, VertexFormat)} 会把这个名字拼成
+     * {@code "shaders/core/<name>.json"} 再当 {@code ResourceLocation} 解析——命名空间固定是
+     * {@code minecraft}，传带冒号的名字（如 {@code "rewind:rewind_transition"}）会直接把
+     * {@code "shaders/core/rewind"} 当成命名空间而抛 {@code ResourceLocationException}。json 里的
+     * {@code vertex}/{@code fragment} 也照同样规则拼成 {@code "shaders/core/<name>.vsh/.fsh"}。
+     * 所以这里传裸名，再由 {@link #shader} 里那个把 {@code minecraft} 换成 {@code rewind} 的
+     * provider 重定向到模组自己的 {@code assets/rewind/shaders/core/} 下。
+     */
+    private static final String SHADER_NAME = "rewind_transition";
     /**
      * 顶点格式：只有 Position。
      *
@@ -186,7 +198,12 @@ public final class RewindTransitionRenderer {
     private static ShaderInstance shader(Minecraft minecraft) {
         if (shader == null && !shaderFailed) {
             try {
-                shader = new ShaderInstance(minecraft.getResourceManager(), SHADER_LOCATION, VERTEX_FORMAT);
+                // 1.20.1 的 ShaderInstance 只会去 minecraft 命名空间下找
+                // "shaders/core/<name>.json|.vsh|.fsh"，模组的着色器却在 assets/rewind/ 下，
+                // 所以包一层 provider：把这些位置原样搬到 rewind 命名空间。
+                ResourceProvider provider = location -> minecraft.getResourceManager()
+                        .getResource(new ResourceLocation(Rewind.MOD_ID, location.getPath()));
+                shader = new ShaderInstance(provider, SHADER_NAME, VERTEX_FORMAT);
             } catch (Throwable e) {
                 shaderFailed = true;
                 Rewind.LOGGER.error("Rewind: cannot load the transition shader, transitions are disabled", e);

@@ -44,8 +44,10 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
@@ -94,6 +96,13 @@ import net.neoforged.neoforge.common.NeoForge;
  *       像素读取本身是 {@code takeScreenshot(RenderTarget, Consumer<NativeImage>)}，写盘在回调里。</li>
  *   <li><b>AUI 的 DOM</b>：{@code Element.getParentElement()} 在 1.2.4 上没有，父元素是公开字段
  *       {@code Element.parentElement}。</li>
+ *   <li><b>维度目录换了位置</b>：26.1 起各维度落在 {@code dimensions/<命名空间>/<路径>/} 下
+ *       （主世界 = {@code dimensions/minecraft/overworld}），{@code region/} 不再直接摆在存档根下。
+ *       校验「region 文件进了块存储」时按原版那套（{@code DimensionType.getStorageFolder}）算前缀。</li>
+ *   <li><b>窗口失焦会自动挂暂停屏</b>：自动化跑的时候窗口常常不在前台，原版
+ *       {@code Minecraft#pauseIfInactive} 会每帧试着挂一个 {@code PauseScreen}，
+ *       正好撞在「热键先把界面摘掉」的那一帧上。自测开跑时把 {@code pauseOnLostFocus} 关掉，
+ *       另外 {@link RewindScreens} 也会在过渡期间拦下暂停屏（过渡期间本来就不许有任何界面）。</li>
  * </ul>
  */
 public final class RewindSelfTest {
@@ -206,6 +215,13 @@ public final class RewindSelfTest {
             String value = System.getProperty(PROPERTY);
             enabled = "true".equalsIgnoreCase(value) || "full".equalsIgnoreCase(value) || "1".equals(value);
             if (enabled) {
+                // 自动化跑的时候窗口常常不在前台，原版会因此自己挂暂停屏（pauseIfInactive），
+                // 那和被测的热键行为无关，却会盖在过渡画面上、也会让「界面被摘掉」的断言读到一个
+                // 刚弹出来的暂停屏。这里把这条环境干扰关掉，断言仍然只测 F7/F8 那条路。
+                if (minecraft.options.pauseOnLostFocus) {
+                    minecraft.options.pauseOnLostFocus = false;
+                    Rewind.LOGGER.info("Rewind self-test: pauseOnLostFocus disabled for the run");
+                }
                 Rewind.LOGGER.info("Rewind self-test: enabled (stage machine armed)");
                 logKeyMappings();
             }
@@ -822,10 +838,14 @@ public final class RewindSelfTest {
                 check(Files.size(world.resolve("level.dat")) == Files.size(slotDir.resolve("level.dat")),
                         "snapshot level.dat size mismatch");
             }
-            // region 文件走 4 KiB 块存储：抽一个重建出来，逐字节跟世界里那份比
+            // region 文件走 4 KiB 块存储：抽一个重建出来，逐字节跟世界里那份比。
+            // 26.1 把维度目录搬到了 dimensions/<命名空间>/<路径>/（主世界 = dimensions/minecraft/overworld），
+            // 不再像 1.21.1 那样把 region/ 直接摆在存档根下，所以前缀按原版那套算出来再挑。
+            String overworldRegionPrefix = SnapshotLayout.relativize(
+                    world, DimensionType.getStorageFolder(Level.OVERWORLD, world)) + "/region/";
             List<String> regions = new ArrayList<>();
             for (String relative : blocks.paths()) {
-                if (relative.startsWith("region/")) {
+                if (relative.startsWith(overworldRegionPrefix) && relative.endsWith(".mca")) {
                     regions.add(relative);
                 }
             }
