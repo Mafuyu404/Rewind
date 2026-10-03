@@ -125,6 +125,8 @@ public final class CheckpointWriter {
 
         long millis = millisSince(startedNanos);
         RewindLog.LOGGER.info("Rewind: checkpoint {} written ({}) in {} ms", slot, mirror.summary(), millis);
+        // 槽位已经落定，后台把下一次回溯要读的东西先摸一遍（只读、不碰世界）
+        RollbackWarmup.afterCheckpoint(world, slot);
         return new Result(complete, mirror, millis);
     }
 

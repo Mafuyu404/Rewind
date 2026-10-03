@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ import cc.sighs.mixin.RollbackAccessMixins.SectionStorageAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.config.RollbackSettings;
 import cc.sighs.rewind.common.store.SnapshotBlockIo;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
 import cc.sighs.rewind.snapshot.SnapshotBlocks;
@@ -141,6 +143,8 @@ public final class InPlaceRollback {
         public int affectedChunks;
         public int unloadedChunks;
         public int reloadedChunks;
+        /** 视野外、交给原版流水线异步读回来的区块数。 */
+        public int deferredChunks;
         public int stuckChunks;
         public int closedRegionFiles;
         public String mirror = "";
@@ -155,11 +159,22 @@ public final class InPlaceRollback {
         public long reloadMs;
         public long stateMs;
         public long totalMs;
+        /** 细分子步骤，只进日志：用来定位下一次该优化哪一段。 */
+        public long collectMs;
+        public long unloadPumpMs;
+        public long entityDrainMs;
+        public long cacheMs;
+        public long holdersMs;
+        public long loadMs;
+        public long settleMs;
+        public long stateWorldMs;
+        public long statePlayersMs;
 
         public String summary() {
             return "chunks=" + affectedChunks + "/" + scannedChunks
                     + " unloaded=" + unloadedChunks
                     + " reloaded=" + reloadedChunks
+                    + (deferredChunks == 0 ? "" : " deferred=" + deferredChunks)
                     + (stuckChunks == 0 ? "" : " stuck=" + stuckChunks)
                     + " closedRegions=" + closedRegionFiles
                     + " players=" + restoredPlayers
@@ -170,6 +185,15 @@ public final class InPlaceRollback {
                     + " reloadMs=" + reloadMs
                     + " stateMs=" + stateMs
                     + " totalMs=" + totalMs
+                    + " sub[collect=" + collectMs
+                    + " unloadPump=" + unloadPumpMs
+                    + " entityDrain=" + entityDrainMs
+                    + " cache=" + cacheMs
+                    + " holders=" + holdersMs
+                    + " load=" + loadMs
+                    + " settle=" + settleMs
+                    + " stateWorld=" + stateWorldMs
+                    + " statePlayers=" + statePlayersMs + "]"
                     + " mirror[" + mirror + "]";
         }
     }
@@ -216,15 +240,25 @@ public final class InPlaceRollback {
             try (SnapshotBlockStore headerStore = SnapshotBlockIo.openStore(worldRoot)) {
                 targets = collectTargets(server, worldRoot, slotDir, headerStore, snapshotBlocks, result);
             }
+            result.collectMs = millisSince(stepNanos);
+
+            long subNanos = System.nanoTime();
             unload(server, targets, result);
             drainUnloads(server);
+            result.unloadPumpMs = millisSince(subNanos);
+
+            subNanos = System.nanoTime();
             // 实体区块的卸载由区块状态驱动，靠 entityManager.tick() 推进，而且可能因为「实体还没读完」
             // 被推迟到下一 tick。必须在这一段里彻底排空，否则它会落到回滚窗口之外，把「改世界之后」的
             // 实体列表写回刚还原的文件。
             drainEntityUnloads(server);
+            result.entityDrainMs = millisSince(subNanos);
+
+            subNanos = System.nanoTime();
             // 到这里被回滚接管的区块都已经从内存里丢掉了；接下来由回滚自己重建 holder，不再需要挡重建
             Rewind.clearUnloadGuards();
             invalidateCaches(server, targets);
+            result.cacheMs = millisSince(subNanos);
             result.unloadMs = millisSince(stepNanos);
 
             stepNanos = System.nanoTime();
@@ -241,7 +275,8 @@ public final class InPlaceRollback {
 
             stepNanos = System.nanoTime();
             recreateHolders(server, targets, result);
-            result.reloadMs = millisSince(stepNanos);
+            result.holdersMs = millisSince(stepNanos);
+            result.reloadMs = result.holdersMs;
 
             // 玩家 / 时间天气必须排在这里：holder 已经重建、但区块还没成批重发。
             // 位置包要排在区块包前面，否则客户端得先处理完上百个区块包才会回 ack，而服务端在收到 ack
@@ -495,11 +530,13 @@ public final class InPlaceRollback {
                             "Rewind: in-place rollback gave up draining chunk unloads ({} still pending)", pending);
                     return;
                 }
+                // 只有「这一轮没推进」时才让出时间给后台线程：还在推进就接着推。
+                // 原来每轮无条件 park 200µs，几十轮下来光等待就十几毫秒。
+                LockSupport.parkNanos(PARK_NANOS);
             } else {
                 stalled = 0;
             }
             lastPending = pending;
-            LockSupport.parkNanos(PARK_NANOS);
         }
         Rewind.LOGGER.warn("Rewind: in-place rollback could not fully drain chunk unloads ({} still pending)", lastPending);
     }
@@ -532,20 +569,36 @@ public final class InPlaceRollback {
      * {@code storeChunkSections} 在实体还没读回来（status 不是 LOADED）时会直接放弃、留到下一 tick。
      * 所以单跑一次 tick 不够——那些被推迟的卸载会落到回滚窗口之外，把「改世界之后」的实体列表
      * 写回刚还原的文件。这里一直泵到没有待卸载的区块为止。
+     *
+     * <p>但**连续多轮没进展就放弃**，和区块卸载那条一样：区块本身没卸掉（被 worldgen 钉住）时，
+     * 实体这边也就没得卸，再等下去只是空转——`PARK_NANOS` 写的是 200µs，Windows 上每次 park 实际
+     * 要睡 1ms 出头，跑满 {@value #MAX_DRAIN_ROUNDS} 轮就是几百毫秒白等（实测 529ms）。
      */
     private static void drainEntityUnloads(MinecraftServer server) {
+        int lastPending = Integer.MAX_VALUE;
+        int stalled = 0;
         for (int round = 0; round < MAX_DRAIN_ROUNDS; round++) {
-            boolean quiet = true;
+            int pending = 0;
             for (ServerLevel level : server.getAllLevels()) {
                 levelAccess(level).rewind$entityManager().tick();
-                if (!entityManagerAccess(level).rewind$chunksToUnload().isEmpty()) {
-                    quiet = false;
-                }
+                pending += entityManagerAccess(level).rewind$chunksToUnload().size();
             }
-            if (quiet) {
+            if (pending == 0) {
                 return;
             }
-            LockSupport.parkNanos(PARK_NANOS);
+            // 和区块卸载那条一样：还在推进就接着推，只有「这一轮没推进」时才让出时间。
+            if (pending >= lastPending) {
+                if (++stalled > STALL_ROUNDS) {
+                    Rewind.LOGGER.warn(
+                            "Rewind: in-place rollback gave up draining entity-chunk unloads ({} still pending)",
+                            pending);
+                    return;
+                }
+                LockSupport.parkNanos(PARK_NANOS);
+            } else {
+                stalled = 0;
+            }
+            lastPending = pending;
         }
         Rewind.LOGGER.warn("Rewind: in-place rollback could not fully drain entity-chunk unloads");
     }
@@ -687,32 +740,76 @@ public final class InPlaceRollback {
         }
     }
 
-    /** 把重建好的区块同步读回来；这也是原版把新数据重新推给客户端的触发点。 */
+    /** 把重建好的区块读回来：视野内的同步读（这也是原版把新数据推给客户端的触发点），视野外交给原版流水线。 */
     private static void loadChunks(MinecraftServer server, List<Target> targets, Result result) {
+        long startedNanos = System.nanoTime();
+        // 缓存里可能还留着「重建之前」的 ChunkAccess；每个维度清一次就够。
+        // 原来把它放在循环里逐区块清，等于每读回来一个就把刚读的那个踢出缓存，纯浪费。
+        Set<ServerLevel> cleared = new HashSet<>();
+        // 视野半径：服务端视距 + 1 个区块，留一圈余量，免得玩家一挪就正好缺块
+        int syncRadius = server.getPlayerList().getViewDistance() + 1;
+        boolean onlyNearPlayers = RollbackSettings.syncChunksNearPlayer();
         for (Target target : targets) {
             if (!target.unloaded) {
                 continue;
             }
             ServerChunkCache source = target.level.getChunkSource();
+            if (cleared.add(target.level)) {
+                sourceAccess(source).rewind$clearCache();
+            }
             ChunkMapAccess access = mapAccess(source.chunkMap);
-            sourceAccess(source).rewind$clearCache();
+            // 区块类型缓存也要作废：不然异步读回来的区块可能沿用「改世界之后」的那份类型
+            access.rewind$chunkTypeCache().remove(target.pos.toLong());
+            if (onlyNearPlayers && !nearAnyPlayer(server, target.level, target.pos, syncRadius)) {
+                // 不在任何玩家视野里：不在这里同步等它。ticket 已经还原，原版流水线会按需异步读回来。
+                result.deferredChunks++;
+                continue;
+            }
             try {
                 source.getChunk(target.pos.x, target.pos.z, ChunkStatus.FULL, true);
-                access.rewind$chunkTypeCache().remove(target.pos.toLong());
                 result.reloadedChunks++;
             } catch (Throwable t) {
                 Rewind.LOGGER.error("Rewind: failed to reload chunk {} in {}",
                         target.pos, target.level.dimension().location(), t);
             }
         }
+        result.loadMs = millisSince(startedNanos);
 
-        // 实体重新读盘走的是后台队列，给它几轮时间落地（晚一两 tick 也无所谓，过渡还在盖着）
+        // 实体重新读盘走的是后台队列，给它几轮时间落地（晚一两 tick 也无所谓，过渡还在盖着）。
+        // 没有待卸载的区块时没什么可等；有的话也只在「这一轮没推进」时才让出时间——
+        // 原来 40 轮无条件 park 200µs（光等待 8ms 起步），还每轮对三个维度各 tick 一次。
+        long settleNanos = System.nanoTime();
+        int lastPending = Integer.MAX_VALUE;
         for (int round = 0; round < ENTITY_SETTLE_ROUNDS; round++) {
             tickEntityManagers(server);
-            if (round + 1 < ENTITY_SETTLE_ROUNDS) {
+            int pending = 0;
+            for (ServerLevel level : server.getAllLevels()) {
+                pending += entityManagerAccess(level).rewind$chunksToUnload().size();
+            }
+            if (pending == 0 && round >= 1) {
+                // 至少 tick 两轮，保留原来「晚一两 tick」的语义
+                break;
+            }
+            if (pending >= lastPending) {
                 LockSupport.parkNanos(PARK_NANOS);
             }
+            lastPending = pending;
         }
+        result.settleMs = millisSince(settleNanos);
+    }
+
+    /** 这个区块在不在任何一个玩家的视野里（按区块的切比雪夫距离算）。 */
+    private static boolean nearAnyPlayer(MinecraftServer server, ServerLevel level, ChunkPos pos, int radius) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.serverLevel() != level) {
+                continue;
+            }
+            ChunkPos playerChunk = player.chunkPosition();
+            if (Math.abs(playerChunk.x - pos.x) <= radius && Math.abs(playerChunk.z - pos.z) <= radius) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------ 5. 内存状态
@@ -721,16 +818,20 @@ public final class InPlaceRollback {
      * 玩家 / 时间天气。位置见 {@link #run} 里的注释：必须排在 holder 重建之后、区块成批重发之前。
      */
     private static void restoreWorldAndPlayers(MinecraftServer server, Path slotDir, Result result) {
+        long stepNanos = System.nanoTime();
         try {
             result.restoredWorldData = restoreWorldData(server, slotDir);
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: failed to restore world data in place", t);
         }
+        result.stateWorldMs = millisSince(stepNanos);
+        stepNanos = System.nanoTime();
         try {
             result.restoredPlayers = restorePlayers(server, slotDir);
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: failed to restore players in place", t);
         }
+        result.statePlayersMs = millisSince(stepNanos);
     }
 
     /**
@@ -790,6 +891,12 @@ public final class InPlaceRollback {
     private static void restorePlayer(MinecraftServer server, ServerPlayer player, CompoundTag tag) {
         // 先把「改世界之后加的 buff」清掉：客户端会收到对应的移除包
         player.removeAllEffects();
+        if (!RewindServerConfig.syncRecipeBook()) {
+            // 配方书默认不管：ServerPlayer.readAdditionalSaveData 会把 NBT 里的 recipeBook 读回来
+            // （ServerRecipeBook.fromNbt 要按名字逐条查配方表），实测这一下就是 150–600ms。
+            // 关着时连读都不读——服务端与客户端两边都保持回溯前的状态，等于完全不管这东西。
+            tag.remove("recipeBook");
+        }
         player.load(tag);
         if (tag.contains("playerGameType", 99)) {
             player.setGameMode(GameType.byId(tag.getInt("playerGameType")));
@@ -824,7 +931,11 @@ public final class InPlaceRollback {
         player.setExperiencePoints(player.totalExperience);
         // 血量 / 饥饿 / 经验值靠 ServerPlayer.tick() 里「和上次发的比」的逻辑重发，这里把基线清掉
         player.resetSentInfo();
-        player.getRecipeBook().sendInitialRecipeBook(player);
+        // 配方书默认不管（RewindServerConfig.syncRecipeBook()，默认 false）：重发整份配方书在大整合包里
+        // 可能几百毫秒，而它只影响客户端那份显示——服务端那份已经随 playerdata 一起回滚了。
+        if (RewindServerConfig.syncRecipeBook()) {
+            player.getRecipeBook().sendInitialRecipeBook(player);
+        }
     }
 
     private static ServerLevel dimensionOf(MinecraftServer server, CompoundTag tag) {

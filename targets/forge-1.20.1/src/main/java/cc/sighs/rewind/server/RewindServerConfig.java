@@ -2,6 +2,7 @@ package cc.sighs.rewind.server;
 
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.common.config.AutoCheckpointSettings;
+import cc.sighs.rewind.common.config.RollbackSettings;
 import net.minecraftforge.common.ForgeConfigSpec;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.ModLoadingContext;
@@ -11,8 +12,9 @@ import net.minecraftforge.fml.event.config.ModConfigEvent;
 /**
  * 服务端行为的配置，落在 {@code run/config/rewind-common.toml}。
  *
- * <p>目前只有一项：「跟着原版自动保存建点」。它是 COMMON 配置而不是 CLIENT，因为建点发生在服务端
- * 线程上，跟玩家有没有客户端没关系。
+ * <p>目前分两组：{@code autoCheckpoint}（跟着原版自动保存建点、间隔分钟数）与 {@code rollback}
+ * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块）。它是 COMMON 配置而不是 CLIENT，
+ * 因为建点与回滚都发生在服务端线程上，跟玩家有没有客户端没关系。
  *
  * <p>默认值、可调范围与「分钟 → tick」的换算都在 common 的 {@link AutoCheckpointSettings} 里；
  * 本类只负责 Forge 的 {@link ForgeConfigSpec} 读写与落盘，界面/Mixin 读到的都是那一份共享值。
@@ -41,6 +43,8 @@ public final class RewindServerConfig {
 
     private static ForgeConfigSpec.BooleanValue autoCheckpointEnabled;
     private static ForgeConfigSpec.IntValue autoSaveIntervalMinutes;
+    private static ForgeConfigSpec.BooleanValue syncRecipeBook;
+    private static ForgeConfigSpec.BooleanValue syncChunksNearPlayer;
     private static ForgeConfigSpec spec;
     /** 保存下来的配置对象：界面上改完开关要立刻落盘。 */
     private static volatile ModConfig modConfig;
@@ -67,6 +71,23 @@ public final class RewindServerConfig {
                         MIN_AUTO_SAVE_INTERVAL_MINUTES, MAX_AUTO_SAVE_INTERVAL_MINUTES);
 
         builder.pop();
+
+        builder.comment("回溯（原地回滚）的行为。").push("rollback");
+        syncRecipeBook = builder
+                .comment("回溯时要不要重新同步玩家的配方书（发给客户端那一份）。",
+                        "默认关：**完全不碰配方书**——回滚不给客户端重发这份包，客户端的配方书停在回溯前的状态；",
+                        "服务端那份仍然随 playerdata 一起回滚（它是玩家数据的一部分），下次登录 / 重连会自然对齐。",
+                        "开着才走 sendInitialRecipeBook 把整份配方书重发一遍——大整合包里这一下可能几百毫秒。")
+                .define("syncRecipeBook", RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK);
+
+        syncChunksNearPlayer = builder
+                .comment("回溯时只同步读回「玩家视野内」的受影响区块，其余交给原版流水线按 ticket 异步读回来。",
+                        "默认开：受影响区块的重载实测约 1ms/区块、与「建点之后改了多少」成正比，",
+                        "视野外那部分同步等它纯属浪费——玩家看不到，晚几 tick 回来也无所谓。",
+                        "关掉则回到老行为：所有受影响区块都在回滚这一帧里同步读回来（回溯更慢，但结束后世界立即完整）。")
+                .define("syncChunksNearPlayer", RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
+        builder.pop();
+
         spec = builder.build();
         // Forge 1.20.1 的 ModContainer 上没有 registerConfig，只能用 ModLoadingContext 的当前容器
         ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, spec);
@@ -102,11 +123,20 @@ public final class RewindServerConfig {
                     autoSaveIntervalMinutes == null
                             ? DEFAULT_AUTO_SAVE_INTERVAL_MINUTES
                             : autoSaveIntervalMinutes.get());
+            RollbackSettings.apply(
+                    syncRecipeBook == null ? RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK : syncRecipeBook.get(),
+                    syncChunksNearPlayer == null
+                            ? RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER
+                            : syncChunksNearPlayer.get());
         } catch (Throwable t) {
             AutoCheckpointSettings.apply(DEFAULT_AUTO_CHECKPOINT, DEFAULT_AUTO_SAVE_INTERVAL_MINUTES);
+            RollbackSettings.apply(RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK,
+                    RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
         }
-        Rewind.LOGGER.info("Rewind: auto checkpoint enabled={} interval={} min",
-                AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes());
+        Rewind.LOGGER.info(
+                "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={}",
+                AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes(),
+                RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer());
     }
 
     /** 跟着原版自动保存建点是不是开着。 */
@@ -149,6 +179,36 @@ public final class RewindServerConfig {
         save();
         Rewind.LOGGER.info("Rewind: auto save interval = {} min ({} ticks)",
                 clamped, AutoCheckpointSettings.autoSaveIntervalTicks());
+    }
+
+    /** 回溯时要不要处理配方书。 */
+    public static boolean syncRecipeBook() {
+        return RollbackSettings.syncRecipeBook();
+    }
+
+    /** 回溯时是不是只同步读回玩家视野内的受影响区块。 */
+    public static boolean syncChunksNearPlayer() {
+        return RollbackSettings.syncChunksNearPlayer();
+    }
+
+    /** 改「只同步读视野内区块」开关并立刻落盘。 */
+    public static void setSyncChunksNearPlayer(boolean value) {
+        RollbackSettings.setSyncChunksNearPlayer(value);
+        if (syncChunksNearPlayer != null) {
+            syncChunksNearPlayer.set(value);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: rollback syncChunksNearPlayer={} (toggled)", value);
+    }
+
+    /** 改这个开关并立刻落盘。 */
+    public static void setSyncRecipeBook(boolean value) {
+        RollbackSettings.setSyncRecipeBook(value);
+        if (syncRecipeBook != null) {
+            syncRecipeBook.set(value);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: rollback syncRecipeBook={} (toggled)", value);
     }
 
     private static void save() {
