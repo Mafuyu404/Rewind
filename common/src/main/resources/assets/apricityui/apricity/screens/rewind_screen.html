@@ -244,12 +244,12 @@
         <!-- 当前世界状态：静态写入，接入真实数据后由游戏侧替换 -->
         <div class="page-head">
             <div class="page-title">
-                <h1>时间树</h1>
+                <h1><translation>rewind.ui.title</translation></h1>
                 <!-- 布局切换：档案布局（槽位卡片） / 节点树布局（时间线），开关由 Java 侧驱动 -->
-                <div class="layout-switch" role="group" aria-label="布局切换">
-                    <span class="layout-switch-label active" data-act="layout" data-layout="archive">档案布局</span>
-                    <span class="switch" data-act="switch-layout" role="switch" tabindex="0" aria-checked="false" aria-label="在档案布局和节点树布局之间切换"><span class="switch-control"><span class="switch-status"></span><span class="switch-button"></span></span></span>
-                    <span class="layout-switch-label" data-act="layout" data-layout="tree">节点树布局</span>
+                <div class="layout-switch" role="group">
+                    <span class="layout-switch-label active" data-act="layout" data-layout="archive"><translation>rewind.ui.layout.archive</translation></span>
+                    <span class="switch" data-act="switch-layout" role="switch" tabindex="0" aria-checked="false"><span class="switch-control"><span class="switch-status"></span><span class="switch-button"></span></span></span>
+                    <span class="layout-switch-label" data-act="layout" data-layout="tree"><translation>rewind.ui.layout.tree</translation></span>
                 </div>
             </div>
             <div class="hud-bar" id="hudBar">
@@ -297,10 +297,10 @@
                 </div>
 
                 <div class="toolbar">
-                    <h3>存档槽位 <span class="badge badge-purple" id="slotCount">6 / 8</span></h3>
+                    <h3><translation>rewind.ui.slots.title</translation> <span class="badge badge-purple" id="slotCount">6 / 8</span></h3>
                     <div class="cluster">
-                        <input class="form-input" id="search" type="search" placeholder="搜索世界名称…" aria-label="搜索存档">
-                        <select class="form-select" id="sort" aria-label="排序方式">
+                        <input class="form-input" id="search" type="search" placeholder="搜索世界名称…">
+                        <select class="form-select" id="sort">
                             <option value="index" selected>槽位序号</option>
                             <option value="recent">最近修改</option>
                             <option value="oldest">最早修改</option>
@@ -463,10 +463,10 @@
                      #treeChart 里的静态内容只是「没接上数据时的样子」，运行时由 Java 侧整体替换。 -->
                 <div class="tree-view" id="treeView" data-dir="down">
                     <div class="toolbar">
-                        <h3>时间线 <span class="badge badge-purple" id="treeCount">0</span></h3>
+                        <h3><translation>rewind.ui.timeline.title</translation> <span class="badge badge-purple" id="treeCount">0</span></h3>
                         <div class="cluster">
-                            <span class="text-muted font-sm">拖拽平移 · 滚轮以光标为中心缩放</span>
-                            <button class="button button-small button-tertiary" data-act="flow-reset">重置视图</button>
+                            <span class="text-muted font-sm"><translation>rewind.ui.timeline.hint</translation></span>
+                            <button class="button button-small button-tertiary" data-act="flow-reset"><translation>rewind.ui.timeline.reset</translation></button>
                         </div>
                     </div>
                     <div class="flow-canvas" id="flowCanvas">
@@ -569,8 +569,8 @@
             <div class="modal-header"><span id="confirmIcon">!</span><span id="confirmTitle">确认操作</span></div>
             <div class="modal-body" id="confirmBody">确定要执行该操作吗？</div>
             <div class="modal-footer">
-                <button class="button button-tertiary" data-act="modal-close" data-target="modalConfirm">取消</button>
-                <button class="button button-danger" id="confirmOk" data-act="confirm-ok">确定</button>
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalConfirm"><translation>rewind.ui.action.cancel</translation></button>
+                <button class="button button-danger" id="confirmOk" data-act="confirm-ok"><translation>rewind.ui.action.confirm</translation></button>
             </div>
         </div>
     </div>
@@ -580,13 +580,13 @@
         <div class="modal">
             <div class="modal-header"><span>✎</span><span id="renameTitle">重命名存档</span></div>
             <div class="modal-body">
-                <label class="form-label" for="renameInput">世界名称</label>
+                <label class="form-label" for="renameInput"><translation>rewind.ui.modal.rename_label</translation></label>
                 <input class="form-input" id="renameInput" maxlength="20" placeholder="输入新的世界名称">
-                <p class="form-help" id="renameHelp">1 - 20 个字符，名称会显示在槽位封面上方。</p>
+                <p class="form-help" id="renameHelp"><translation>rewind.ui.modal.rename_help</translation></p>
             </div>
             <div class="modal-footer">
-                <button class="button button-tertiary" data-act="modal-close" data-target="modalRename">取消</button>
-                <button class="button" data-act="rename-ok">保存名称</button>
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalRename"><translation>rewind.ui.action.cancel</translation></button>
+                <button class="button" data-act="rename-ok"><translation>rewind.ui.action.rename_ok</translation></button>
             </div>
         </div>
     </div>
@@ -602,7 +602,7 @@
                 <p class="form-help mt-2" id="settingsNote"></p>
             </div>
             <div class="modal-footer">
-                <button class="button button-tertiary" data-act="modal-close" data-target="modalSettings">关闭</button>
+                <button class="button button-tertiary" data-act="modal-close" data-target="modalSettings"><translation>rewind.ui.modal.close</translation></button>
             </div>
         </div>
     </div>

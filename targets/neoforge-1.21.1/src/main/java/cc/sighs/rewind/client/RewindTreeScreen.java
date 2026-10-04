@@ -250,10 +250,42 @@ public final class RewindTreeScreen extends ApricityScreen {
 
         Element sortBox = document.querySelector("#sort");
         if (sortBox != null) {
+            // option 的标签进不了 <translation>（getOptionLabel 只认 label 属性 / 文本），
+            // 这里按 value 取语言文件塞进 label
+            for (Element option : sortBox.querySelectorAll("option")) {
+                String value = option.getAttribute("value");
+                if (value != null) {
+                    option.setOptionLabel(tr("rewind.ui.sort." + value));
+                }
+            }
             sortBox.addEventListener("input", event -> {
                 sort = SortMode.of(sortBox.getValue());
                 render(document);
             });
+        }
+
+        // 属性没法用 <translation>（那是元素），这几处只能在这里按语言文件设
+        Element layoutGroup = document.querySelector(".layout-switch");
+        if (layoutGroup != null) {
+            layoutGroup.setAttribute("aria-label", tr("rewind.ui.layout.group"));
+        }
+        Element layoutSwitch = document.querySelector(".layout-switch .switch");
+        if (layoutSwitch != null) {
+            layoutSwitch.setAttribute("aria-label", tr("rewind.ui.layout.switch"));
+        }
+        Element rotateButton = document.querySelector("[data-act=\"rotate-tree\"]");
+        if (rotateButton != null) {
+            rotateButton.setAttribute("title", tr("rewind.ui.timeline.rotate"));
+        }
+        if (search != null) {
+            search.setAttribute("aria-label", tr("rewind.ui.search"));
+        }
+        if (sortBox != null) {
+            sortBox.setAttribute("aria-label", tr("rewind.ui.sort"));
+        }
+        Element renameBox = document.querySelector("#renameInput");
+        if (renameBox != null) {
+            renameBox.setAttribute("placeholder", tr("rewind.ui.modal.rename_placeholder"));
         }
 
         Element renameInput = document.querySelector("#renameInput");
