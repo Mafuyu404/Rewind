@@ -136,8 +136,6 @@ public final class RewindClient {
         }
         Minecraft minecraft = Minecraft.getInstance();
         CheckpointController.tick(minecraft);
-        // 端到端自测（-Drewind.selftest=true）：阶段机挂在客户端 tick 上；没打开时它自己直接返回
-        RewindSelfTest.tick(minecraft);
         flushPendingRequest();
     }
 

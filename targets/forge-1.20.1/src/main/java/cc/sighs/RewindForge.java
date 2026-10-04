@@ -4,7 +4,6 @@ import cc.sighs.rewind.client.RewindClient;
 import cc.sighs.rewind.common.spi.RewindPlatforms;
 import cc.sighs.rewind.server.ForgeRewindPlatform;
 import cc.sighs.rewind.server.RewindServerConfig;
-import cc.sighs.rewind.server.RewindServerSelfTest;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.common.Mod;
@@ -47,12 +46,6 @@ public final class RewindForge {
         // 客户端专属注册放在这里做 dist 判定：专用服务器上 RewindClient 不会被加载。
         if (FMLEnvironment.dist == Dist.CLIENT) {
             RewindClient.setup(modBus);
-        }
-        // 专用服务器上的端到端自测。RewindApi 的同步入口本来就能在专用服务器上用，但那边没有
-        // 任何天然触发点（热键、时间树、/rewind 都挂在客户端，客户端侧的自测要单人世界），
-        // 所以要有一个显式的入口把它驱动起来。
-        if (Boolean.getBoolean("rewind.servertest")) {
-            RewindServerSelfTest.install();
         }
     }
 }

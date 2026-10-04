@@ -11,7 +11,6 @@ import com.mojang.blaze3d.vertex.BufferUploader;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Screenshot;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.ShaderInstance;
 import net.minecraft.resources.ResourceLocation;
@@ -41,10 +40,7 @@ public final class RewindTransitionRenderer {
     private static ShaderInstance shader;
     private static boolean shaderFailed;
     private static TextureTarget capturedFrame;
-    /** 自测里每段过渡只存一张截图。 */
-    private static boolean screenshotTaken;
     private static long lastFrameNanos;
-    private static boolean wasActive;
 
     private RewindTransitionRenderer() {
     }
@@ -56,13 +52,6 @@ public final class RewindTransitionRenderer {
         RewindTransition.tick(Math.min(deltaSeconds, MAX_FRAME_SECONDS));
 
         boolean active = RewindTransition.isActive();
-        if (active != wasActive) {
-            wasActive = active;
-            if (active) {
-                // 每段过渡重新允许存一张自测截图
-                screenshotTaken = false;
-            }
-        }
         if (active) {
             // 两种效果都是后处理：存档提高饱和度，读档高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
             // 遮罩」把那段盖过去）
@@ -129,24 +118,6 @@ public final class RewindTransitionRenderer {
         RenderSystem.enableDepthTest();
         // 别把自定义着色器留给下一步的 blit
         RenderSystem.setShader(GameRenderer::getPositionTexShader);
-        maybeScreenshot(minecraft);
-    }
-
-    /**
-     * 自测时在满强度存一张截图（{@code run/screenshots/rewind-<效果>.png}）。
-     *
-     * <p>过渡是视觉效果，日志看不出对错：结构由 {@code RewindSelfTest} 那套断言守着，
-     * 「画面长什么样」只能留张图给人眼（或视觉模型）确认。每段过渡只存一张——一段过渡会连着
-     * 几十帧都满足「满强度」，不设这个闩会刷一屏文件。
-     */
-    private static void maybeScreenshot(Minecraft minecraft) {
-        if (!RewindSelfTest.isEnabled() || screenshotTaken || RewindTransition.strength() < 0.95F) {
-            return;
-        }
-        screenshotTaken = true;
-        Screenshot.grab(minecraft.gameDirectory, "rewind-" + RewindTransition.effect() + ".png",
-                minecraft.getMainRenderTarget(), component -> {
-                });
     }
 
     /** 把主渲染目标的当前画面复制到我们自己的贴图里。 */

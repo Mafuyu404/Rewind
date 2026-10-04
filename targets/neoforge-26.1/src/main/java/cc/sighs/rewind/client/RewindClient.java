@@ -97,8 +97,6 @@ public final class RewindClient {
     private static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();
         CheckpointController.tick(minecraft);
-        // 开发自测的状态机（默认关着，-Drewind.selftest=true / -PrwSelfTest=true 才动）
-        RewindSelfTest.tick(minecraft);
         flushPendingRequest();
     }
 

@@ -32,7 +32,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  * {@code net.minecraft.client.gui.screens.controls} 下，字段名仍然叫 {@code keyBindsScreen}，
  * 构造函数里也仍然只有一处读 {@code Options.keyMappings}，所以注入点对得上、写法不变。
  * 主版本那个只给自测用的 {@code KeyBindsScreenAccess}（{@code @Accessor("keyBindsList")}）
- * 没有移植——本轮不移植 {@code RewindSelfTest}，没人用得上它。
+ * 没有移植——自测那套东西已经从仓库里删掉了，没人用得上它。
  *
  * <p>{@code require = 0}：万一这个构造函数将来变了样，退化成「按键页显示完整列表」，
  * 而不是启动崩溃——这也是主版本给这条可选注入留的余地。

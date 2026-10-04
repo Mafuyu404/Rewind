@@ -10,6 +10,7 @@ import java.util.function.BooleanSupplier;
 import it.unimi.dsi.fastutil.longs.Long2ByteMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
@@ -165,6 +166,10 @@ public final class RollbackAccessMixins {
         /** 已加载的分段（key = {@code SectionPos.asLong}）：回滚后要逐段作废，让它重新读盘。 */
         @Accessor("storage")
         Long2ObjectMap<Optional<?>> rewind$storage();
+
+        /** 待写盘的分段键。作废缓存时必须一起删，否则下一 tick 会把空 section 写回去。 */
+        @Accessor("dirty")
+        LongLinkedOpenHashSet rewind$dirtySections();
     }
 
     /** 实体存储：回滚后要作废 {@code emptyChunks}，否则快照里本来有实体的区块会被当成空区块。 */

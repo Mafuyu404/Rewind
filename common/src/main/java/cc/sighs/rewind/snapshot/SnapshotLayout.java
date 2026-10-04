@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.regex.Pattern;
+import cc.sighs.rewind.common.config.SlotSettings;
 
 /**
  * 存档点（快照）在存档目录内的固定布局与排除规则。
@@ -40,8 +41,14 @@ public final class SnapshotLayout {
      * 玩家也可以手动覆盖它。
      */
     public static final String SLOT_AUTO = "auto";
-    /** 手动槽位数量，对应界面上的 8 张编号卡片。 */
-    public static final int MANUAL_SLOT_COUNT = 8;
+    /**
+     * 手动槽位数量的默认值，对应界面上那排编号卡片。
+     *
+     * <p>**实际数量在运行期可调**（值存在 {@link SlotSettings}，由各 target 的 COMMON 配置
+     * {@code [slots] manualSlotCount} 读写），所以不要把它当编译期常量用——要数量就调
+     * {@link #manualSlotCount()}。
+     */
+    public static final int DEFAULT_MANUAL_SLOT_COUNT = SlotSettings.DEFAULT_MANUAL_SLOT_COUNT;
     /** 槽位显示名的长度上限，与界面上的输入框一致。 */
     public static final int NAME_MAX_LENGTH = 20;
 
@@ -51,11 +58,17 @@ public final class SnapshotLayout {
     public static final String STATUS_COMPLETE = "complete";
 
     private static final String LOCK_FILE_NAME = "session.lock";
+    /** 玩家数据目录（≤ 1.21.1）。 */
     private static final String PLAYER_DATA_DIR = "playerdata";
+    /** 玩家数据目录（26.1 起搬到这里，见 {@code LevelResource.PLAYER_DATA_DIR}）。 */
+    private static final String PLAYERS_DATA_DIR = "players/data";
 
     /** 根目录下 {@code level<随机数字>.dat}，level.dat 写入时的临时文件。 */
     private static final Pattern ROOT_LEVEL_TEMP = Pattern.compile("level\\d+\\.dat");
-    /** {@code playerdata/<uuid>-<随机数字>.dat}，玩家数据写入时的临时文件。 */
+    /**
+     * {@code playerdata/<uuid>-<随机数字>.dat}（≤ 1.21.1）或
+     * {@code players/data/<uuid>-<随机数字>.dat}（26.1+），玩家数据写入时的临时文件。
+     */
     private static final Pattern PLAYER_DATA_TEMP = Pattern.compile(".+-\\d+\\.dat");
     /** region / entities / poi 目录下超大区块的临时文件 {@code tmp<数字>}。 */
     private static final Pattern REGION_TEMP = Pattern.compile("tmp\\d+");
@@ -103,6 +116,15 @@ public final class SnapshotLayout {
         return "s" + index;
     }
 
+    /**
+     * 当前生效的手动槽位数量（COMMON 配置可调）。
+     *
+     * <p>调小只是不再展示/不再列出多出来的那几张卡；它们在磁盘与索引里原样保留，按名字照样能读回来。
+     */
+    public static int manualSlotCount() {
+        return SlotSettings.manualSlotCount();
+    }
+
     /** {@link #manualSlot(int)} 的逆运算；不是手动槽位时返回 0。 */
     public static int manualIndex(String slot) {
         if (slot == null || slot.length() < 2 || slot.charAt(0) != 's') {
@@ -115,12 +137,12 @@ public final class SnapshotLayout {
         }
     }
 
-    /** 界面固定展示的槽位顺序：自动、快速，然后是 8 个手动槽位。 */
+    /** 界面固定展示的槽位顺序：自动、快速，然后是手动槽位（数量见 {@link #manualSlotCount()}）。 */
     public static List<String> uiSlots() {
         List<String> slots = new ArrayList<>();
         slots.add(SLOT_AUTO);
         slots.add(SLOT_QUICK);
-        for (int i = 1; i <= MANUAL_SLOT_COUNT; i++) {
+        for (int i = 1; i <= manualSlotCount(); i++) {
             slots.add(manualSlot(i));
         }
         return Collections.unmodifiableList(slots);
@@ -208,7 +230,8 @@ public final class SnapshotLayout {
         if (slash < 0 && ROOT_LEVEL_TEMP.matcher(last).matches()) {
             return true;
         }
-        if (first.equals(PLAYER_DATA_DIR) && PLAYER_DATA_TEMP.matcher(last).matches()) {
+        if ((first.equals(PLAYER_DATA_DIR) || path.startsWith(PLAYERS_DATA_DIR + "/"))
+                && PLAYER_DATA_TEMP.matcher(last).matches()) {
             return true;
         }
         return false;

@@ -27,7 +27,6 @@ import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.dimension.LevelStem;
-import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -120,13 +119,13 @@ public final class CheckpointController {
     private static long restoreStartedNanos;
 
     /**
-     * 快速重启要复用的东西：注册表层 + 数据包资源（配方/战利品/标签/函数编译都在里面）+ 上一轮的游戏规则。
+     * 快速重启要复用的东西：注册表层 + 数据包资源（配方/战利品/标签/函数编译都在里面）。
      * 它们在 {@code MinecraftServer.stopServer} 里都不会被关闭，所以跨世界生命周期可复用。
-     * 世界数据本身不再需要缓存——26.1 起它必须在打开世界时从存档目录重新读一遍。
+     * 世界数据不再缓存——26.1 起它（含从 level.dat 搬进 SavedData 的游戏规则）必须在打开世界时
+     * 从存档目录重新读一遍，否则快照里的值会被回溯前的旧值盖回去。
      */
     private static LayeredRegistryAccess<RegistryLayer> reusableRegistries;
     private static ReloadableServerResources reusableResources;
-    private static Optional<GameRules> reusableGameRules = Optional.empty();
     /** 是否走快速重启；留个开关给 A/B 测量（默认开）。 */
     private static boolean fastRestartEnabled = true;
     /** 是否走原地回滚；留个开关给 A/B 测量（默认开）。关掉就退回「关世界 → 重开」那条路。 */
@@ -279,6 +278,14 @@ public final class CheckpointController {
         }
         slot = targetSlot;
         Path world = RewindApi.worldRoot(minecraft.getSingleplayerServer());
+        long cooldown = RewindApi.rollbackCooldownRemainingMillis(world);
+        if (cooldown > 0L) {
+            // 冷却中：不动玩家当前的界面，只写一条日志（和「没有存档点」一样，不是失败路径）
+            lastOutcome = Outcome.FAILED;
+            lastMessage = describe("rewind.error.rollback_cooldown", rollbackCooldownText(cooldown));
+            Rewind.LOGGER.warn("Rewind: {}", lastMessage);
+            return;
+        }
         if (!RewindApi.hasCheckpoint(world, slot)) {
             // 没有存档点不是「操作失败」，只是一个空动作：不动玩家当前的界面
             lastOutcome = Outcome.FAILED;
@@ -607,17 +614,15 @@ public final class CheckpointController {
         succeed("rewind.msg.restored", workerSummary);
     }
 
-    /** 关世界之前把可以复用的注册表 / 数据包资源 / 游戏规则抓下来（{@code Minecraft.disconnect} 之后 server 引用就没了）。 */
+    /** 关世界之前把可以复用的注册表 / 数据包资源抓下来（{@code Minecraft.disconnect} 之后 server 引用就没了）。 */
     private static void captureReusableResources(IntegratedServer server) {
         try {
             reusableRegistries = server.registries();
             reusableResources = server.getServerResources().managers();
-            reusableGameRules = Optional.of(server.getGameRules());
         } catch (Throwable t) {
             Rewind.LOGGER.warn("Rewind: cannot capture reusable world resources; will use the vanilla open path", t);
             reusableRegistries = null;
             reusableResources = null;
-            reusableGameRules = Optional.empty();
         }
     }
 
@@ -674,7 +679,10 @@ public final class CheckpointController {
 
             Rewind.LOGGER.info("Rewind: fast reopen, reusing registries and data pack resources");
             handedOver = true;
-            minecraft.doWorldLoad(access, packs, stem, reusableGameRules, false);
+            // 游戏规则传空：26.1 原版 openWorld 就是这么传的，规则从存档目录里的 SavedData 读——
+            // 快照已经把 data/<ns>/game_rules.dat 覆盖好了，这样才会回滚。传回溯前捕获的那份会把
+            // 旧值灌回去，还会在下一次自动保存时写回磁盘。
+            minecraft.doWorldLoad(access, packs, stem, Optional.empty(), false);
             return true;
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: fast reopen failed, falling back to the vanilla open path", t);
@@ -766,6 +774,14 @@ public final class CheckpointController {
             minecraft.setScreen(new TitleScreen());
         }
         phase = Phase.IDLE;
+    }
+
+    /** 冷却剩余时间给日志看：{@code 4m12s} / {@code 42s}。 */
+    private static String rollbackCooldownText(long millis) {
+        long totalSeconds = (millis + 999L) / 1000L;
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+        return minutes > 0L ? minutes + "m" + seconds + "s" : seconds + "s";
     }
 
     /** 结果文案只用于日志与 {@code /rewind status}，不再往聊天框里发任何东西。 */

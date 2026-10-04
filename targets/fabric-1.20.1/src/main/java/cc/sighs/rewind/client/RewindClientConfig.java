@@ -40,6 +40,11 @@ public final class RewindClientConfig {
     /** 「读档过渡强度」的可调范围（就是配置里那个模糊半径，像素）。 */
     public static final float MIN_BLUR_RADIUS = 0.0F;
     public static final float MAX_BLUR_RADIUS = 64.0F;
+    /** 时间树界面记忆的默认值：档案布局、按槽位序号排序、时间轴从上到下。 */
+    public static final boolean DEFAULT_TREE_LAYOUT = false;
+    /** 排序方式存的是模板 {@code #sort} 的 option value（小写），与界面里 {@code SortMode.of} 认的形式一致。 */
+    public static final String DEFAULT_SORT_MODE = "index";
+    public static final String DEFAULT_TREE_DIRECTION = "down";
 
     /** 时长类配置项的合法范围（秒），与主版本 TOML 里的 defineInRange 一致。 */
     private static final double MIN_SECONDS = 0.01D;
@@ -52,16 +57,34 @@ public final class RewindClientConfig {
     private static final String KEY_BLUR_FADE_OUT = "transition.blurFadeOutSeconds";
     private static final String KEY_BLUR_RADIUS = "transition.blurRadius";
     private static final String KEY_RESTORE_SETTLE_TICKS = "transition.restoreSettleTicks";
+    private static final String KEY_TREE_LAYOUT = "gui.treeLayout";
+    private static final String KEY_SORT_MODE = "gui.sortMode";
+    private static final String KEY_TREE_DIRECTION = "gui.treeDirection";
 
     /** 写进文件开头的说明；一行一条，写的时候前面各加一个 {@code # }。 */
     private static final List<String> HEADER_LINES = Arrays.asList(
-            "Rewind 的过渡参数（客户端）。存档 = 饱和度提高，读档 = 高斯模糊。",
-            KEY_FADE_IN + "：淡入时长（秒），两种过渡共用。等它走完才真正开始动世界。",
+            "过渡参数（客户端）：存档 = 饱和度，读档 = 模糊。",
+            "Transition settings (client): save = saturation, restore = blur.",
+            KEY_FADE_IN + "：淡入时长（秒），两种过渡共用。",
+            KEY_FADE_IN + ": Fade-in duration in seconds, shared by both transitions.",
             KEY_SATURATION_FADE_OUT + "：存档过渡的淡出时长（秒）。",
-            KEY_SATURATION_BOOST + "：存档过渡满强度时的饱和度倍数（在 1 的基础上再加这么多）：1.5 = 2.5 倍。",
+            KEY_SATURATION_FADE_OUT + ": Saturation fade-out duration in seconds.",
+            KEY_SATURATION_BOOST + "：存档过渡满强度时的饱和度倍数（1.5 = 2.5 倍）。",
+            KEY_SATURATION_BOOST + ": Saturation multiplier at full strength (1.5 = 2.5x).",
             KEY_BLUR_FADE_OUT + "：读档过渡的淡出时长（秒）。",
+            KEY_BLUR_FADE_OUT + ": Blur fade-out duration in seconds.",
             KEY_BLUR_RADIUS + "：读档过渡满强度时的模糊半径（像素）。",
-            KEY_RESTORE_SETTLE_TICKS + "：读档时「世界已经回来」之后、开始淡出之前等区块到位的上限（tick）。");
+            KEY_BLUR_RADIUS + ": Blur radius at full strength, in pixels.",
+            KEY_RESTORE_SETTLE_TICKS + "：读档后等待区块到位的上限（tick）。",
+            KEY_RESTORE_SETTLE_TICKS + ": Cap in ticks to wait for chunks after a restore.",
+            "时间树界面的记忆。",
+            "Time-tree UI memory.",
+            KEY_TREE_LAYOUT + "：上次用的布局：false = 档案布局，true = 节点树布局。",
+            KEY_TREE_LAYOUT + ": Last used layout: false = slot cards, true = node tree.",
+            KEY_SORT_MODE + "：档案布局的排序方式：recent / oldest / name / playtime / index。",
+            KEY_SORT_MODE + ": Slot sort mode: recent / oldest / name / playtime / index.",
+            KEY_TREE_DIRECTION + "：时间轴方向：down / right / up / left。",
+            KEY_TREE_DIRECTION + ": Timeline direction: down / right / up / left.");
 
     /** 落盘时写的就是这几个值（界面上拖完滚动条立刻见效）。 */
     private static volatile float storedFadeInSeconds = DEFAULT_FADE_IN_SECONDS;
@@ -70,6 +93,9 @@ public final class RewindClientConfig {
     private static volatile float storedBlurFadeOutSeconds = DEFAULT_BLUR_FADE_OUT_SECONDS;
     private static volatile float storedBlurRadius = DEFAULT_BLUR_RADIUS;
     private static volatile int storedRestoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
+    private static volatile boolean storedTreeLayout = DEFAULT_TREE_LAYOUT;
+    private static volatile String storedSortMode = DEFAULT_SORT_MODE;
+    private static volatile String storedTreeDirection = DEFAULT_TREE_DIRECTION;
 
     private static float fadeInSeconds = DEFAULT_FADE_IN_SECONDS;
     private static float saturationFadeOutSeconds = DEFAULT_SATURATION_FADE_OUT_SECONDS;
@@ -77,6 +103,9 @@ public final class RewindClientConfig {
     private static float blurFadeOutSeconds = DEFAULT_BLUR_FADE_OUT_SECONDS;
     private static float blurRadiusValue = DEFAULT_BLUR_RADIUS;
     private static int restoreSettleTicksValue = DEFAULT_RESTORE_SETTLE_TICKS;
+    private static boolean treeLayoutValue = DEFAULT_TREE_LAYOUT;
+    private static String sortModeValue = DEFAULT_SORT_MODE;
+    private static String treeDirectionValue = DEFAULT_TREE_DIRECTION;
 
     private RewindClientConfig() {
     }
@@ -95,6 +124,9 @@ public final class RewindClientConfig {
         float blurFadeOut = DEFAULT_BLUR_FADE_OUT_SECONDS;
         float blurRadius = DEFAULT_BLUR_RADIUS;
         int restoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
+        boolean treeLayout = DEFAULT_TREE_LAYOUT;
+        String sortMode = DEFAULT_SORT_MODE;
+        String treeDirection = DEFAULT_TREE_DIRECTION;
         try {
             if (file != null && Files.isRegularFile(file)) {
                 Properties properties = new Properties();
@@ -111,6 +143,9 @@ public final class RewindClientConfig {
                 blurRadius = parseFloat(properties.getProperty(KEY_BLUR_RADIUS), DEFAULT_BLUR_RADIUS);
                 restoreSettleTicks = parseInt(properties.getProperty(KEY_RESTORE_SETTLE_TICKS),
                         DEFAULT_RESTORE_SETTLE_TICKS);
+                treeLayout = parseBoolean(properties.getProperty(KEY_TREE_LAYOUT), DEFAULT_TREE_LAYOUT);
+                sortMode = parseString(properties.getProperty(KEY_SORT_MODE), DEFAULT_SORT_MODE);
+                treeDirection = parseString(properties.getProperty(KEY_TREE_DIRECTION), DEFAULT_TREE_DIRECTION);
             }
         } catch (Throwable t) {
             Rewind.LOGGER.error("Rewind: failed to read {}; falling back to the defaults", file, t);
@@ -120,6 +155,9 @@ public final class RewindClientConfig {
             blurFadeOut = DEFAULT_BLUR_FADE_OUT_SECONDS;
             blurRadius = DEFAULT_BLUR_RADIUS;
             restoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
+            treeLayout = DEFAULT_TREE_LAYOUT;
+            sortMode = DEFAULT_SORT_MODE;
+            treeDirection = DEFAULT_TREE_DIRECTION;
         }
 
         storedFadeInSeconds = (float) clamp(fadeIn, MIN_SECONDS, MAX_SECONDS);
@@ -128,6 +166,9 @@ public final class RewindClientConfig {
         storedBlurFadeOutSeconds = (float) clamp(blurFadeOut, MIN_SECONDS, MAX_SECONDS);
         storedBlurRadius = clamp(blurRadius, MIN_BLUR_RADIUS, MAX_BLUR_RADIUS);
         storedRestoreSettleTicks = Math.max(0, Math.min(200, restoreSettleTicks));
+        storedTreeLayout = treeLayout;
+        storedSortMode = sortMode;
+        storedTreeDirection = treeDirection;
         apply();
         // 无论刚才是读出来的还是兜底出来的，都写回去一次：文件缺失时补上，值被夹过时纠正
         write();
@@ -140,10 +181,31 @@ public final class RewindClientConfig {
         blurFadeOutSeconds = storedBlurFadeOutSeconds;
         blurRadiusValue = storedBlurRadius;
         restoreSettleTicksValue = storedRestoreSettleTicks;
+        treeLayoutValue = storedTreeLayout;
+        sortModeValue = storedSortMode;
+        treeDirectionValue = storedTreeDirection;
         Rewind.LOGGER.info(
-                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}",
+                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
                 fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds, blurRadiusValue,
-                restoreSettleTicksValue);
+                restoreSettleTicksValue, treeLayoutValue, sortModeValue, treeDirectionValue);
+    }
+
+    private static boolean parseBoolean(String raw, boolean fallback) {
+        if (raw == null) {
+            return fallback;
+        }
+        String trimmed = raw.trim();
+        if ("true".equalsIgnoreCase(trimmed)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(trimmed)) {
+            return false;
+        }
+        return fallback;
+    }
+
+    private static String parseString(String raw, String fallback) {
+        return raw == null || raw.trim().isEmpty() ? fallback : raw.trim();
     }
 
     private static float parseFloat(String raw, float fallback) {
@@ -192,6 +254,47 @@ public final class RewindClientConfig {
 
     public static int restoreSettleTicks() {
         return restoreSettleTicksValue;
+    }
+
+    // ------------------------------------------------------------------ 时间树界面的记忆
+
+    /** 上次用的布局：false = 档案布局，true = 节点树布局。 */
+    public static boolean treeLayout() {
+        return treeLayoutValue;
+    }
+
+    /** 上次用的排序方式（模板 {@code #sort} 的 option value，小写）。 */
+    public static String sortMode() {
+        return sortModeValue;
+    }
+
+    /** 上次用的时间轴方向（{@code down} / {@code right} / {@code up} / {@code left}）。 */
+    public static String treeDirection() {
+        return treeDirectionValue;
+    }
+
+    /** 切换布局之后调用：记住并立刻落盘。 */
+    public static void setTreeLayout(boolean value) {
+        treeLayoutValue = value;
+        storedTreeLayout = value;
+        write();
+        Rewind.LOGGER.info("Rewind: gui treeLayout={} (set)", value);
+    }
+
+    /** 改排序方式之后调用：记住并立刻落盘。 */
+    public static void setSortMode(String value) {
+        sortModeValue = value == null || value.trim().isEmpty() ? DEFAULT_SORT_MODE : value.trim();
+        storedSortMode = sortModeValue;
+        write();
+        Rewind.LOGGER.info("Rewind: gui sortMode={} (set)", sortModeValue);
+    }
+
+    /** 转时间轴方向之后调用：记住并立刻落盘。 */
+    public static void setTreeDirection(String value) {
+        treeDirectionValue = value == null || value.trim().isEmpty() ? DEFAULT_TREE_DIRECTION : value.trim();
+        storedTreeDirection = treeDirectionValue;
+        write();
+        Rewind.LOGGER.info("Rewind: gui treeDirection={} (set)", treeDirectionValue);
     }
 
     /**
@@ -266,6 +369,9 @@ public final class RewindClientConfig {
         lines.add(KEY_BLUR_FADE_OUT + "=" + storedBlurFadeOutSeconds);
         lines.add(KEY_BLUR_RADIUS + "=" + storedBlurRadius);
         lines.add(KEY_RESTORE_SETTLE_TICKS + "=" + storedRestoreSettleTicks);
+        lines.add(KEY_TREE_LAYOUT + "=" + storedTreeLayout);
+        lines.add(KEY_SORT_MODE + "=" + storedSortMode);
+        lines.add(KEY_TREE_DIRECTION + "=" + storedTreeDirection);
         try {
             Path parent = file.getParent();
             if (parent != null) {

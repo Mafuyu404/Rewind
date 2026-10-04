@@ -26,3 +26,11 @@ versionRange = "[${minecraft_version},1.21.2)"
 ordering = "NONE"
 side = "BOTH"
 
+# 时间树界面（RewindTreeScreen）直接用 ApricityUI 的界面 API，只有客户端需要。
+[[dependencies.${mod_id}]]
+modId = "apricityui"
+type = "required"
+versionRange = "[1.2.6,)"
+ordering = "NONE"
+side = "CLIENT"
+

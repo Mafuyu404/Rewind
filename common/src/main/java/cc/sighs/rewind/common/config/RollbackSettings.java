@@ -28,8 +28,22 @@ public final class RollbackSettings {
      */
     public static final boolean DEFAULT_SYNC_CHUNKS_NEAR_PLAYER = true;
 
+    /**
+     * 读档冷却时长（秒）：一次成功回溯之后，要等这么久才能再读一次档。默认 {@code 0} = 不冷却。
+     *
+     * <p>冷却只挡「新的回溯」——建点（F7 / 界面上的覆盖）不受影响。起点是**回溯成功那一刻**，
+     * 记在存档点索引里（{@code SnapshotIndex.lastRollbackAt}），所以退出游戏重进也绕不过去；
+     * 换个存档目录则各算各的。
+     */
+    public static final int DEFAULT_COOLDOWN_SECONDS = 0;
+
+    /** 读档冷却的可调范围（秒）；{@link #MIN_COOLDOWN_SECONDS} = 0 就是关闭冷却。 */
+    public static final int MIN_COOLDOWN_SECONDS = 0;
+    public static final int MAX_COOLDOWN_SECONDS = 3600;
+
     private static volatile boolean syncRecipeBook = DEFAULT_SYNC_RECIPE_BOOK;
     private static volatile boolean syncChunksNearPlayer = DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
+    private static volatile int cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
 
     private RollbackSettings() {
     }
@@ -44,10 +58,21 @@ public final class RollbackSettings {
         return syncChunksNearPlayer;
     }
 
+    /** 读档冷却时长（秒）；0 表示不冷却。 */
+    public static int cooldownSeconds() {
+        return cooldownSeconds;
+    }
+
+    /** 读档冷却时长（毫秒）。 */
+    public static long cooldownMillis() {
+        return cooldownSeconds() * 1000L;
+    }
+
     /** 配置加载 / 重载时把值抄进来。 */
-    public static void apply(boolean recipeBook, boolean chunksNearPlayer) {
+    public static void apply(boolean recipeBook, boolean chunksNearPlayer, int cooldownSeconds) {
         syncRecipeBook = recipeBook;
         syncChunksNearPlayer = chunksNearPlayer;
+        setCooldownSeconds(cooldownSeconds);
     }
 
     /** 改配方书开关（只改内存；落盘由平台配置层负责）。 */
@@ -58,5 +83,21 @@ public final class RollbackSettings {
     /** 改「只同步读视野内区块」开关（只改内存；落盘由平台配置层负责）。 */
     public static void setSyncChunksNearPlayer(boolean value) {
         syncChunksNearPlayer = value;
+    }
+
+    /**
+     * 改读档冷却时长（只改内存；落盘由平台配置层负责）。
+     * 值会被夹到 {@link #MIN_COOLDOWN_SECONDS} - {@link #MAX_COOLDOWN_SECONDS}。
+     */
+    public static void setCooldownSeconds(int value) {
+        cooldownSeconds = clampCooldownSeconds(value);
+    }
+
+    /** 把冷却秒数夹到 {@link #MIN_COOLDOWN_SECONDS} - {@link #MAX_COOLDOWN_SECONDS}。 */
+    public static int clampCooldownSeconds(int value) {
+        if (value < MIN_COOLDOWN_SECONDS) {
+            return MIN_COOLDOWN_SECONDS;
+        }
+        return Math.min(value, MAX_COOLDOWN_SECONDS);
     }
 }

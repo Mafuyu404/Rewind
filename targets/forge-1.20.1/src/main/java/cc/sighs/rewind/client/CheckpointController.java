@@ -286,6 +286,14 @@ public final class CheckpointController {
         }
         slot = targetSlot;
         Path world = RewindApi.worldRoot(minecraft.getSingleplayerServer());
+        long cooldown = RewindApi.rollbackCooldownRemainingMillis(world);
+        if (cooldown > 0L) {
+            // 冷却中：不动玩家当前的界面，只写一条日志（和「没有存档点」一样，不是失败路径）
+            lastOutcome = Outcome.FAILED;
+            lastMessage = describe("rewind.error.rollback_cooldown", rollbackCooldownText(cooldown));
+            Rewind.LOGGER.warn("Rewind: {}", lastMessage);
+            return;
+        }
         if (!RewindApi.hasCheckpoint(world, slot)) {
             // 没有存档点不是「操作失败」，只是一个空动作：不动玩家当前的界面
             lastOutcome = Outcome.FAILED;
@@ -761,6 +769,14 @@ public final class CheckpointController {
     private static String describe(String messageKey, String detailText) {
         return Component.translatable(messageKey).getString()
                 + (detailText == null || detailText.isEmpty() ? "" : " (" + detailText + ")");
+    }
+
+    /** 冷却剩余时间给日志看：{@code 4m12s} / {@code 42s}。 */
+    private static String rollbackCooldownText(long millis) {
+        long totalSeconds = (millis + 999L) / 1000L;
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+        return minutes > 0L ? minutes + "m" + seconds + "s" : seconds + "s";
     }
 
     /** 耗时统计用：把单调时钟差值换成毫秒。 */

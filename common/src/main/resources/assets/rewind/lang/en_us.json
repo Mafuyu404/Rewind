@@ -22,6 +22,7 @@
   "rewind.error.reopen_failed": "Failed to reload the world",
   "rewind.error.close_failed": "Failed to close the world",
   "rewind.error.no_snapshot": "No checkpoint yet - press F7 first",
+  "rewind.error.rollback_cooldown": "Rollback is on cooldown",
 
   "rewind.cmd.status_empty": "No checkpoints yet",
 

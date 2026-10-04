@@ -80,3 +80,10 @@ cd targets\forge-1.20.1
 
 - [Minecraft 1.20.1、1.21.1、26.1 完整迁移差异参考](docs/version-differences/README.md)
 - [多版本日常维护工作流](docs/MAINTENANCE_WORKFLOW.md)
+
+## 许可证
+
+Copyright (C) 2026 Tower of Sighs
+
+本项目以 **GNU General Public License v3.0**（`GPL-3.0`）发布：你可以再分发和/或修改它，
+但必须遵守该协议；本程序不提供任何担保。完整协议文本见根目录的 [LICENSE](LICENSE)。

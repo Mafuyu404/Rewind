@@ -610,8 +610,9 @@ public final class InPlaceRollback {
      *   <li>实体存储的 {@code emptyChunks}：区块被卸载时如果当时没有可保存的实体，这个位置会被记成
      *       「空区块」，之后 {@code loadEntities} 直接返回空——快照里本来有实体的区块就再也读不出来。</li>
      *   <li>POI 的分段缓存：床位 / 工作站这类兴趣点按 16³ 分段缓存在内存里，不改就会留下幻影 POI。
-     *       1.20.1 没有 {@code SectionStorage.remove(long)}，这里是直接清 {@code storage} 那张表
-     *       （与 1.21.x 的 {@code remove} 逐字等价），下一次 {@code getOrLoad} 会整列重新读盘。</li>
+     *       1.20.1 没有 {@code SectionStorage.remove(long)}，这里是直接清 {@code storage} 那张表，
+     *       下一次 {@code getOrLoad} 会整列重新读盘。{@code dirty} 必须一起删——只删 {@code storage}
+     *       的话这个键还留着，下一 tick {@code tick()} 会把空 section 写回去，正好盖掉刚还原好的 poi 文件。</li>
      * </ul>
      */
     private static void invalidateCaches(MinecraftServer server, List<Target> targets) {
@@ -621,7 +622,7 @@ public final class InPlaceRollback {
                     ? entityStorageAccess(storage).rewind$emptyChunks()
                     : null;
             PoiManager poi = level.getChunkSource().getPoiManager();
-            var poiSections = sectionStorageAccess(poi).rewind$storage();
+            SectionStorageAccess poiSections = sectionStorageAccess(poi);
             for (Target target : targets) {
                 if (target.level != level) {
                     continue;
@@ -630,7 +631,9 @@ public final class InPlaceRollback {
                     emptyChunks.remove(target.pos.toLong());
                 }
                 for (int sectionY = level.getMinSection(); sectionY < level.getMaxSection(); sectionY++) {
-                    poiSections.remove(SectionPos.asLong(target.pos.x, sectionY, target.pos.z));
+                    long key = SectionPos.asLong(target.pos.x, sectionY, target.pos.z);
+                    poiSections.rewind$storage().remove(key);
+                    poiSections.rewind$dirtySections().remove(key);
                 }
             }
         }

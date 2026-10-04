@@ -3,6 +3,7 @@ package cc.sighs.rewind.server;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.common.config.AutoCheckpointSettings;
 import cc.sighs.rewind.common.config.RollbackSettings;
+import cc.sighs.rewind.common.config.SlotSettings;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.config.ModConfig;
@@ -12,8 +13,9 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 /**
  * 服务端行为的配置，落在 {@code run/config/rewind-common.toml}。
  *
- * <p>目前分两组：{@code autoCheckpoint}（跟着原版自动保存建点、间隔分钟数）与 {@code rollback}
- * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块）。它是 COMMON 配置而不是 CLIENT，
+ * <p>目前分三组：{@code autoCheckpoint}（跟着原版自动保存建点、间隔分钟数）、{@code rollback}
+ * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块，以及读档冷却秒数）与 {@code slots}
+ * （界面上那排手动编号卡片 {@code s1}…{@code sN} 的数量）。它是 COMMON 配置而不是 CLIENT，
  * 因为建点与回滚都发生在服务端线程上，跟玩家有没有客户端没关系。
  *
  * <p>默认值、可调范围与「分钟 → tick」的换算都在 common 的 {@link AutoCheckpointSettings} 里；
@@ -34,6 +36,8 @@ public final class RewindServerConfig {
     private static ModConfigSpec.IntValue autoSaveIntervalMinutes;
     private static ModConfigSpec.BooleanValue syncRecipeBook;
     private static ModConfigSpec.BooleanValue syncChunksNearPlayer;
+    private static ModConfigSpec.IntValue rollbackCooldownSeconds;
+    private static ModConfigSpec.IntValue manualSlotCount;
     private static ModConfigSpec spec;
     /** 保存下来的配置对象：界面上改完开关要立刻落盘。 */
     private static volatile ModConfig modConfig;
@@ -44,37 +48,45 @@ public final class RewindServerConfig {
     /** 注册配置。必须在模组构造阶段调用，否则会赶不上配置加载事件。 */
     public static void register(ModContainer container, IEventBus modBus) {
         ModConfigSpec.Builder builder = new ModConfigSpec.Builder();
-        builder.comment("Rewind 的服务端行为。").push("autoCheckpoint");
+        builder.comment("自动存档点。", "Auto checkpoints.").push("autoCheckpoint");
 
         autoCheckpointEnabled = builder
-                .comment("跟着原版自动保存建点：游戏每次自动保存完，往「自动存档」槽位写一个 Rewind 存档点。",
-                        "建点在服务端线程上跑（落盘 + 增量拷贝），所以每次会有一次几十到几百毫秒的卡顿，",
-                        "存档越大越明显。嫌它卡就关掉——界面上「自动存档」那张卡的「设置」里也有同一个开关。")
+                .comment("跟着原版自动保存建点。",
+                        "Create a checkpoint after each vanilla autosave.")
                 .define("enabled", DEFAULT_AUTO_CHECKPOINT);
 
         autoSaveIntervalMinutes = builder
-                .comment("原版自动保存的间隔（分钟）。上面的开关开着时，这个值**直接改原版的自动保存间隔**",
-                        "（原版自己固定 5 分钟）；关着的时候原版保持它自己的间隔，这个值不生效。",
-                        "范围 " + MIN_AUTO_SAVE_INTERVAL_MINUTES + " - " + MAX_AUTO_SAVE_INTERVAL_MINUTES + " 分钟。")
+                .comment("原版自动保存间隔（分钟，1-60）。",
+                        "Vanilla autosave interval in minutes (1-60).")
                 .defineInRange("intervalMinutes", DEFAULT_AUTO_SAVE_INTERVAL_MINUTES,
                         MIN_AUTO_SAVE_INTERVAL_MINUTES, MAX_AUTO_SAVE_INTERVAL_MINUTES);
 
         builder.pop();
 
-        builder.comment("回溯（原地回滚）的行为。").push("rollback");
+        builder.comment("回溯行为。", "Rollback behaviour.").push("rollback");
         syncRecipeBook = builder
-                .comment("回溯时要不要重新同步玩家的配方书（发给客户端那一份）。",
-                        "默认关：**完全不碰配方书**——回滚不给客户端重发这份包，客户端的配方书停在回溯前的状态；",
-                        "服务端那份仍然随 playerdata 一起回滚（它是玩家数据的一部分），下次登录 / 重连会自然对齐。",
-                        "开着才走 sendInitialRecipeBook 把整份配方书重发一遍——大整合包里这一下可能几百毫秒。")
+                .comment("回溯时重新同步玩家的配方书。",
+                        "Re-sync the player's recipe book on rollback.")
                 .define("syncRecipeBook", RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK);
 
         syncChunksNearPlayer = builder
-                .comment("回溯时只同步读回「玩家视野内」的受影响区块，其余交给原版流水线按 ticket 异步读回来。",
-                        "默认开：受影响区块的重载实测约 1ms/区块、与「建点之后改了多少」成正比，",
-                        "视野外那部分同步等它纯属浪费——玩家看不到，晚几 tick 回来也无所谓。",
-                        "关掉则回到老行为：所有受影响区块都在回滚这一帧里同步读回来（回溯更慢，但结束后世界立即完整）。")
+                .comment("回溯时只同步读回玩家视野内的区块。",
+                        "On rollback, sync-load only chunks near the player.")
                 .define("syncChunksNearPlayer", RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
+
+        rollbackCooldownSeconds = builder
+                .comment("读档冷却（秒），0 = 关闭。",
+                        "Rollback cooldown in seconds, 0 = off.")
+                .defineInRange("cooldownSeconds", RollbackSettings.DEFAULT_COOLDOWN_SECONDS,
+                        RollbackSettings.MIN_COOLDOWN_SECONDS, RollbackSettings.MAX_COOLDOWN_SECONDS);
+        builder.pop();
+
+        builder.comment("槽位布局。", "Slot layout.").push("slots");
+        manualSlotCount = builder
+                .comment("手动槽位数量。",
+                        "Number of manual slots.")
+                .defineInRange("manualSlotCount", SlotSettings.DEFAULT_MANUAL_SLOT_COUNT,
+                        SlotSettings.MIN_MANUAL_SLOT_COUNT, SlotSettings.MAX_MANUAL_SLOT_COUNT);
         builder.pop();
 
         spec = builder.build();
@@ -104,16 +116,27 @@ public final class RewindServerConfig {
                     syncRecipeBook == null ? RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK : syncRecipeBook.get(),
                     syncChunksNearPlayer == null
                             ? RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER
-                            : syncChunksNearPlayer.get());
+                            : syncChunksNearPlayer.get(),
+                    rollbackCooldownSeconds == null
+                            ? RollbackSettings.DEFAULT_COOLDOWN_SECONDS
+                            : rollbackCooldownSeconds.get());
+            SlotSettings.apply(manualSlotCount == null
+                    ? SlotSettings.DEFAULT_MANUAL_SLOT_COUNT
+                    : manualSlotCount.get());
         } catch (Throwable t) {
             AutoCheckpointSettings.apply(DEFAULT_AUTO_CHECKPOINT, DEFAULT_AUTO_SAVE_INTERVAL_MINUTES);
             RollbackSettings.apply(RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK,
-                    RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
+                    RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER,
+                    RollbackSettings.DEFAULT_COOLDOWN_SECONDS);
+            SlotSettings.apply(SlotSettings.DEFAULT_MANUAL_SLOT_COUNT);
         }
         Rewind.LOGGER.info(
-                "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={}",
+                "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={}, "
+                        + "cooldown={}s, slots manualSlotCount={}",
                 AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes(),
-                RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer());
+                RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer(),
+                RollbackSettings.cooldownSeconds(),
+                SlotSettings.manualSlotCount());
     }
 
     /** 跟着原版自动保存建点是不是开着。 */
@@ -186,6 +209,41 @@ public final class RewindServerConfig {
         }
         save();
         Rewind.LOGGER.info("Rewind: rollback syncRecipeBook={} (toggled)", value);
+    }
+
+    /** 读档冷却时长（秒，已夹到范围内）；0 表示不冷却。 */
+    public static int rollbackCooldownSeconds() {
+        return RollbackSettings.cooldownSeconds();
+    }
+
+    /**
+     * 改读档冷却时长（秒）并立刻落盘。值会被夹到
+     * {@link RollbackSettings#MIN_COOLDOWN_SECONDS} - {@link RollbackSettings#MAX_COOLDOWN_SECONDS}。
+     */
+    public static void setRollbackCooldownSeconds(int value) {
+        RollbackSettings.setCooldownSeconds(value);
+        int clamped = RollbackSettings.cooldownSeconds();
+        if (rollbackCooldownSeconds != null) {
+            rollbackCooldownSeconds.set(clamped);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: rollback cooldown={}s (toggled)", clamped);
+    }
+
+    /** 界面上的手动槽位数量（COMMON 配置可调，已夹到范围内）。 */
+    public static int manualSlotCount() {
+        return SlotSettings.manualSlotCount();
+    }
+
+    /** 改手动槽位数量并立刻落盘。值会被夹到 {@link SlotSettings#MIN_MANUAL_SLOT_COUNT} - {@link SlotSettings#MAX_MANUAL_SLOT_COUNT}。 */
+    public static void setManualSlotCount(int value) {
+        SlotSettings.setManualSlotCount(value);
+        int clamped = SlotSettings.manualSlotCount();
+        if (manualSlotCount != null) {
+            manualSlotCount.set(clamped);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: slots manualSlotCount={} (toggled)", clamped);
     }
 
     private static void save() {

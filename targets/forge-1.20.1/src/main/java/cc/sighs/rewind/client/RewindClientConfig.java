@@ -29,12 +29,13 @@ import net.minecraftforge.fml.event.config.ModConfigEvent;
  * </ul>
  */
 public final class RewindClientConfig {
-    // 默认值：必须与改造前写死的常量一致
-    public static final float DEFAULT_FADE_IN_SECONDS = 0.22F;
-    public static final float DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.15F;
-    public static final float DEFAULT_SATURATION_BOOST = 1.5F;
-    public static final float DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05F;
-    public static final float DEFAULT_BLUR_RADIUS = 13.0F;
+    // 默认值：必须与改造前写死的常量一致。存成 double 而不是 float：配置表按 double 落盘，
+    // float 会写出 0.2199999988079071 这种二进制误差尾巴（运行时字段仍是 float，抄值时收窄）。
+    public static final double DEFAULT_FADE_IN_SECONDS = 0.22D;
+    public static final double DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.15D;
+    public static final double DEFAULT_SATURATION_BOOST = 1.5D;
+    public static final double DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05D;
+    public static final double DEFAULT_BLUR_RADIUS = 13.0D;
     public static final int DEFAULT_RESTORE_SETTLE_TICKS = 10;
     /** 「存档过渡强度」的可调范围（就是配置里那个饱和度倍数）。 */
     public static final float MIN_SATURATION_BOOST = 0.0F;
@@ -42,6 +43,11 @@ public final class RewindClientConfig {
     /** 「读档过渡强度」的可调范围（就是配置里那个模糊半径，像素）。 */
     public static final float MIN_BLUR_RADIUS = 0.0F;
     public static final float MAX_BLUR_RADIUS = 64.0F;
+    /** 时间树界面记忆的默认值：档案布局、按槽位序号排序、时间轴从上到下。 */
+    public static final boolean DEFAULT_TREE_LAYOUT = false;
+    /** 排序方式存的是模板 {@code #sort} 的 option value（小写），与界面里 {@code SortMode.of} 认的形式一致。 */
+    public static final String DEFAULT_SORT_MODE = "index";
+    public static final String DEFAULT_TREE_DIRECTION = "down";
 
     private static ForgeConfigSpec.DoubleValue fadeIn;
     private static ForgeConfigSpec.DoubleValue saturationFadeOut;
@@ -49,16 +55,22 @@ public final class RewindClientConfig {
     private static ForgeConfigSpec.DoubleValue blurFadeOut;
     private static ForgeConfigSpec.DoubleValue blurRadius;
     private static ForgeConfigSpec.IntValue restoreSettleTicks;
+    private static ForgeConfigSpec.BooleanValue treeLayout;
+    private static ForgeConfigSpec.ConfigValue<String> sortMode;
+    private static ForgeConfigSpec.ConfigValue<String> treeDirection;
     private static ForgeConfigSpec spec;
-    /** 保存下来的配置对象：界面上拖完滚动条要立刻落盘。 */
+    /** 保存下来的配置对象：界面上拖完滚动条 / 切完布局要立刻落盘。 */
     private static volatile ModConfig modConfig;
 
-    private static float fadeInSeconds = DEFAULT_FADE_IN_SECONDS;
-    private static float saturationFadeOutSeconds = DEFAULT_SATURATION_FADE_OUT_SECONDS;
-    private static float saturationBoostValue = DEFAULT_SATURATION_BOOST;
-    private static float blurFadeOutSeconds = DEFAULT_BLUR_FADE_OUT_SECONDS;
-    private static float blurRadiusValue = DEFAULT_BLUR_RADIUS;
+    private static float fadeInSeconds = (float) DEFAULT_FADE_IN_SECONDS;
+    private static float saturationFadeOutSeconds = (float) DEFAULT_SATURATION_FADE_OUT_SECONDS;
+    private static float saturationBoostValue = (float) DEFAULT_SATURATION_BOOST;
+    private static float blurFadeOutSeconds = (float) DEFAULT_BLUR_FADE_OUT_SECONDS;
+    private static float blurRadiusValue = (float) DEFAULT_BLUR_RADIUS;
     private static int restoreSettleTicksValue = DEFAULT_RESTORE_SETTLE_TICKS;
+    private static boolean treeLayoutValue = DEFAULT_TREE_LAYOUT;
+    private static String sortModeValue = DEFAULT_SORT_MODE;
+    private static String treeDirectionValue = DEFAULT_TREE_DIRECTION;
 
     private RewindClientConfig() {
     }
@@ -66,41 +78,60 @@ public final class RewindClientConfig {
     /** 注册配置。必须在模组构造阶段调用，否则会赶不上配置加载事件。 */
     public static void register(IEventBus modBus) {
         ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
-        builder.comment("Rewind 的过渡参数（客户端）。存档 = 饱和度提高，读档 = 高斯模糊。")
+        builder.comment("过渡参数（客户端）：存档 = 饱和度，读档 = 模糊。",
+                        "Transition settings (client): save = saturation, restore = blur.")
                 .push("transition");
 
         fadeIn = builder
-                .comment("淡入时长（秒），两种过渡共用。等它走完才真正开始动世界，所以这个值也决定了"
-                        + "按下热键到操作开始之间的延迟。")
-                .defineInRange("fadeInSeconds", (double) DEFAULT_FADE_IN_SECONDS, 0.01D, 5.0D);
+                .comment("淡入时长（秒），两种过渡共用。",
+                        "Fade-in duration in seconds, shared by both transitions.")
+                .defineInRange("fadeInSeconds", DEFAULT_FADE_IN_SECONDS, 0.01D, 5.0D);
 
         saturationFadeOut = builder
-                .comment("存档过渡的淡出时长（秒）：饱和度从满强度回到正常。")
-                .defineInRange("saturationFadeOutSeconds", (double) DEFAULT_SATURATION_FADE_OUT_SECONDS, 0.01D, 5.0D);
+                .comment("存档过渡的淡出时长（秒）。",
+                        "Saturation fade-out duration in seconds.")
+                .defineInRange("saturationFadeOutSeconds", DEFAULT_SATURATION_FADE_OUT_SECONDS, 0.01D, 5.0D);
 
         saturationBoost = builder
-                .comment("存档过渡满强度时的饱和度倍数（在 1 的基础上再加这么多）：1.5 = 2.5 倍。",
-                        "再往上调，偏暗的通道会先被截断、开始出现色块，不是越大越好。")
-                .defineInRange("saturationBoost", (double) DEFAULT_SATURATION_BOOST,
+                .comment("存档过渡满强度时的饱和度倍数（1.5 = 2.5 倍）。",
+                        "Saturation multiplier at full strength (1.5 = 2.5x).")
+                .defineInRange("saturationBoost", DEFAULT_SATURATION_BOOST,
                         (double) MIN_SATURATION_BOOST, (double) MAX_SATURATION_BOOST);
 
         blurFadeOut = builder
-                .comment("读档过渡的淡出时长（秒）：世界回来之后模糊消失得有多快。")
-                .defineInRange("blurFadeOutSeconds", (double) DEFAULT_BLUR_FADE_OUT_SECONDS, 0.01D, 5.0D);
+                .comment("读档过渡的淡出时长（秒）。",
+                        "Blur fade-out duration in seconds.")
+                .defineInRange("blurFadeOutSeconds", DEFAULT_BLUR_FADE_OUT_SECONDS, 0.01D, 5.0D);
 
         blurRadius = builder
-                .comment("读档过渡满强度时的模糊半径（像素）：着色器按这个距离做 13 抽样高斯。",
-                        "画面分辨率越高，同样的像素半径看起来越轻。")
-                .defineInRange("blurRadius", (double) DEFAULT_BLUR_RADIUS,
+                .comment("读档过渡满强度时的模糊半径（像素）。",
+                        "Blur radius at full strength, in pixels.")
+                .defineInRange("blurRadius", DEFAULT_BLUR_RADIUS,
                         (double) MIN_BLUR_RADIUS, (double) MAX_BLUR_RADIUS);
 
         restoreSettleTicks = builder
-                .comment("读档时「世界已经回来」之后、开始淡出之前，等区块到位的**上限**（20 tick = 1 秒）。",
-                        "正常情况下用不到这个上限：客户端已加载的区块数连续两 tick 不再增长就淡出，",
-                        "所以读档完成后通常只还糊 0.1-0.2 秒（再加下面的淡出时长）；这个值只是大视距 / 卡顿时的兜底。")
+                .comment("读档后等待区块到位的上限（tick）。",
+                        "Cap in ticks to wait for chunks after a restore.")
                 .defineInRange("restoreSettleTicks", DEFAULT_RESTORE_SETTLE_TICKS, 0, 200);
 
         builder.pop();
+
+        builder.comment("时间树界面的记忆。", "Time-tree UI memory.")
+                .push("gui");
+        treeLayout = builder
+                .comment("上次用的布局：false = 档案布局，true = 节点树布局。",
+                        "Last used layout: false = slot cards, true = node tree.")
+                .define("treeLayout", DEFAULT_TREE_LAYOUT);
+        sortMode = builder
+                .comment("档案布局的排序方式：recent / oldest / name / playtime / index。",
+                        "Slot sort mode: recent / oldest / name / playtime / index.")
+                .define("sortMode", DEFAULT_SORT_MODE);
+        treeDirection = builder
+                .comment("时间轴方向：down / right / up / left。",
+                        "Timeline direction: down / right / up / left.")
+                .define("treeDirection", DEFAULT_TREE_DIRECTION);
+        builder.pop();
+
         spec = builder.build();
         // Forge 1.20.1 的 ModContainer 上没有 registerConfig，只能用 ModLoadingContext 的当前容器
         ModLoadingContext.get().registerConfig(ModConfig.Type.CLIENT, spec);
@@ -133,17 +164,37 @@ public final class RewindClientConfig {
         blurFadeOutSeconds = read(blurFadeOut, DEFAULT_BLUR_FADE_OUT_SECONDS);
         blurRadiusValue = read(blurRadius, DEFAULT_BLUR_RADIUS);
         restoreSettleTicksValue = readInt(restoreSettleTicks, DEFAULT_RESTORE_SETTLE_TICKS);
+        treeLayoutValue = readBool(treeLayout, DEFAULT_TREE_LAYOUT);
+        sortModeValue = readString(sortMode, DEFAULT_SORT_MODE);
+        treeDirectionValue = readString(treeDirection, DEFAULT_TREE_DIRECTION);
         Rewind.LOGGER.info(
-                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}",
+                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
                 fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds, blurRadiusValue,
-                restoreSettleTicksValue);
+                restoreSettleTicksValue, treeLayoutValue, sortModeValue, treeDirectionValue);
     }
 
-    private static float read(ForgeConfigSpec.DoubleValue value, float fallback) {
+    private static boolean readBool(ForgeConfigSpec.BooleanValue value, boolean fallback) {
         try {
-            return value == null ? fallback : value.get().floatValue();
+            return value == null ? fallback : value.get();
         } catch (Throwable t) {
             return fallback;
+        }
+    }
+
+    private static String readString(ForgeConfigSpec.ConfigValue<String> value, String fallback) {
+        try {
+            String raw = value == null ? null : value.get();
+            return raw == null || raw.trim().isEmpty() ? fallback : raw.trim();
+        } catch (Throwable t) {
+            return fallback;
+        }
+    }
+
+    private static float read(ForgeConfigSpec.DoubleValue value, double fallback) {
+        try {
+            return value == null ? (float) fallback : value.get().floatValue();
+        } catch (Throwable t) {
+            return (float) fallback;
         }
     }
 
@@ -177,6 +228,53 @@ public final class RewindClientConfig {
 
     public static int restoreSettleTicks() {
         return restoreSettleTicksValue;
+    }
+
+    // ------------------------------------------------------------------ 时间树界面的记忆
+
+    /** 上次用的布局：false = 档案布局，true = 节点树布局。 */
+    public static boolean treeLayout() {
+        return treeLayoutValue;
+    }
+
+    /** 上次用的排序方式（模板 {@code #sort} 的 option value，小写）。 */
+    public static String sortMode() {
+        return sortModeValue;
+    }
+
+    /** 上次用的时间轴方向（{@code down} / {@code right} / {@code up} / {@code left}）。 */
+    public static String treeDirection() {
+        return treeDirectionValue;
+    }
+
+    /** 切换布局之后调用：记住并立刻落盘。 */
+    public static void setTreeLayout(boolean value) {
+        treeLayoutValue = value;
+        if (treeLayout != null) {
+            treeLayout.set(value);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: gui treeLayout={} (set)", value);
+    }
+
+    /** 改排序方式之后调用：记住并立刻落盘。 */
+    public static void setSortMode(String value) {
+        sortModeValue = value == null || value.trim().isEmpty() ? DEFAULT_SORT_MODE : value.trim();
+        if (sortMode != null) {
+            sortMode.set(sortModeValue);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: gui sortMode={} (set)", sortModeValue);
+    }
+
+    /** 转时间轴方向之后调用：记住并立刻落盘。 */
+    public static void setTreeDirection(String value) {
+        treeDirectionValue = value == null || value.trim().isEmpty() ? DEFAULT_TREE_DIRECTION : value.trim();
+        if (treeDirection != null) {
+            treeDirection.set(treeDirectionValue);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: gui treeDirection={} (set)", treeDirectionValue);
     }
 
     /**

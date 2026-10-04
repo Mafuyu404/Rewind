@@ -9,6 +9,7 @@ import java.util.Map;
 import javax.annotation.Nullable;
 import cc.sighs.rewind.common.RewindLog;
 import cc.sighs.rewind.common.RewindState;
+import cc.sighs.rewind.common.config.RollbackSettings;
 import cc.sighs.rewind.common.core.CheckpointWriter;
 import cc.sighs.rewind.common.spi.RewindPlatform;
 import cc.sighs.rewind.common.spi.RewindPlatforms;
@@ -132,6 +133,11 @@ public final class RewindApi {
             return invalid;
         }
         Path worldRoot = worldRoot(server);
+        RewindResult cooling = cooldownFailure(worldRoot, slot);
+        if (cooling != null) {
+            RewindLog.LOGGER.warn("Rewind: ignoring the rollback to {}: still on cooldown", slot);
+            return cooling;
+        }
         RewindResult result;
         // 回滚窗口在这一刻打开：从这里到文件还原完，任何世界落盘都是马上要被覆盖掉的
         RewindState.beginDiscard();
@@ -145,7 +151,7 @@ public final class RewindApi {
         } finally {
             RewindState.endDiscard();
         }
-        moveTimelineHead(worldRoot, slot);
+        markRolledBack(worldRoot, slot);
         lastResult = result;
         return result;
     }
@@ -156,11 +162,16 @@ public final class RewindApi {
      * <p>「关世界 → 覆盖 → 重开」那条回退路径用它；原地回滚不走这里。任意线程可调。
      */
     public static RewindResult restoreFiles(Path worldRoot, String slot) {
+        RewindResult cooling = cooldownFailure(worldRoot, slot);
+        if (cooling != null) {
+            RewindLog.LOGGER.warn("Rewind: ignoring the file restore of {}: still on cooldown", slot);
+            return cooling;
+        }
         try {
             CheckpointWriter.Result copied = CheckpointWriter.restoreFiles(worldRoot, slot);
             RewindResult result = RewindResult.rollback(slot, false, copied.summary(), copied.millis,
                     copied.mirror.copied, copied.mirror.skipped, copied.mirror.files.size());
-            moveTimelineHead(worldRoot, slot);
+            markRolledBack(worldRoot, slot);
             lastResult = result;
             return result;
         } catch (Throwable t) {
@@ -170,20 +181,59 @@ public final class RewindApi {
     }
 
     /**
-     * 把时间线的「头」移到这个槽位：回溯之后世界就站在这个存档点上，之后建的存档点都挂在它下面。
+     * 回溯成功后的收尾：把时间线的「头」移到这个槽位（世界就站在这个存档点上，之后建的存档点都挂在
+     * 它下面），并记下这次回溯的时刻——读档冷却的起点。
      *
-     * <p>纯索引操作，失败了也不影响回溯本身（只写一条日志）——最坏的情况是下一个存档点的父节点
-     * 还是上一个，时间线少一条边而已。
+     * <p>纯索引操作，失败了也不影响回溯本身（只写一条日志）——最坏的情况是时间线少一条边，
+     * 或者冷却没记上。
      */
-    private static void moveTimelineHead(Path worldRoot, String slot) {
+    private static void markRolledBack(Path worldRoot, String slot) {
         try {
             Path indexFile = SnapshotLayout.indexFile(worldRoot);
             SnapshotIndex index = SnapshotIndex.load(indexFile);
             index.setHead(slot);
+            index.setLastRollbackAt(System.currentTimeMillis());
             index.save(indexFile);
         } catch (IOException e) {
-            RewindLog.LOGGER.warn("Rewind: failed to move the timeline head to {}", slot, e);
+            RewindLog.LOGGER.warn("Rewind: failed to record the rollback of {} in the index", slot, e);
         }
+    }
+
+    /**
+     * 读档冷却剩余时间（毫秒）；{@code 0} 表示现在可以读档。
+     *
+     * <p>冷却是「一次成功回溯之后要等一段时间才能再回溯」，时长见
+     * {@link RollbackSettings#cooldownSeconds()}，起点记在存档点索引里（{@code lastRollbackAt}），
+     * 所以退出游戏重进也绕不过去；换个存档目录则各算各的。只读，任意线程可调。
+     */
+    public static long rollbackCooldownRemainingMillis(Path worldRoot) {
+        long cooldown = RollbackSettings.cooldownMillis();
+        if (cooldown <= 0L || worldRoot == null) {
+            return 0L;
+        }
+        try {
+            SnapshotIndex index = SnapshotIndex.load(SnapshotLayout.indexFile(worldRoot));
+            long last = index.getLastRollbackAt();
+            if (last <= 0L) {
+                return 0L;
+            }
+            long remaining = last + cooldown - System.currentTimeMillis();
+            return remaining > 0L ? remaining : 0L;
+        } catch (IOException e) {
+            RewindLog.LOGGER.error("Rewind: failed to read snapshot index", e);
+            return 0L;
+        }
+    }
+
+    /** 还在冷却中时给调用方的失败结果；不在冷却里返回 null。 */
+    @Nullable
+    private static RewindResult cooldownFailure(Path worldRoot, String slot) {
+        long remaining = rollbackCooldownRemainingMillis(worldRoot);
+        if (remaining <= 0L) {
+            return null;
+        }
+        return fail(RewindResult.Kind.ROLLBACK, slot,
+                new IllegalStateException("rollback is on cooldown for another " + (remaining / 1000L) + "s"));
     }
 
     // ------------------------------------------------------------------ 查询

@@ -119,7 +119,6 @@ public final class RewindClient {
 
     private static void onClientTick(Minecraft minecraft) {
         CheckpointController.tick(minecraft);
-        RewindSelfTest.tick(minecraft);
         flushPendingRequest();
     }
 

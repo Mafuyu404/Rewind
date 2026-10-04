@@ -601,7 +601,10 @@ public final class InPlaceRollback {
      * <ul>
      *   <li>实体存储的 {@code emptyChunks}：区块被卸载时如果当时没有可保存的实体，这个位置会被记成
      *       「空区块」，之后 {@code loadEntities} 直接返回空——快照里本来有实体的区块就再也读不出来。</li>
-     *   <li>POI 的分段缓存：床位 / 工作站这类兴趣点按 16³ 分段缓存在内存里，不改就会留下幻影 POI。</li>
+     *   <li>POI 的分段缓存：床位 / 工作站这类兴趣点按 16³ 分段缓存在内存里，不改就会留下幻影 POI。
+     *       {@code storage} 与 {@code dirty} 必须一起删——只删 {@code storage} 的话这个键还留在
+     *       {@code dirty} 里，下一 tick {@code tick()} 会把这段内存里已经没有了的内容照写一遍，
+     *       正好盖掉刚还原好的 poi 文件。</li>
      * </ul>
      */
     private static void invalidateCaches(MinecraftServer server, List<Target> targets) {
@@ -610,7 +613,7 @@ public final class InPlaceRollback {
             var emptyChunks = permanent instanceof EntityStorage storage
                     ? entityStorageAccess(storage).rewind$emptyChunks()
                     : null;
-            PoiManager poi = level.getChunkSource().getPoiManager();
+            SectionStorageAccess poi = sectionStorageAccess(level.getChunkSource().getPoiManager());
             for (Target target : targets) {
                 if (target.level != level) {
                     continue;
@@ -619,7 +622,9 @@ public final class InPlaceRollback {
                     emptyChunks.remove(target.pos.toLong());
                 }
                 for (int sectionY = level.getMinSection(); sectionY < level.getMaxSection(); sectionY++) {
-                    poi.remove(SectionPos.asLong(target.pos.x, sectionY, target.pos.z));
+                    long key = SectionPos.asLong(target.pos.x, sectionY, target.pos.z);
+                    poi.rewind$sectionCache().remove(key);
+                    poi.rewind$dirtySections().remove(key);
                 }
             }
         }
@@ -832,8 +837,11 @@ public final class InPlaceRollback {
         CompoundTag data = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap()).getCompound("Data");
         ServerLevel overworld = server.overworld();
         if (overworld.getLevelData() instanceof ServerLevelData levelData) {
-            if (data.contains("GameTime", 99)) {
-                levelData.setGameTime(data.getLong("GameTime"));
+            // 游戏刻在 level.dat 里的键是 "Time"，不是 "GameTime"——后者只是 getGameTime() 那个 getter
+            // 的名字，磁盘上从来不存在这个键（PrimaryLevelData.createTag 写的是 putLong("Time", ...)）。
+            // 读错键会让这个 if 永不成立，回滚就静默不还原世界时间。
+            if (data.contains("Time", 99)) {
+                levelData.setGameTime(data.getLong("Time"));
             }
             if (data.contains("DayTime", 99)) {
                 levelData.setDayTime(data.getLong("DayTime"));

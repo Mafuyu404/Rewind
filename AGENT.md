@@ -54,6 +54,8 @@ common 需要平台能力时只经 `cc.sighs.rewind.common.spi.RewindPlatform`�
 
 共享资源与 target 资源若有同路径文件，必须明确选择唯一归属；不要依赖覆盖顺序。加载器 metadata、Mixin 配置、access widener/access transformer 和版本专属语言文件一律归 target。
 
+配置项注释一律**两行：第一行中文、第二行英文**，一句话说清即可，不要展开解释（加载器自己追加的 `# Default:` / `# Range:` 不算）。四个 target 的措辞保持一致；Fabric 那份手写 properties 的注释集中在 `HEADER_LINES`，同样按「一中文一英文」成对写。
+
 ## 日常开发
 
 1. 先判断改动是 `common`、单个 target、多个 target，还是构建/发布配置。
@@ -95,42 +97,35 @@ cd targets\forge-1.20.1
 
 - **配置文件**：NeoForge 两个 target 用 `ModConfigSpec`（`run/config/rewind-{common,client}.toml`）；Fabric 没有配置系统，`RewindServerConfig` / `RewindClientConfig` 是手写的 properties 实现（`config/rewind-{common,client}.properties`），**没有「外部改文件自动重载」**，只有界面上的 setter 会立刻落盘。
 - **自动保存间隔**：1.20.1 原版没有 `computeNextAutosaveInterval` / `ticksUntilAutosave`，两个 1.20.1 target 改用 `@ModifyConstant` 替换 `tickServer` 里写死的 `6000`（`require = 0` 软挂点，挂不上只是「间隔设置不生效」）。
-- **AUI 版本**：四个 target 统一 `1.2.6`（坐标分别是 `ApricityUI-{neoforge-1.21.1,neoforge-26.1,forge-1.20.1,fabric-1.20.1}`）。时间树用到的 DOM / 容器 API 在 1.2.4 → 1.2.6 之间保持同构（编译期已核），而 1.2.5.2 之前的「flat document 里画不出 `<img>`」的老问题在 1.2.6 上已不存在——四个 target 的时间树封面都应该能画出来（见「曾经的问题」一节）。
+- **AUI 版本**：四个 target 统一 `1.2.6`（坐标分别是 `ApricityUI-{neoforge-1.21.1,neoforge-26.1,forge-1.20.1,fabric-1.20.1}`）。时间树用到的 DOM / 容器 API 在 1.2.4 → 1.2.6 之间保持同构（编译期已核），而 1.2.5.2 之前的「flat document 里画不出 `<img>`」的老问题在 1.2.6 上已不存在——四个 target 的时间树封面都应该能画出来（见「曾经的问题」一节）。**metadata 里也声明了这条依赖**（mod id `apricityui`，要求 `>= 1.2.6`）：NeoForge / Forge 各是一段 `[[dependencies.<mod_id>]]`（`side = "CLIENT"`，因为只有客户端的时间树用它），Fabric 写在 `fabric.mod.json` 的 `depends` 里（Fabric 没有分端的依赖声明）。
 - **原地回滚引擎按版本各一份**：四个 target 各有一份 `InPlaceRollback`，依赖的原版内部结构不同（1.20.1 没有 `SimpleRegionStorage` / `generationRefCount`，26.1 的 `ChunkMap` 改继承 `SimpleRegionStorage`、`DimensionDataStorage` 改名 `SavedDataStorage`、`SavedData.save` 消失）。三份新引擎与 1.21.1 那份**步骤顺序与保护条件一致**，差异逐条写在各自的类注释里。
 
-### 本地端到端自测
+### 手动跑客户端 / 专用服务器
 
 ```powershell
 cd targets\neoforge-1.21.1
-# 先准备测试世界：把要用的存档复制成 run\saves\rewind_test，
-# 再把 testdata\rewind_test 放进它的 datapacks\ 目录
-.\gradlew.bat runClient -PrwQuickPlay=rewind_test -PrwSelfTest=true
+.\gradlew.bat runClient
+.\gradlew.bat runServer      # server run 自带 --nogui
 ```
 
-`-PrwQuickPlay=<存档目录名>` 追加 `--quickPlaySingleplayer`，`-PrwSelfTest=true` 打开模组内置自测（建存档点 → 改世界 → 回溯 → 校验世界状态）。结论看 `run/logs/latest.log` 里的 `REWIND_SELFTEST PASS` / `REWIND_SELFTEST FAIL:`，自测跑完会自行退出客户端。两个参数都不传时 `runClient` 行为不变。
+**仓库里已经没有「自动跑游戏」的自测机制了**：`-PrwQuickPlay` / `-PrwSelfTest` 两个运行参数、
+`RewindSelfTest` / `RewindServerSelfTest` 两个类、以及各 target 的 `testdata/` 都已删除。
+要验行为就手动起客户端（F7 存档 / F8 回溯 / F9 时间树），看 `run/logs/latest.log`。
 
-四个 target 都支持这两个参数（client run 设 `-Drewind.selftest`，server run 设 `-Drewind.servertest`）。跑之前要把测试世界与 `testdata/rewind_test` 备好；`testdata` 是**按版本**各一份，差异只在数据包格式：
+### 跑起来之后踩过的坑（各 target）
 
-- 1.20.1（fabric / forge）：函数目录是 `data/<ns>/functions/`（复数），`pack.mcmeta` 的 `pack_format` = 15。
-- 1.21.1：`function/`（单数），`pack_format` = 48。
-- 26.1：`function/`，`pack_format` = 101，gamerule 名改成 snake_case（`send_command_feedback`）。
-
-自测的原地回滚断言统一挂在 `RewindPlatforms.get().supportsInPlaceRollback()` 门控上：支持时跑完整断言，不支持时打 SKIPPED 日志并让服务端自测收尾输出 `PASS (partial: ...)`。四个 target 现在都返回 true，所以会走完整分支（`forge-1.20.1` 的 `-PrwSelfTest` 还额外跑一遍 `runServer` 的专用服务器自测）。
-
-### 进游戏自测：各 target 的实测坑位
-
-四个 target 都用 `-PrwQuickPlay=<存档名> -PrwSelfTest=true` 实测跑通过（`REWIND_SELFTEST PASS` / `REWIND_SERVERTEST PASS`）。这些坑都是跑起来之后才暴露的，改这些地方前先看：
+这些坑都是真起过游戏之后才暴露的，改这些地方前先看：
 
 - **fabric 的 loom run 配置是 `programArgs`，不是 `programArgument`**（后者是 ModDevGradle 的 DSL）。写错不会让 `build` 失败，只会在 `runClient` / `runServer` 时直接 `BUILD FAILED in 1s`。
 - **AUI fabric 的 SPI provider 是坏的**：`FabricAnnotationScanner` 只有 private 无参构造器，AUI 却用 `ServiceLoader.findFirst()` 取它 → `NoSuchMethodException`，客户端与专用服务器都起不来。`targets/fabric-1.20.1` 用 `cc.sighs.mixin.AuiFabricAnnotationScanMixins` 把那处调用重定向成反射构造绕开；AUI 上游修好后可删。neoforge / forge 的同名 provider 都是 public，不受影响。
 - **forge 的 mod 依赖必须用 `modImplementation`**，不能是 `implementation`：1.20.1 Forge 的发行 jar 是 SRG、dev 是 named，`implementation` 不做 remap → 既有 `NoSuchMethodError: MenuScreens.m_96206_` 这类崩溃，也会让 `RewindTreeScreen` 里覆盖 `ApricityScreen` 的方法**一个都不生效**。
 - **forge 需要 `pack.mcmeta`**（`pack_format` = 15）：没有它 Forge 会弹 `LoadingErrorScreen`（`failed to load a valid ResourcePackInfo`）并跳过 `setInitialScreen`，quickPlay 永远进不了世界。
 - **1.20.1 的着色器名字**：`ShaderInstance(ResourceProvider, String, VertexFormat)` 把名字拼成 `shaders/core/<name>.json` 且固定去 `minecraft` 命名空间找，传 `rewind:rewind_transition` 会直接抛 `ResourceLocationException`。1.20.1 的 `RewindTransitionRenderer` 传裸名 + 一个重定向到 `rewind` 命名空间的 `ResourceProvider`，json 里的 `vertex` / `fragment` 也是裸名。
-- **1.20.1 的 level.dat 时间键是 `Time`**，不是 `GameTime`（后者只是 getter 名）；`InPlaceRollback.restoreWorldData` 读错键就静默不还原世界时间。
-- **26.1 的维度目录是 `dimensions/<ns>/<path>/`**（主世界 `dimensions/minecraft/overworld`），玩家数据在 `players/data/`；凡是用 `region/`、`playerdata` 拼路径的地方都要按 `LevelResource` / `DimensionType.getStorageFolder` 算，别写死。
+- **level.dat 的时间键是 `Time`**（游戏刻）/ `DayTime`，不是 `GameTime`——后者只是 getter 名，磁盘上从来不存在这个键；`InPlaceRollback.restoreWorldData` 读错键就静默不还原世界时间（四个 target 现在都用 `Time`）。
+- **26.1 的维度目录是 `dimensions/<ns>/<path>/`**（主世界 `dimensions/minecraft/overworld`），玩家数据在 `players/data/`；凡是用 `region/`、`playerdata` 拼路径的地方都要按 `LevelResource` / `DimensionType.getStorageFolder` 算，别写死（common 的 `SnapshotLayout.isExcluded` 因此同时认 `playerdata/` 与 `players/data/` 两个位置下的玩家临时文件）。
 - **26.1 的 `openWorld` 是异步的**（读 level.dat 走 `thenAcceptAsync`）：「关世界重开」的耗时必须在 `REVEALING` 阶段等到世界真的回来才停表，否则会算出几十毫秒的假数字。
 - **26.1 的 `ChunkMap.saveChunksEagerly` 先清 `unsaved` 再异步落盘**：回滚窗口开着的几毫秒里若这次异步写被丢掉，就会出现「内存不脏 + 磁盘没变」→ 回滚什么都不做还报成功。`InPlaceRollback.run` 把 `endDiscard()` 提到最前面，把窗口从毫秒级压到几纳秒。
-- **跑自测的窗口要有焦点**：26.1 的 `pauseIfInactive()` 会在 `closeScreen` 摘屏那一帧立刻挂回 `PauseScreen`（自测已把 `pauseOnLostFocus` 置 false，`RewindScreens` 在过渡期间也拦 `PauseScreen`）。
+- **手动跑客户端时窗口要有焦点**：26.1 的 `pauseIfInactive()` 会在 `closeScreen` 摘屏那一帧立刻挂回 `PauseScreen`；`RewindScreens` 在过渡期间会把它一并拦掉，但自己手测时最好让窗口保持前台，否则看到的「界面没摘干净」可能是失焦造成的假象。
 
 改 target 构建时容易踩的两个坑，只在 dev 运行下暴露：
 
@@ -161,6 +156,7 @@ client            CheckpointController            客户端策略：过渡、界
 
 - **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
 - **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位；时间树界面上的「读取」走的就是它们（「覆盖」不走——它要界面一直开着，见「时间树」一节）。
+- **读档冷却**：一次成功回溯之后要等一段时间才能再回溯，时长是 COMMON 配置 `rollback.cooldownSeconds`（`RollbackSettings.cooldownSeconds()`，默认 `0` = 关闭，上限 3600 秒）。起点 `lastRollbackAt` 记在存档点索引里，所以退出游戏重进也绕不过去、换存档目录各算各的；只挡回溯（冷却中 `rollbackInPlace` / `restoreFiles` 直接返回失败结果），建点不受影响。要问还剩多久用 `rollbackCooldownRemainingMillis(worldRoot)`（0 = 可以读档）。**客户端 `CheckpointController.requestRestore` 必须在开过渡之前就用它拦下**（F8 / 界面上的「读取」），被拦时只写一条日志、不动界面——不然被拒的原地回滚会误触发「关世界 → 覆盖 → 重开」那条回退路径。
 - **查询**：`worldRoot(server)` / `hasCheckpoint(worldRoot, slot)` / `describe(...)` / `describeAll(worldRoot)`（一次读完整张索引，界面渲染整页槽位用它）/ `listCheckpoints(worldRoot)` / `readInventory(worldRoot, slot)` / `slots()`（界面固定展示的槽位顺序）/ `currentSlot(worldRoot)`（时间线的「头」：世界当前站在哪个存档点上，头所在的槽位被删了就返回空串），只读存档目录。命令层的 `/rewind status` 读的就是它们。
 - **槽位管理**（纯文件操作，任意线程可调，但不要和存档点操作并发——两边都写同一张索引）：`deleteCheckpoint(worldRoot, slot)` 删掉槽位目录 / 清单 / 背包快照 / 索引条目（先摘索引条目再删文件，中途崩了留下的是没人引用的目录）；`renameCheckpoint(worldRoot, slot, displayName)` 只改索引里的显示名，槽位 id 与目录都不动，所以改名不会触发重拷，而且覆盖这个槽位时会保留（`CheckpointWriter.create` 从旧索引里抄回来）。
 - **槽位清单**：`SnapshotLayout.uiSlots()` = `auto`、`quick`，然后是 8 个手动槽位 `s1`..`s8`。`quick` 就是 F7/F8 用的 `DEFAULT_SLOT`；`auto` 是「跟着原版自动保存建点」用的槽位（见「自动存档点」一节），也可以手动覆盖。槽位名会当目录名用，所以 `isValidSlotName` 限定 `[A-Za-z0-9_-]`；玩家起的名字由 `isValidDisplayName` 限定 1-20 字符。
@@ -176,7 +172,7 @@ F8 回溯分三步：关世界 → 用快照覆盖存档文件 → 重新开世�
 
 - 窗口内所有世界落盘由 `cc.sighs.mixin.RollbackDiscardMixins` 跳过：区块 / 实体 / 玩家数据 / 维度数据 / region 写入 / level.dat，同时跳过 `stopServer` 那个「排空 chunkMap」的循环；关句柄与释放 `session.lock` 不受影响。**改动任何保存路径时要回来对照这些注入点**——漏掉的写入虽然随后会被快照覆盖，但会把文件 mtime 改脏，让反向增量还原误判成「变了」而白拷一遍。
   > 26.1 上的对应物：`SavedData.save(File, HolderLookup$Provider)` 已删除，存档数据的写盘汇点变成 `SavedDataStorage.scheduleSave()`；level.dat 那条从 `saveDataTag(RegistryAccess, WorldData, CompoundTag)` 变成了私有的 `saveLevelData(CompoundTag)`（两条公开入口都汇到它）。其余目标签名不变。
-- 重新开世界走**快速重启**：复用上一轮的 `LayeredRegistryAccess` 与 `ReloadableServerResources`（重建世界时它们不会被关闭），只重读 level.dat（`LevelStorageSource.getLevelDataAndDimensions` + 重新 bake DIMENSIONS 层），再自己驱动 `Minecraft.doWorldLoad`，从而跳过 `WorldLoader.load` 的数据包 / 注册表 / 配方 / 战利品 / 标签 / 函数重载。任何一步失败都会自动退回 `WorldOpenFlows.openWorld`（见 `CheckpointController.tryFastRestart`）。
+- 重新开世界走**快速重启**：复用上一轮的 `LayeredRegistryAccess` 与 `ReloadableServerResources`（重建世界时它们不会被关闭），只重读 level.dat（`LevelStorageSource.getLevelDataAndDimensions` + 重新 bake DIMENSIONS 层），再自己驱动 `Minecraft.doWorldLoad`，从而跳过 `WorldLoader.load` 的数据包 / 注册表 / 配方 / 战利品 / 标签 / 函数重载。26.1 起游戏规则也搬进了 SavedData，`doWorldLoad` 的 `Optional<GameRules>` 必须传**空**（与原版 `openWorld` 一致），规则才会从快照覆盖过的磁盘读回来；传回溯前捕获的那份会把旧规则灌回去、还会在下一次自动保存写回磁盘。任何一步失败都会自动退回 `WorldOpenFlows.openWorld`（见 `CheckpointController.tryFastRestart`）。
 - 回溯时的文件回拷是**反向增量**：用建点时记录的清单判断活动存档里哪些文件还是原样，只回拷真正被改写过的，并把回拷文件的 mtime 拨回建点时的值（`SnapshotMirror.Direction.TO_WORLD`）。
 
 ### 原地回滚
@@ -193,7 +189,7 @@ F8 默认走**原地回滚**（`cc.sighs.rewind.server.InPlaceRollback`）：世
 2. **强制卸载**：把 ticket level 顶到 `ChunkLevel.MAX_LEVEL + 1`，挂进 `DistanceManager.chunksToUpdateFutures`，再反复推进 `ChunkMap.processUnloads` / `ServerChunkCache.runDistanceManagerUpdates`。回滚窗口开着，卸载触发的落盘被跳过。
    > 必须同时挡掉**重建**：玩家 ticket 一直认为这些区块该加载，ticket 图的邻居传播会把 `ChunkMap.updateChunkScheduling` 又叫回来把 holder 重建出来，重建的 holder 会走一遍晋升流水线、拉起 worldgen 任务，把 `generationRefCount` 钉在正被卸载的区块上——`processUnloads` 遇到 refCount 非 0 的 holder 直接跳过，卸载就永远跑不完（现象是 `stuck=` 一大堆、`unloadMs` 上千毫秒）。`InPlaceGuardMixins` 只在 `Rewind.beginUnloadGuard` 登记过的位置、且是「重建」这一种情形下拦掉，降级 / 卸载不受影响；名单在重建 holder 之前 `Rewind.clearUnloadGuards()` 清掉。卸载流水线连续 `STALL_ROUNDS` 轮没进展就放弃并记日志，不再空转。
 3. **实体卸载排空**：由区块状态驱动、靠 `PersistentEntitySectionManager.tick()` 推进，而且实体还没读回来（status 不是 LOADED）时 `storeChunkSections` 会直接放弃、留到下一 tick。所以必须在这一段里泵到 `chunksToUnload` 空——否则那些被推迟的卸载会落到回滚窗口之外，把「改世界之后」的实体列表写回刚还原的文件。
-4. **作废按区块缓存**：`EntityStorage.emptyChunks`（否则快照里本来有实体的区块会被当成空区块）与 POI 的分段缓存（否则留下幻影兴趣点）。必须在第 3 步之后做。
+4. **作废按区块缓存**：`EntityStorage.emptyChunks`（否则快照里本来有实体的区块会被当成空区块）与 POI 的分段缓存（否则留下幻影兴趣点）。POI 的 `storage` 与 `dirty` 两个键**都要删**——只删 `storage` 的话键还留在 `dirty` 里，下一 tick `tick()` 会把空 section 写回去，盖掉刚还原的 poi 文件。必须在第 3 步之后做。
 5. **释放 region 句柄**：Windows 上打开着的 .mca 会锁住文件。关之前先 `IOWorker.synchronize(false)` 排空排队中的写入，然后关掉 `RegionFile` 并**清空 `RegionFileStorage.regionCache`**——原版 `close()` 只关不清，不清的话下一次访问会拿到已关闭的句柄。
 6. **回拷文件**：`SnapshotMirror` 反向增量，逻辑与老路共用。
 7. **玩家 / 时间天气**：`playerdata` NBT → `player.load` + 手动补齐客户端同步；level.dat 的值写进活着的 `WorldData`（不动磁盘文件）。位置很讲究——**必须排在 holder 重建之后、区块成批重发之前**：

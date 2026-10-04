@@ -87,7 +87,6 @@ public final class RewindClient {
     private static void onClientTick(ClientTickEvent.Post event) {
         Minecraft minecraft = Minecraft.getInstance();
         CheckpointController.tick(minecraft);
-        RewindSelfTest.tick(minecraft);
         flushPendingRequest();
     }
     /**

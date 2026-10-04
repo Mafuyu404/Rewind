@@ -148,8 +148,8 @@ public final class RewindTreeScreen extends ApricityScreen {
 
     private String selectedSlot = RewindApi.DEFAULT_SLOT;
     private String filter = "";
-    /** 列表排序方式。默认按槽位序号，槽位卡片的顺序默认就是固定的 1..8。 */
-    private SortMode sort = SortMode.INDEX;
+    /** 列表排序方式。默认按槽位序号；上次用的会记住（客户端配置 {@code [gui] sortMode}）。 */
+    private SortMode sort = SortMode.of(RewindClientConfig.sortMode());
     /** 确认弹窗待执行的动作（{@code save} / {@code delete}）；null 表示弹窗没开。 */
     private String pendingAction;
     private String pendingSlot;
@@ -169,10 +169,10 @@ public final class RewindTreeScreen extends ApricityScreen {
     private static final int COVER_WAIT_TICKS = 20;
 
     // ------------------------------------------------------------------ 时间线视图的状态
-    /** 现在是不是「节点树布局」（对应 body 上的 tree-mode）。 */
-    private boolean treeMode;
-    /** 时间线方向：{@link #TREE_DIRS} 里的一个。 */
-    private String treeDir = TREE_DIRS[0];
+    /** 现在是不是「节点树布局」（对应 body 上的 tree-mode）；默认档案布局，上次用的会记住。 */
+    private boolean treeMode = RewindClientConfig.treeLayout();
+    /** 时间线方向：{@link #TREE_DIRS} 里的一个；默认从上到下，上次用的会记住。 */
+    private String treeDir = TREE_DIRS[indexOfDir(RewindClientConfig.treeDirection())];
     /** 流程图平移量（相对画布左上角，像素）。 */
     private double flowX;
     private double flowY;
@@ -266,8 +266,11 @@ public final class RewindTreeScreen extends ApricityScreen {
                     option.setOptionLabel(tr("rewind.ui.sort." + value));
                 }
             }
+            // 记住的排序方式要写回控件，不然会出现「控件显示 index、实际按 recent 排」
+            sortBox.setValue(RewindClientConfig.sortMode());
             sortBox.addEventListener("input", event -> {
                 sort = SortMode.of(sortBox.getValue());
+                RewindClientConfig.setSortMode(sortBox.getValue());
                 render(document);
             });
         }
@@ -458,9 +461,11 @@ public final class RewindTreeScreen extends ApricityScreen {
                 break;
             case "layout":
                 setTreeMode(document, "tree".equals(action.getDataset().get("layout")));
+                RewindClientConfig.setTreeLayout(treeMode);
                 break;
             case "switch-layout":
                 setTreeMode(document, !treeMode);
+                RewindClientConfig.setTreeLayout(treeMode);
                 break;
             case "rotate-tree":
                 rotateTree(document);
@@ -967,7 +972,7 @@ public final class RewindTreeScreen extends ApricityScreen {
 
         Element count = document.querySelector("#slotCount");
         if (count != null) {
-            count.setInnerText(tr("rewind.ui.count", used, SnapshotLayout.MANUAL_SLOT_COUNT));
+            count.setInnerText(tr("rewind.ui.count", used, SnapshotLayout.manualSlotCount()));
         }
     }
 
@@ -1116,10 +1121,10 @@ public final class RewindTreeScreen extends ApricityScreen {
         return html.toString();
     }
 
-    /** 序号最小的空手动槽位（{@code s1} 起）；8 个都满了返回 null。 */
+    /** 序号最小的空手动槽位（{@code s1} 起）；当前数量的手动槽位都满了返回 null。 */
     @Nullable
     private static String firstFreeSlot(Map<String, SnapshotMeta> metas) {
-        for (int index = 1; index <= SnapshotLayout.MANUAL_SLOT_COUNT; index++) {
+        for (int index = 1; index <= SnapshotLayout.manualSlotCount(); index++) {
             String slot = SnapshotLayout.manualSlot(index);
             if (!metas.containsKey(slot)) {
                 return slot;
@@ -1201,6 +1206,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     /** 顺时针转 90°：从上到下 → 从左到右 → 从下到上 → 从右到左。 */
     private void rotateTree(Document document) {
         treeDir = TREE_DIRS[(indexOfDir(treeDir) + 1) % TREE_DIRS.length];
+        RewindClientConfig.setTreeDirection(treeDir);
         applyLayout(document);
         flowFitPending = true;
     }

@@ -53,29 +53,12 @@ dependencies {
     implementation project(':common')
 }
 
-// 本地端到端自测用的可选运行参数，不传就不生效（和主版本 neoforge-1.21.1 的两条一一对应）：
-//   -PrwQuickPlay=<存档目录名>  直接把客户端开进某个单人世界（--quickPlaySingleplayer）
-//   -PrwSelfTest=true          打开模组内置自测（client 设 -Drewind.selftest=true，
-//                              server 设 -Drewind.servertest=true）
-def rewindQuickPlay = project.findProperty('rwQuickPlay')
-def rewindSelfTest = project.findProperty('rwSelfTest')
-
 loom {
     runs {
         client {
-            if (rewindQuickPlay) {
-                programArgs '--quickPlaySingleplayer', rewindQuickPlay.toString()
-            }
-            if (rewindSelfTest) {
-                vmArg "-Drewind.selftest=${rewindSelfTest}"
-            }
         }
         server {
             programArgs '--nogui'
-            // 同一个 -PrwSelfTest=true：客户端跑单人世界的自测，专用服务器跑 RewindServerSelfTest
-            if (rewindSelfTest) {
-                vmArg "-Drewind.servertest=${rewindSelfTest}"
-            }
         }
     }
 }
@@ -84,6 +67,9 @@ loom {
 // 这里不需要再动 loom 的 access widener 校验。
 
 tasks.named('processResources', ProcessResources).configure {
+    // 元数据里有中文注释：不显式指定的话 expand 走平台默认字符集（Windows 中文环境是 GBK），
+    // 会把 UTF-8 读坏、写出非法 UTF-8，加载器解析 JSON 时会直接失败。
+    filteringCharset = 'UTF-8'
     def replaceProperties = [
             minecraft_version: fabric_minecraft_version,
             fabric_loader_version: fabric_loader_version,

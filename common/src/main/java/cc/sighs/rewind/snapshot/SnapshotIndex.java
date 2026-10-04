@@ -17,6 +17,8 @@ public final class SnapshotIndex {
     private static final String FORMAT_VALUE = "1";
     /** 时间线「头」的键名：世界当前站在哪个节点上。 */
     private static final String HEAD_KEY = "head";
+    /** 上一次成功回溯的时刻（毫秒）；读档冷却用它算剩余时间。 */
+    private static final String LAST_ROLLBACK_KEY = "lastRollbackAt";
 
     private final Properties properties = new Properties();
 
@@ -143,6 +145,25 @@ public final class SnapshotIndex {
             return;
         }
         properties.setProperty(HEAD_KEY, slot);
+    }
+
+    /** 上一次成功回溯的时刻（{@code System.currentTimeMillis()}）；0 表示还没回溯过。读档冷却用它算剩余时间。 */
+    public long getLastRollbackAt() {
+        try {
+            return Long.parseLong(properties.getProperty(LAST_ROLLBACK_KEY, "0"));
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
+    }
+
+    /** 记录一次成功回溯的时刻；传 0 清掉。落盘由 {@link #save(Path)} 负责。 */
+    public void setLastRollbackAt(long millis) {
+        if (millis <= 0L) {
+            properties.remove(LAST_ROLLBACK_KEY);
+            return;
+        }
+        properties.setProperty(FORMAT_KEY, FORMAT_VALUE);
+        properties.setProperty(LAST_ROLLBACK_KEY, Long.toString(millis));
     }
 
     /** 先写临时文件再替换，避免写一半留下坏索引。 */

@@ -15,7 +15,6 @@ import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.FilterMode;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Screenshot;
 import net.minecraft.client.renderer.MappableRingBuffer;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.resources.Identifier;
@@ -73,9 +72,6 @@ public final class RewindTransitionRenderer {
     private static TextureTarget capturedFrame;
     private static long lastFrameNanos;
     private static boolean failedThisFrame;
-    /** 自测里每段过渡只存一张截图。 */
-    private static boolean screenshotTaken;
-    private static boolean wasActive;
 
     private RewindTransitionRenderer() {
     }
@@ -87,12 +83,6 @@ public final class RewindTransitionRenderer {
         RewindTransition.tick(Math.min(deltaSeconds, MAX_FRAME_SECONDS));
 
         boolean active = RewindTransition.isActive();
-        if (active != wasActive) {
-            wasActive = active;
-            if (active) {
-                screenshotTaken = false;
-            }
-        }
         if (active) {
             // 两种效果都是后处理：存档提高饱和度，读档高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
             // 遮罩」把那段盖过去）
@@ -149,7 +139,6 @@ public final class RewindTransitionRenderer {
                 pass.draw(0, 3);
             }
             uniformRing.rotate();
-            maybeScreenshot(minecraft);
         } catch (Throwable t) {
             if (!failedThisFrame) {
                 failedThisFrame = true;
@@ -157,24 +146,6 @@ public final class RewindTransitionRenderer {
             }
             pipelineFailed = true;
         }
-    }
-
-    /**
-     * 自测时在满强度存一张截图：过渡是视觉效果，日志看不出对错，留张图给人眼确认
-     * （{@code run/screenshots/rewind-<效果>.png}）。
-     *
-     * <p>26.1 的截图是异步的：{@code takeScreenshot(RenderTarget, Consumer<NativeImage>)} 先把像素
-     * 读回来、回调稍后才执行，写盘在回调里；{@code grab} 只是把「按名字存进 screenshots/」包好了，
-     * 比 1.21.1 多一个 downscale 参数（1 = 原尺寸）。
-     */
-    private static void maybeScreenshot(Minecraft minecraft) {
-        if (!RewindSelfTest.isEnabled() || screenshotTaken || RewindTransition.strength() < 0.95F) {
-            return;
-        }
-        screenshotTaken = true;
-        Screenshot.grab(minecraft.gameDirectory, "rewind-" + RewindTransition.effect() + ".png",
-                minecraft.getMainRenderTarget(), 1, component -> {
-                });
     }
 
     /** 把主渲染目标的当前画面复制到我们自己的贴图里。 */
