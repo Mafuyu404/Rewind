@@ -750,11 +750,22 @@ public final class CheckpointController {
      * 动手之前先把界面摘掉：过渡是整帧后处理（重采样整幅画面），界面开着既会挡在效果上面，
      * 也违反「过渡期间不得出现界面」那条约定。F7/F8 因此可以在任何界面里按——
      * 按下去界面会被收起，然后就是纯粹的世界过渡。
+     *
+     * <p><b>容器界面要走原版关屏路径</b>：直接 {@code setScreen(null)} 只走 {@code removed()}，
+     * 而给服务端发「关容器」包的是 {@code onClose()}。不发包的话服务端那份菜单会一直开着，里面的东西
+     * （附魔台输入槽、工作台合成格、光标上的物品）留在原处，等以后真正关掉时才被 {@code clearContainer}
+     * 塞回物品栏——「回溯之后凭空多出东西」就是这么来的。所以有容器菜单开着时改用
+     * {@code player.closeContainer()}，让服务端先收尾（那些物品随后会被 player.load 一起覆盖掉）。
      */
     private static void closeScreen(Minecraft minecraft) {
-        if (minecraft.screen != null) {
-            minecraft.setScreen(null);
+        if (minecraft.screen == null) {
+            return;
         }
+        if (minecraft.player != null && minecraft.player.containerMenu != minecraft.player.inventoryMenu) {
+            minecraft.player.closeContainer();
+            return;
+        }
+        minecraft.setScreen(null);
     }
 
     private static void succeed(String messageKey, String detailText) {
