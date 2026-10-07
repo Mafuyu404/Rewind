@@ -41,7 +41,9 @@ public final class RewindTransitionRenderer {
     /** 单帧最多按多少秒推进包络，避免卡顿后效果跳变。 */
     private static final float MAX_FRAME_SECONDS = 0.1F;
     /** 着色器里的效果编号，必须和 rewind_transition.fsh 保持一致。 */
+    private static final int MODE_BLUR = 0;
     private static final int MODE_SATURATION = 1;
+    private static final int MODE_DEATH = 2;
     /**
      * 着色器裸名（**不带命名空间**）。
      *
@@ -73,6 +75,17 @@ public final class RewindTransitionRenderer {
     private RewindTransitionRenderer() {
     }
 
+    private static int effectMode() {
+        switch (RewindTransition.effect()) {
+            case SATURATION:
+                return MODE_SATURATION;
+            case DEATH:
+                return MODE_DEATH;
+            default:
+                return MODE_BLUR;
+        }
+    }
+
     public static void onRenderFramePost(Minecraft minecraft) {
         long now = System.nanoTime();
         float deltaSeconds = lastFrameNanos == 0L ? 0.0F : (now - lastFrameNanos) / 1.0E9F;
@@ -81,7 +94,7 @@ public final class RewindTransitionRenderer {
 
         boolean active = RewindTransition.isActive();
         if (active) {
-            // 两种效果都是后处理：存档提高饱和度，读档高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
+            // 各种过渡都是后处理：存档提高饱和度，读档 / 死亡回溯做高斯模糊，死亡回溯再叠一层视野红边（世界中间会消失，靠「模糊 + 最后一帧
             // 遮罩」把那段盖过去）
             renderTransition(minecraft);
         }
@@ -124,11 +137,11 @@ public final class RewindTransitionRenderer {
         RenderSystem.setShaderTexture(0, capturedFrame.getColorTextureId());
         RenderSystem.setShader(() -> instance);
         setFloat(instance, "EffectStrength", RewindTransition.strength());
-        setInt(instance, "EffectMode",
-                RewindTransition.effect() == RewindTransition.Effect.SATURATION ? MODE_SATURATION : 0);
+        setInt(instance, "EffectMode", effectMode());
         // 效果的浓度/半径都来自 config/rewind-client.properties
         setFloat(instance, "SaturationBoost", RewindClientConfig.saturationBoost());
         setFloat(instance, "BlurRadius", RewindClientConfig.blurRadius());
+        setFloat(instance, "DeathReach", RewindTransition.deathReach());
         setVec2(instance, "TexelSize", 1.0F / width, 1.0F / height);
 
         // 1.20.1 的顶点缓冲是「拿共享 tesselator 的 builder → begin → 逐个 vertex().endVertex() → end()」，

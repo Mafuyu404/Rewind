@@ -24,7 +24,9 @@ public final class RewindTransition {
         /** 存档：饱和度提高。 */
         SATURATION,
         /** 读档：高斯模糊。 */
-        GAUSSIAN_BLUR
+        GAUSSIAN_BLUR,
+        /** 死亡回溯：高斯模糊 + 视野红边。 */
+        DEATH
     }
 
     private enum Stage {
@@ -37,10 +39,21 @@ public final class RewindTransition {
     /** 保持阶段的安全上限：任何异常路径都不该让屏幕一直保持过渡效果。这不是可调项。 */
     private static final float HOLD_LIMIT_SECONDS = 25.0F;
 
+    /** 死亡回溯：刚开始那一下红铺开的范围（以半屏高为单位）；别太大，中间要留出视野。 */
+    private static final float DEATH_REACH_FLASH = 0.72F;
+    /** 死亡回溯：退居成红边后留在边上的铺开程度。 */
+    private static final float DEATH_REACH_HOLD = 0.30F;
+    /** 死亡回溯：从那一大片退到红边要多久（秒）。 */
+    private static final float DEATH_REACH_RETREAT_SECONDS = 0.35F;
+    /** 死亡回溯的红边包络：回溯结束后淡出用多久（秒），要明显短于模糊的淡出。 */
+    private static final float DEATH_REACH_FADE_OUT_SECONDS = 0.25F;
+
     private static Effect effect = Effect.NONE;
     private static Stage stage = Stage.IDLE;
     private static float elapsedSeconds;
     private static float strength;
+    private static float deathReach;
+    private static float deathElapsedSeconds;
 
     private RewindTransition() {
     }
@@ -68,6 +81,8 @@ public final class RewindTransition {
         stage = Stage.FADE_IN;
         elapsedSeconds = 0.0F;
         strength = 0.0F;
+        deathElapsedSeconds = 0.0F;
+        deathReach = newEffect == Effect.DEATH ? DEATH_REACH_FLASH : 0.0F;
         cc.sighs.rewind.Rewind.LOGGER.info("Rewind: transition {} started", newEffect);
     }
 
@@ -88,6 +103,8 @@ public final class RewindTransition {
         stage = Stage.IDLE;
         elapsedSeconds = 0.0F;
         strength = 0.0F;
+        deathReach = 0.0F;
+        deathElapsedSeconds = 0.0F;
     }
 
     public static void tick(float deltaSeconds) {
@@ -95,6 +112,8 @@ public final class RewindTransition {
             return;
         }
         elapsedSeconds += deltaSeconds;
+        deathElapsedSeconds += deltaSeconds;
+        tickDeathReach();
         switch (stage) {
             case FADE_IN: {
                 float progress = Mth.clamp(elapsedSeconds / RewindClientConfig.fadeInSeconds(), 0.0F, 1.0F);
@@ -115,9 +134,14 @@ public final class RewindTransition {
                 return;
             }
             case FADE_OUT: {
-                float fadeOut = effect == Effect.GAUSSIAN_BLUR
-                        ? RewindClientConfig.blurFadeOutSeconds()
-                        : RewindClientConfig.saturationFadeOutSeconds();
+                float fadeOut;
+                if (effect == Effect.GAUSSIAN_BLUR) {
+                    fadeOut = RewindClientConfig.blurFadeOutSeconds();
+                } else if (effect == Effect.DEATH) {
+                    fadeOut = RewindClientConfig.deathFadeOutSeconds();
+                } else {
+                    fadeOut = RewindClientConfig.saturationFadeOutSeconds();
+                }
                 float progress = Mth.clamp(elapsedSeconds / fadeOut, 0.0F, 1.0F);
                 strength = 1.0F - ease(progress);
                 if (progress >= 1.0F) {
@@ -127,6 +151,28 @@ public final class RewindTransition {
             }
             default:
         }
+    }
+
+    private static void tickDeathReach() {
+        if (effect != Effect.DEATH) {
+            deathReach = 0.0F;
+            return;
+        }
+        if (stage == Stage.FADE_OUT) {
+            float out = Mth.clamp(elapsedSeconds / DEATH_REACH_FADE_OUT_SECONDS, 0.0F, 1.0F);
+            // 平方衰减：一开始收得快、末尾轻轻收干净（线性会很机械）
+            deathReach = DEATH_REACH_HOLD * (1.0F - out) * (1.0F - out);
+            return;
+        }
+        float retreat = Mth.clamp(deathElapsedSeconds / DEATH_REACH_RETREAT_SECONDS, 0.0F, 1.0F);
+        // 同样平方衰减：先从「一大片」快速退回红边，再慢慢贴到位
+        deathReach = DEATH_REACH_HOLD + (DEATH_REACH_FLASH - DEATH_REACH_HOLD)
+                * (1.0F - retreat) * (1.0F - retreat);
+    }
+
+    /** 死亡回溯：红边从屏幕四边往里铺到多深（单位是半屏高；1 = 铺到上/下边缘，0 = 没有）。 */
+    public static float deathReach() {
+        return deathReach;
     }
 
     /** 平滑一点的缓动，避免效果突然出现。 */

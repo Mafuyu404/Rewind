@@ -41,9 +41,18 @@ public final class RollbackSettings {
     public static final int MIN_COOLDOWN_SECONDS = 0;
     public static final int MAX_COOLDOWN_SECONDS = 3600;
 
+    /**
+     * 死亡后要不要自动回溯到「时间线上最近的那个节点」——时间线的头，也就是世界当前站着的那个存档点
+     * （{@code RewindApi.currentSlot}）。默认 {@code false}：死亡保持原版行为。
+     *
+     * <p>开着时由客户端在自己死亡的那一下触发一次回溯；时间树上那个槽位会标红提示。
+     */
+    public static final boolean DEFAULT_ROLLBACK_ON_DEATH = false;
+
     private static volatile boolean syncRecipeBook = DEFAULT_SYNC_RECIPE_BOOK;
     private static volatile boolean syncChunksNearPlayer = DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
     private static volatile int cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
+    private static volatile boolean rollbackOnDeath = DEFAULT_ROLLBACK_ON_DEATH;
 
     private RollbackSettings() {
     }
@@ -68,11 +77,17 @@ public final class RollbackSettings {
         return cooldownSeconds() * 1000L;
     }
 
+    /** 死亡后要不要自动回溯到时间线上最近的那个节点。 */
+    public static boolean rollbackOnDeath() {
+        return rollbackOnDeath;
+    }
+
     /** 配置加载 / 重载时把值抄进来。 */
-    public static void apply(boolean recipeBook, boolean chunksNearPlayer, int cooldownSeconds) {
+    public static void apply(boolean recipeBook, boolean chunksNearPlayer, int cooldownSeconds, boolean rollbackOnDeath) {
         syncRecipeBook = recipeBook;
         syncChunksNearPlayer = chunksNearPlayer;
         setCooldownSeconds(cooldownSeconds);
+        RollbackSettings.rollbackOnDeath = rollbackOnDeath;
     }
 
     /** 改配方书开关（只改内存；落盘由平台配置层负责）。 */
@@ -83,6 +98,11 @@ public final class RollbackSettings {
     /** 改「只同步读视野内区块」开关（只改内存；落盘由平台配置层负责）。 */
     public static void setSyncChunksNearPlayer(boolean value) {
         syncChunksNearPlayer = value;
+    }
+
+    /** 改「死亡后自动回溯」开关（只改内存；落盘由平台配置层负责）。 */
+    public static void setRollbackOnDeath(boolean value) {
+        rollbackOnDeath = value;
     }
 
     /**

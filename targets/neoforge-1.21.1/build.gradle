@@ -59,7 +59,7 @@ dependencies {
     // legacy classpath（clientLegacyClasspath.txt，来自 additionalRuntimeClasspath）。common 不是独立 mod，
     // 所以必须显式挂进后者，否则 dev 下会 NoClassDefFoundError（发行 jar 里 common 的类本来就是打进去的）。
     additionalRuntimeClasspath project(':common')
-    implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.2.6'
+    implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.2.7'
 //    implementation "curse.maven:smart-key-prompts-1300195:7450380"
 }
 

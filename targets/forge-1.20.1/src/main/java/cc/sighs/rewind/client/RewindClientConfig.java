@@ -10,7 +10,7 @@ import net.minecraftforge.fml.event.config.ModConfigEvent;
 /**
  * 过渡参数的客户端配置，落在 {@code run/config/rewind-client.toml}。
  *
- * <p>两种过渡（存档的饱和度提高、读档的高斯模糊）的所有可调项都在这里，默认值与代码里原本写死的
+ * <p>各段过渡效果（存档的饱和度、读档的模糊、死亡回溯的模糊 + 红边）的所有可调项都在这里，默认值与代码里原本写死的
  * 常量一致，所以不改配置就是原来的观感。
  *
  * <p>值只在配置加载/重载时抄进 static 字段，读的时候就是普通字段访问——后处理每帧都要读它，
@@ -35,6 +35,7 @@ public final class RewindClientConfig {
     public static final double DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.15D;
     public static final double DEFAULT_SATURATION_BOOST = 1.5D;
     public static final double DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05D;
+    public static final double DEFAULT_DEATH_FADE_OUT_SECONDS = 0.6D;
     public static final double DEFAULT_BLUR_RADIUS = 13.0D;
     public static final int DEFAULT_RESTORE_SETTLE_TICKS = 10;
     /** 「存档过渡强度」的可调范围（就是配置里那个饱和度倍数）。 */
@@ -53,6 +54,7 @@ public final class RewindClientConfig {
     private static ForgeConfigSpec.DoubleValue saturationFadeOut;
     private static ForgeConfigSpec.DoubleValue saturationBoost;
     private static ForgeConfigSpec.DoubleValue blurFadeOut;
+    private static ForgeConfigSpec.DoubleValue deathFadeOut;
     private static ForgeConfigSpec.DoubleValue blurRadius;
     private static ForgeConfigSpec.IntValue restoreSettleTicks;
     private static ForgeConfigSpec.BooleanValue treeLayout;
@@ -66,6 +68,7 @@ public final class RewindClientConfig {
     private static float saturationFadeOutSeconds = (float) DEFAULT_SATURATION_FADE_OUT_SECONDS;
     private static float saturationBoostValue = (float) DEFAULT_SATURATION_BOOST;
     private static float blurFadeOutSeconds = (float) DEFAULT_BLUR_FADE_OUT_SECONDS;
+    private static float deathFadeOutSeconds = (float) DEFAULT_DEATH_FADE_OUT_SECONDS;
     private static float blurRadiusValue = (float) DEFAULT_BLUR_RADIUS;
     private static int restoreSettleTicksValue = DEFAULT_RESTORE_SETTLE_TICKS;
     private static boolean treeLayoutValue = DEFAULT_TREE_LAYOUT;
@@ -83,8 +86,8 @@ public final class RewindClientConfig {
                 .push("transition");
 
         fadeIn = builder
-                .comment("淡入时长（秒），两种过渡共用。",
-                        "Fade-in duration in seconds, shared by both transitions.")
+                .comment("淡入时长（秒），所有过渡共用。",
+                        "Fade-in duration in seconds, shared by every transition.")
                 .defineInRange("fadeInSeconds", DEFAULT_FADE_IN_SECONDS, 0.01D, 5.0D);
 
         saturationFadeOut = builder
@@ -102,6 +105,11 @@ public final class RewindClientConfig {
                 .comment("读档过渡的淡出时长（秒）。",
                         "Blur fade-out duration in seconds.")
                 .defineInRange("blurFadeOutSeconds", DEFAULT_BLUR_FADE_OUT_SECONDS, 0.01D, 5.0D);
+
+        deathFadeOut = builder
+                .comment("死亡回溯过渡的淡出时长（秒）：那圈视野红边消失得有多快。",
+                        "Fade-out duration in seconds for the death-rollback transition.")
+                .defineInRange("deathFadeOutSeconds", DEFAULT_DEATH_FADE_OUT_SECONDS, 0.01D, 5.0D);
 
         blurRadius = builder
                 .comment("读档过渡满强度时的模糊半径（像素）。",
@@ -162,14 +170,16 @@ public final class RewindClientConfig {
         saturationFadeOutSeconds = read(saturationFadeOut, DEFAULT_SATURATION_FADE_OUT_SECONDS);
         saturationBoostValue = read(saturationBoost, DEFAULT_SATURATION_BOOST);
         blurFadeOutSeconds = read(blurFadeOut, DEFAULT_BLUR_FADE_OUT_SECONDS);
+        deathFadeOutSeconds = read(deathFadeOut, DEFAULT_DEATH_FADE_OUT_SECONDS);
         blurRadiusValue = read(blurRadius, DEFAULT_BLUR_RADIUS);
         restoreSettleTicksValue = readInt(restoreSettleTicks, DEFAULT_RESTORE_SETTLE_TICKS);
         treeLayoutValue = readBool(treeLayout, DEFAULT_TREE_LAYOUT);
         sortModeValue = readString(sortMode, DEFAULT_SORT_MODE);
         treeDirectionValue = readString(treeDirection, DEFAULT_TREE_DIRECTION);
         Rewind.LOGGER.info(
-                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
-                fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds, blurRadiusValue,
+                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s deathFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
+                fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds,
+                deathFadeOutSeconds, blurRadiusValue,
                 restoreSettleTicksValue, treeLayoutValue, sortModeValue, treeDirectionValue);
     }
 
@@ -220,6 +230,10 @@ public final class RewindClientConfig {
 
     public static float blurFadeOutSeconds() {
         return blurFadeOutSeconds;
+    }
+
+    public static float deathFadeOutSeconds() {
+        return deathFadeOutSeconds;
     }
 
     public static float blurRadius() {

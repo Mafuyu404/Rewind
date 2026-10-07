@@ -29,6 +29,7 @@ import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.screen.ApricityScreen;
+import com.sighs.apricityui.ui.Tooltip;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
@@ -72,10 +73,9 @@ import org.lwjgl.glfw.GLFW;
  * <p><b>与 NeoForge 1.21.1 的差异</b>：本体几乎逐行照搬——它只用 {@code Minecraft} /
  * {@code IntegratedServer} / {@code LocalPlayer} / {@code Language} / {@code Stats} 这些两边同形的
  * 原版 API，加上 AUI 的界面 API（{@code ApricityScreen} / {@code Document} / {@code Element} /
- * {@code Event}），没有一处框架事件。差异只在两处配件上：
- * 「改键」打开的是 1.20.1 的 {@code ...screens.controls.KeyBindsScreen}（见 {@link RewindKeyBindsScreen}），
- * 以及 AUI 版本从 1.2.5.4 降到 1.2.4（{@code ApricityScreen} 在那里没有重写 {@code tick()}，
- * 文档的鼠标派发由 AUI 的客户端钩子负责，不受影响）。
+ * {@code Event}），没有一处框架事件。差异只在一处配件：「改键」打开的是 1.20.1 的
+ * {@code ...screens.controls.KeyBindsScreen}（见 {@link RewindKeyBindsScreen}）；AUI 版本与另外
+ * 三个 target 相同，没有版本差异。
  */
 public final class RewindTreeScreen extends ApricityScreen {
     /** 模板路径，相对 AUI 的 {@code assets/apricityui/apricity/} 基准目录。 */
@@ -147,6 +147,8 @@ public final class RewindTreeScreen extends ApricityScreen {
     }
 
     private String selectedSlot = RewindApi.DEFAULT_SLOT;
+    /** 死亡后会自动回溯到的槽位（时间线的头）；空 = 不标记（开关关着，或还没有节点）。 */
+    private String deathTargetSlot = "";
     private String filter = "";
     /** 列表排序方式。默认按槽位序号；上次用的会记住（客户端配置 {@code [gui] sortMode}）。 */
     private SortMode sort = SortMode.of(RewindClientConfig.sortMode());
@@ -439,6 +441,9 @@ public final class RewindTreeScreen extends ApricityScreen {
             case "toggle-auto":
                 toggleAutoCheckpoint(document);
                 break;
+            case "toggle-death":
+                toggleDeathRollback(document);
+                break;
             case "apply-interval":
                 applyInterval(document);
                 break;
@@ -586,14 +591,10 @@ public final class RewindTreeScreen extends ApricityScreen {
             StringBuilder html = new StringBuilder();
             if (SnapshotLayout.SLOT_AUTO.equals(slot)) {
                 // 自动存档这张卡的两个可调项：跟着原版自动保存建点、以及自动保存间隔
-                boolean enabled = RewindServerConfig.autoCheckpointEnabled();
                 html.append("<div class=\"form-group\"><label class=\"form-label\">")
                         .append(text(tr("rewind.ui.settings.auto.toggle"))).append("</label>")
-                        .append("<button class=\"button button-small ")
-                        .append(enabled ? "button-secondary" : "button-tertiary")
-                        .append("\" data-act=\"toggle-auto\">")
-                        .append(text(tr(enabled ? "rewind.ui.settings.auto.on" : "rewind.ui.settings.auto.off")))
-                        .append("</button></div>");
+                        .append(switchControl("toggle-auto", RewindServerConfig.autoCheckpointEnabled()))
+                        .append("</div>");
                 html.append("<div class=\"form-group\"><label class=\"form-label\" for=\"autoInterval\">")
                         .append(text(tr("rewind.ui.settings.auto.interval"))).append("</label>")
                         .append("<div class=\"input-group\">")
@@ -604,7 +605,7 @@ public final class RewindTreeScreen extends ApricityScreen {
                         .append("</div></div>");
             }
             if (SnapshotLayout.SLOT_QUICK.equals(slot)) {
-                // 快速槽的三个项：两种过渡的强度（主题的滑块）+ 改键入口
+                // 快速槽的四项：两种过渡的强度（主题的滑块）+ 改键入口 + 死亡后自动回溯
                 html.append(sliderGroup("rewind.ui.settings.quick.saturation", "saturationBoost",
                         RewindClientConfig.saturationBoost(),
                         RewindClientConfig.MIN_SATURATION_BOOST, RewindClientConfig.MAX_SATURATION_BOOST));
@@ -615,6 +616,10 @@ public final class RewindTreeScreen extends ApricityScreen {
                         .append(text(tr("rewind.ui.settings.quick.keys"))).append("</label>")
                         .append("<button class=\"button button-small button-tertiary\" data-act=\"open-keys\">")
                         .append(text(tr("rewind.ui.settings.quick.keys_button"))).append("</button></div>");
+                html.append("<div class=\"form-group\"><label class=\"form-label\">")
+                        .append(text(tr("rewind.ui.settings.quick.death_rollback"))).append("</label>")
+                        .append(switchControl("toggle-death", RewindServerConfig.rollbackOnDeath()))
+                        .append("</div>");
             }
             info.setInnerHTML(html.toString());
             // 间隔那个输入框是这一趟刚铺进去的，回车提交要在这里现挂（和重命名弹窗那个不一样，
@@ -788,6 +793,16 @@ public final class RewindTreeScreen extends ApricityScreen {
         openSettings(document, SnapshotLayout.SLOT_AUTO);
     }
 
+    /** 「快速存档」设置里的开关：死亡后要不要回溯到时间线上最近的那个节点。改完立刻落盘并重画。 */
+    private void toggleDeathRollback(Document document) {
+        boolean enabled = !RewindServerConfig.rollbackOnDeath();
+        RewindServerConfig.setRollbackOnDeath(enabled);
+        log(enabled ? "rewind.ui.log.death_on" : "rewind.ui.log.death_off");
+        // 红框要跟着开关变：整页重画 + 重开弹窗里那一行
+        render(document);
+        openSettings(document, SnapshotLayout.SLOT_QUICK);
+    }
+
     /**
      * 「自动保存间隔」那一项：把输入框里的分钟数写进配置（立刻落盘）。
      *
@@ -907,10 +922,26 @@ public final class RewindTreeScreen extends ApricityScreen {
 
     private void render(Document document) {
         Map<String, SnapshotMeta> metas = loadMetas();
+        // 「死亡后回溯的目标」= 时间线的头（世界当前站着的存档点）。开关关着时不标记——
+        // 那种情况下死亡不会回溯，标红反而是误导。
+        Path world = worldRoot();
+        deathTargetSlot = RewindServerConfig.rollbackOnDeath() && world != null
+                ? RewindApi.currentSlot(world) : "";
         renderHud(document);
         renderSlots(document, metas);
         renderTree(document, metas);
         renderDetail(document, metas);
+        bindDeathTargetTooltip(document);
+    }
+
+    /** 给标了红框（{@code .death-target}）的卡片挂 AUI 自带的悬浮提示，说明红框是什么意思。 */
+    private void bindDeathTargetTooltip(Document document) {
+        if (deathTargetSlot.isEmpty()) {
+            return;
+        }
+        for (Element card : document.querySelectorAll(".death-target")) {
+            Tooltip.bindTranslation(card, "rewind.ui.slot.death_target.tooltip");
+        }
     }
 
     private void renderHud(Document document) {
@@ -1155,6 +1186,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     private String treeCard(String slot, @Nullable SnapshotMeta meta) {
         StringBuilder html = new StringBuilder();
         html.append("<article class=\"card slot-card tree-card").append(slot.equals(selectedSlot) ? " selected" : "")
+                .append(slot.equals(deathTargetSlot) ? " death-target" : "")
                 .append("\" data-act=\"select\" data-slot=\"").append(slot).append("\" tabindex=\"0\" role=\"button\">");
         html.append("<div class=\"tree-head\"><span class=\"badge ").append(slotBadgeClass(slot)).append("\">")
                 .append(text(slotBadgeLabel(slot))).append("</span><h4 class=\"slot-title\">")
@@ -1552,6 +1584,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     private String specialCard(String slot, SnapshotMeta meta) {
         StringBuilder html = new StringBuilder();
         html.append("<article class=\"card special-card").append(slot.equals(selectedSlot) ? " selected" : "")
+                .append(slot.equals(deathTargetSlot) ? " death-target" : "")
                 .append("\" data-act=\"select\" data-slot=\"").append(slot).append("\" tabindex=\"0\" role=\"button\">");
         html.append("<div class=\"special-cover\" style=\"background:").append(coverColor(slot)).append("\">")
                 .append(coverImage(slot, meta)).append("</div>");
@@ -1580,6 +1613,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         String index = String.format(Locale.ROOT, "%02d", SnapshotLayout.manualIndex(slot));
         StringBuilder html = new StringBuilder();
         html.append("<article class=\"card slot-card").append(slot.equals(selectedSlot) ? " selected" : "")
+                .append(slot.equals(deathTargetSlot) ? " death-target" : "")
                 .append("\" data-act=\"select\" data-slot=\"").append(slot).append("\" tabindex=\"0\" role=\"button\">");
         if (meta == null) {
             html.append("<div class=\"slot-cover empty\"><span class=\"plus\">＋</span><span class=\"empty-text\">")
@@ -1612,6 +1646,17 @@ public final class RewindTreeScreen extends ApricityScreen {
         html.append(actionButton(slot, "rename", "button-tertiary", tr("rewind.ui.action.rename"), meta == null));
         html.append("</div></article>");
         return html.toString();
+    }
+
+    /**
+     * 主题自带的开关控件（和标题旁边那个布局开关同一套）：{@code aria-checked} 与 {@code .on} 一起
+     * 决定它开还是关，点击由调用方给的 {@code data-act} 接。
+     */
+    private static String switchControl(String action, boolean on) {
+        return "<span class=\"switch" + (on ? " on" : "")
+                + "\" data-act=\"" + action + "\" role=\"switch\" tabindex=\"0\" aria-checked=\"" + on + "\">"
+                + "<span class=\"switch-control\"><span class=\"switch-status\"></span>"
+                + "<span class=\"switch-button\"></span></span></span>";
     }
 
     private static String actionButton(String slot, String action, String extraClass, String label, boolean disabled) {

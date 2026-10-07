@@ -42,7 +42,7 @@ public final class RewindClient {
 
     /** 客户端入口初始化时调用一次。 */
     public static void setup() {
-        // 过渡参数（两种效果的所有可调项）落在 config/rewind-client.properties
+        // 过渡参数（所有可调项）落在 config/rewind-client.properties
         RewindClientConfig.register();
         // 把「带过渡的异步入口」接到状态机上：RewindApi.requestCheckpoint/requestRollback 从此等价于按 F7/F8
         CheckpointController.installApiBridge();

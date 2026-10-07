@@ -3,30 +3,38 @@ package cc.sighs.rewind.client;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Optional;
+import java.util.UUID;
 import com.mojang.serialization.Dynamic;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
 import cc.sighs.rewind.api.RewindResult;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
+import cc.sighs.rewind.server.RewindServerConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.LayeredRegistryAccess;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.NbtUtils;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.RegistryLayer;
 import net.minecraft.server.ReloadableServerResources;
 import net.minecraft.server.WorldLoader;
 import net.minecraft.server.WorldStem;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.server.packs.resources.CloseableResourceManager;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.util.datafix.DataFixers;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -108,6 +116,14 @@ public final class CheckpointController {
     private static int revealStableTicks;
     /** 本轮操作针对的槽位。热键用 {@link Rewind#SLOT}，界面上的读取/覆盖按玩家选的槽位覆盖它。 */
     private static String slot = Rewind.SLOT;
+
+    /** 「死亡后自动回溯」是否已经为这一次死亡触发过（玩家活着时重新武装）。 */
+    private static boolean deathRollbackFired;
+    /** 本轮回溯用哪种过渡效果；死亡回溯走 {@code DEATH}（模糊 + 视野红边）。 */
+    private static RewindTransition.Effect restoreEffect = RewindTransition.Effect.GAUSSIAN_BLUR;
+    /** 死亡那一刻的朝向；原版重生把俯仰角强制归零，回溯开始前要补回客户端。 */
+    private static float deathYaw;
+    private static float deathPitch;
 
     /** 本轮要跑的活 + 服务端线程回填的结果。 */
     private static Work work = Work.NONE;
@@ -302,16 +318,24 @@ public final class CheckpointController {
         // （ClientLevel.shouldTickDeath → LocalPlayer.tickDeath），而回溯只把「服务端那个玩家」救活，
         // 客户端手里那个已经移除的实体找不回来——结果就是一个不能动、不能交互、没有手也没有 HUD 的
         // 幽灵玩家。所以先走一次原版重生（等价于点死亡界面的「重生」），等新的 LocalPlayer 到位再回溯；
-        // 重生把人放到出生点无所谓，回溯随后会用快照把位置 / 物品 / 血量一起盖回来。
+        // 重生点会先挪到死亡地点（见 moveRespawnPointHere），位置 / 物品 / 血量随后由快照盖回来。
         if (minecraft.player != null && minecraft.player.isDeadOrDying()) {
+            // 重生会把人送到重生点，所以先把重生点挪到玩家现在站的地方：不然会先瞬移回出生点、
+            // 再被回溯拉走，中间那一下场景变化很违和。这个临时重生点随后会被快照里的 playerdata 盖回去。
+            // 顺手记下死亡那一刻的朝向：原版重生会把俯仰角归零，复活后由 restoreViewDirection 补回来。
+            deathYaw = minecraft.player.getYRot();
+            deathPitch = minecraft.player.getXRot();
+            moveRespawnPointHere(minecraft);
             Rewind.LOGGER.info("Rewind: player is dead, respawning before the rollback");
             minecraft.player.respawn();
             lastOutcome = Outcome.NONE;
             lastMessage = "";
+            restoreEffect = RewindTransition.Effect.DEATH;
             phase = Phase.AWAITING_RESPAWN;
             phaseTicks = 0;
             return;
         }
+        restoreEffect = RewindTransition.Effect.GAUSSIAN_BLUR;
         beginRestore(minecraft);
     }
 
@@ -333,14 +357,90 @@ public final class CheckpointController {
         }
         // 回滚窗口在这一刻就打开：从淡入开始，任何世界落盘都是马上要被覆盖掉的
         Rewind.beginDiscard();
-        // 先让画面开始高斯模糊；等淡入到满强度（世界在视觉上已经糊住）再真正回滚
-        RewindTransition.start(RewindTransition.Effect.GAUSSIAN_BLUR);
+        // 先让画面开始过渡（效果由 restoreEffect 决定）；等淡入到满强度再真正回滚
+        RewindTransition.start(restoreEffect);
+    }
+
+    /**
+     * 把玩家的重生点临时挪到他现在站的位置，好让紧接着的原版重生把人留在原地。
+     *
+     * <p>客户端与集成服务器在同一个进程里，所以直接把这件事排到服务端线程上（和 {@code submitWork} 一样），
+     * 不需要额外的网络包；先排任务、再发重生请求，服务端那边这个任务一定先跑。{@code forced = true}：
+     * 死亡地点多半不是床 / 重生锚，不强制的话原版会忽略这个重生点、退回世界出生点。
+     */
+    private static void moveRespawnPointHere(Minecraft minecraft) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        LocalPlayer player = minecraft.player;
+        if (server == null || player == null) {
+            return;
+        }
+        UUID uuid = player.getUUID();
+        ResourceKey<Level> dimension = player.level().dimension();
+        BlockPos pos = player.blockPosition();
+        float yRot = player.getYRot();
+        float xRot = player.getXRot();
+        server.execute(() -> {
+            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(uuid);
+            if (serverPlayer != null) {
+                serverPlayer.setRespawnPosition(
+                        new ServerPlayer.RespawnConfig(
+                                LevelData.RespawnData.of(dimension, pos, yRot, xRot), true),
+                        false);
+            }
+        });
+    }
+
+    /**
+     * 把死亡那一刻的朝向写回客户端。原版重生会把俯仰角强制归零（{@code PlayerList.respawn} 里的
+     * {@code moveTo(..., yaw, 0)}），只挪重生点是不够的——不补的话一复活就是「直视前方」。
+     * 连插值用的 {@code O} 值一起写，免得第一帧从 0 插值过去。
+     */
+    private static void restoreViewDirection(Minecraft minecraft) {
+        LocalPlayer player = minecraft.player;
+        if (player == null) {
+            return;
+        }
+        player.setYRot(deathYaw);
+        player.setXRot(deathPitch);
+        player.yRotO = deathYaw;
+        player.xRotO = deathPitch;
+    }
+
+    /**
+     * 「死亡后自动回溯」：只在「活着 → 死」的那一下触发一次，目标是时间线的头
+     * （{@link RewindApi#currentSlot}，也就是世界当前站着的那个存档点）。
+     *
+     * <p>只有单人、且没在建点 / 回溯途中才会动手（{@link #ensureUsable}）；没有可回溯的节点时只写一条日志。
+     * 死亡时客户端可能已经进了死亡流程，真正的「先重生再回滚」由 {@link #requestRestore} 负责。
+     */
+    private static void tickDeathRollback(Minecraft minecraft) {
+        if (minecraft.player == null || !minecraft.player.isDeadOrDying()) {
+            // 活着就重新武装：下一次死亡还会再触发
+            deathRollbackFired = false;
+            return;
+        }
+        if (deathRollbackFired || !RewindServerConfig.rollbackOnDeath()) {
+            return;
+        }
+        deathRollbackFired = true;
+        if (!ensureUsable(minecraft)) {
+            return;
+        }
+        Path world = RewindApi.worldRoot(minecraft.getSingleplayerServer());
+        String target = RewindApi.currentSlot(world);
+        if (target.isEmpty()) {
+            Rewind.LOGGER.warn("Rewind: player died but the timeline has no node to roll back to");
+            return;
+        }
+        Rewind.LOGGER.info("Rewind: player died, rolling back to the timeline head {}", target);
+        requestRestore(target, "death");
     }
 
     // ------------------------------------------------------------------ tick
 
     public static void tick(Minecraft minecraft) {
         if (phase == Phase.IDLE) {
+            tickDeathRollback(minecraft);
             return;
         }
         phaseTicks++;
@@ -350,6 +450,7 @@ public final class CheckpointController {
                 // 死亡界面上的回溯：已经请求原版重生，等客户端真的活过来（新的 LocalPlayer 到位、
                 // 死亡界面被 handleRespawn 关掉）再开始。这里不碰过渡——那几帧交给原版重生自己的画面。
                 if (minecraft.player != null && !minecraft.player.isRemoved() && !minecraft.player.isDeadOrDying()) {
+                    restoreViewDirection(minecraft);
                     beginRestore(minecraft);
                     return;
                 }

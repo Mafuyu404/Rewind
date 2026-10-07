@@ -205,6 +205,11 @@
         .ore-theme .tree-card.now-card{border-color:var(--green)}
         .tree-chart .tree-card.now-card:hover{border-color:var(--green)}
         .ore-theme .tree-card.now-card.is-full{cursor:default}
+        /* 「死亡后自动回溯」的目标槽位：红框标出来。它就是时间线的头（世界当前站着的存档点），
+           开关关着时不标（那时候死亡不回溯，标红是误导）。同样只能靠颜色——AUI 只画实线边框。 */
+        .ore-theme .slot-card.death-target{border-color:var(--red)}
+        .ore-theme .special-card.death-target{border-color:var(--red)}
+        .ore-theme .tree-card.death-target{border-color:var(--red)}
         .tree-head{order:1;flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:8px}
         .tree-head .slot-title{flex:1 1 auto;min-width:0}
         .tree-card .slot-clock{order:2;flex:0 0 auto}

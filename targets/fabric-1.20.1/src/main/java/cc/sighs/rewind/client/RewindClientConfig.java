@@ -14,7 +14,7 @@ import net.fabricmc.loader.api.FabricLoader;
 /**
  * 过渡参数的客户端配置，落在 {@code config/rewind-client.properties}。
  *
- * <p>两种过渡（存档的饱和度提高、读档的高斯模糊）的所有可调项都在这里，默认值与代码里原本写死的
+ * <p>各段过渡效果（存档的饱和度、读档的模糊、死亡回溯的模糊 + 红边）的所有可调项都在这里，默认值与代码里原本写死的
  * 常量一致，所以不改配置就是原来的观感。
  *
  * <p>值只在配置加载时抄进 static 字段，读的时候就是普通字段访问——后处理每帧都要读它，
@@ -32,6 +32,7 @@ public final class RewindClientConfig {
     public static final float DEFAULT_SATURATION_FADE_OUT_SECONDS = 0.15F;
     public static final float DEFAULT_SATURATION_BOOST = 1.5F;
     public static final float DEFAULT_BLUR_FADE_OUT_SECONDS = 0.05F;
+    public static final float DEFAULT_DEATH_FADE_OUT_SECONDS = 0.6F;
     public static final float DEFAULT_BLUR_RADIUS = 13.0F;
     public static final int DEFAULT_RESTORE_SETTLE_TICKS = 10;
     /** 「存档过渡强度」的可调范围（就是配置里那个饱和度倍数）。 */
@@ -55,6 +56,7 @@ public final class RewindClientConfig {
     private static final String KEY_SATURATION_FADE_OUT = "transition.saturationFadeOutSeconds";
     private static final String KEY_SATURATION_BOOST = "transition.saturationBoost";
     private static final String KEY_BLUR_FADE_OUT = "transition.blurFadeOutSeconds";
+    private static final String KEY_DEATH_FADE_OUT = "transition.deathFadeOutSeconds";
     private static final String KEY_BLUR_RADIUS = "transition.blurRadius";
     private static final String KEY_RESTORE_SETTLE_TICKS = "transition.restoreSettleTicks";
     private static final String KEY_TREE_LAYOUT = "gui.treeLayout";
@@ -65,14 +67,16 @@ public final class RewindClientConfig {
     private static final List<String> HEADER_LINES = Arrays.asList(
             "过渡参数（客户端）：存档 = 饱和度，读档 = 模糊。",
             "Transition settings (client): save = saturation, restore = blur.",
-            KEY_FADE_IN + "：淡入时长（秒），两种过渡共用。",
-            KEY_FADE_IN + ": Fade-in duration in seconds, shared by both transitions.",
+            KEY_FADE_IN + "：淡入时长（秒），所有过渡共用。",
+            KEY_FADE_IN + ": Fade-in duration in seconds, shared by every transition.",
             KEY_SATURATION_FADE_OUT + "：存档过渡的淡出时长（秒）。",
             KEY_SATURATION_FADE_OUT + ": Saturation fade-out duration in seconds.",
             KEY_SATURATION_BOOST + "：存档过渡满强度时的饱和度倍数（1.5 = 2.5 倍）。",
             KEY_SATURATION_BOOST + ": Saturation multiplier at full strength (1.5 = 2.5x).",
             KEY_BLUR_FADE_OUT + "：读档过渡的淡出时长（秒）。",
             KEY_BLUR_FADE_OUT + ": Blur fade-out duration in seconds.",
+            KEY_DEATH_FADE_OUT + "：死亡回溯过渡的淡出时长（秒）：那圈视野红边消失得有多快。",
+            KEY_DEATH_FADE_OUT + ": Fade-out duration in seconds for the death-rollback transition.",
             KEY_BLUR_RADIUS + "：读档过渡满强度时的模糊半径（像素）。",
             KEY_BLUR_RADIUS + ": Blur radius at full strength, in pixels.",
             KEY_RESTORE_SETTLE_TICKS + "：读档后等待区块到位的上限（tick）。",
@@ -91,6 +95,7 @@ public final class RewindClientConfig {
     private static volatile float storedSaturationFadeOutSeconds = DEFAULT_SATURATION_FADE_OUT_SECONDS;
     private static volatile float storedSaturationBoost = DEFAULT_SATURATION_BOOST;
     private static volatile float storedBlurFadeOutSeconds = DEFAULT_BLUR_FADE_OUT_SECONDS;
+    private static volatile float storedDeathFadeOutSeconds = DEFAULT_DEATH_FADE_OUT_SECONDS;
     private static volatile float storedBlurRadius = DEFAULT_BLUR_RADIUS;
     private static volatile int storedRestoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
     private static volatile boolean storedTreeLayout = DEFAULT_TREE_LAYOUT;
@@ -101,6 +106,7 @@ public final class RewindClientConfig {
     private static float saturationFadeOutSeconds = DEFAULT_SATURATION_FADE_OUT_SECONDS;
     private static float saturationBoostValue = DEFAULT_SATURATION_BOOST;
     private static float blurFadeOutSeconds = DEFAULT_BLUR_FADE_OUT_SECONDS;
+    private static float deathFadeOutSeconds = DEFAULT_DEATH_FADE_OUT_SECONDS;
     private static float blurRadiusValue = DEFAULT_BLUR_RADIUS;
     private static int restoreSettleTicksValue = DEFAULT_RESTORE_SETTLE_TICKS;
     private static boolean treeLayoutValue = DEFAULT_TREE_LAYOUT;
@@ -122,6 +128,7 @@ public final class RewindClientConfig {
         float saturationFadeOut = DEFAULT_SATURATION_FADE_OUT_SECONDS;
         float saturationBoost = DEFAULT_SATURATION_BOOST;
         float blurFadeOut = DEFAULT_BLUR_FADE_OUT_SECONDS;
+        float deathFadeOut = DEFAULT_DEATH_FADE_OUT_SECONDS;
         float blurRadius = DEFAULT_BLUR_RADIUS;
         int restoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
         boolean treeLayout = DEFAULT_TREE_LAYOUT;
@@ -140,6 +147,8 @@ public final class RewindClientConfig {
                         DEFAULT_SATURATION_BOOST);
                 blurFadeOut = parseFloat(properties.getProperty(KEY_BLUR_FADE_OUT),
                         DEFAULT_BLUR_FADE_OUT_SECONDS);
+                deathFadeOut = parseFloat(properties.getProperty(KEY_DEATH_FADE_OUT),
+                        DEFAULT_DEATH_FADE_OUT_SECONDS);
                 blurRadius = parseFloat(properties.getProperty(KEY_BLUR_RADIUS), DEFAULT_BLUR_RADIUS);
                 restoreSettleTicks = parseInt(properties.getProperty(KEY_RESTORE_SETTLE_TICKS),
                         DEFAULT_RESTORE_SETTLE_TICKS);
@@ -153,6 +162,7 @@ public final class RewindClientConfig {
             saturationFadeOut = DEFAULT_SATURATION_FADE_OUT_SECONDS;
             saturationBoost = DEFAULT_SATURATION_BOOST;
             blurFadeOut = DEFAULT_BLUR_FADE_OUT_SECONDS;
+            deathFadeOut = DEFAULT_DEATH_FADE_OUT_SECONDS;
             blurRadius = DEFAULT_BLUR_RADIUS;
             restoreSettleTicks = DEFAULT_RESTORE_SETTLE_TICKS;
             treeLayout = DEFAULT_TREE_LAYOUT;
@@ -164,6 +174,7 @@ public final class RewindClientConfig {
         storedSaturationFadeOutSeconds = (float) clamp(saturationFadeOut, MIN_SECONDS, MAX_SECONDS);
         storedSaturationBoost = clamp(saturationBoost, MIN_SATURATION_BOOST, MAX_SATURATION_BOOST);
         storedBlurFadeOutSeconds = (float) clamp(blurFadeOut, MIN_SECONDS, MAX_SECONDS);
+        storedDeathFadeOutSeconds = (float) clamp(deathFadeOut, MIN_SECONDS, MAX_SECONDS);
         storedBlurRadius = clamp(blurRadius, MIN_BLUR_RADIUS, MAX_BLUR_RADIUS);
         storedRestoreSettleTicks = Math.max(0, Math.min(200, restoreSettleTicks));
         storedTreeLayout = treeLayout;
@@ -179,15 +190,16 @@ public final class RewindClientConfig {
         saturationFadeOutSeconds = storedSaturationFadeOutSeconds;
         saturationBoostValue = storedSaturationBoost;
         blurFadeOutSeconds = storedBlurFadeOutSeconds;
+        deathFadeOutSeconds = storedDeathFadeOutSeconds;
         blurRadiusValue = storedBlurRadius;
         restoreSettleTicksValue = storedRestoreSettleTicks;
         treeLayoutValue = storedTreeLayout;
         sortModeValue = storedSortMode;
         treeDirectionValue = storedTreeDirection;
         Rewind.LOGGER.info(
-                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
-                fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds, blurRadiusValue,
-                restoreSettleTicksValue, treeLayoutValue, sortModeValue, treeDirectionValue);
+                "Rewind: transition config fadeIn={}s saturationFadeOut={}s saturationBoost={} blurFadeOut={}s deathFadeOut={}s blurRadius={} restoreSettleTicks={}, gui treeLayout={} sortMode={} treeDirection={}",
+                fadeInSeconds, saturationFadeOutSeconds, saturationBoostValue, blurFadeOutSeconds, deathFadeOutSeconds,
+                blurRadiusValue, restoreSettleTicksValue, treeLayoutValue, sortModeValue, treeDirectionValue);
     }
 
     private static boolean parseBoolean(String raw, boolean fallback) {
@@ -246,6 +258,10 @@ public final class RewindClientConfig {
 
     public static float blurFadeOutSeconds() {
         return blurFadeOutSeconds;
+    }
+
+    public static float deathFadeOutSeconds() {
+        return deathFadeOutSeconds;
     }
 
     public static float blurRadius() {
@@ -367,6 +383,7 @@ public final class RewindClientConfig {
         lines.add(KEY_SATURATION_FADE_OUT + "=" + storedSaturationFadeOutSeconds);
         lines.add(KEY_SATURATION_BOOST + "=" + storedSaturationBoost);
         lines.add(KEY_BLUR_FADE_OUT + "=" + storedBlurFadeOutSeconds);
+        lines.add(KEY_DEATH_FADE_OUT + "=" + storedDeathFadeOutSeconds);
         lines.add(KEY_BLUR_RADIUS + "=" + storedBlurRadius);
         lines.add(KEY_RESTORE_SETTLE_TICKS + "=" + storedRestoreSettleTicks);
         lines.add(KEY_TREE_LAYOUT + "=" + storedTreeLayout);

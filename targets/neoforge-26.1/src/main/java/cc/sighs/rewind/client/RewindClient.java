@@ -44,7 +44,7 @@ public final class RewindClient {
     }
 
     public static void setup(IEventBus modBus) {
-        // 过渡参数（两种效果的所有可调项）落在 run/config/rewind-client.toml
+        // 过渡参数（所有可调项）落在 run/config/rewind-client.toml
         ModList.get().getModContainerById(Rewind.MOD_ID).ifPresent(container -> RewindClientConfig.register(container, modBus));
         // 把「带过渡的异步入口」接到状态机上：RewindApi.requestCheckpoint/requestRollback 从此等价于按 F7/F8
         CheckpointController.installApiBridge();

@@ -18,7 +18,8 @@ import net.fabricmc.loader.api.FabricLoader;
  * 服务端行为的配置，落在 {@code config/rewind-common.properties}。
  *
  * <p>目前分三组：{@code autoCheckpoint}（跟着原版自动保存建点、间隔分钟数）、{@code rollback}
- * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块，以及两次回溯之间的读档冷却）与
+ * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块、死亡后要不要自动回溯到时间线的头，
+ * 以及两次回溯之间的读档冷却）与
  * {@code slots}（界面上那排手动编号卡片 {@code s1}…{@code sN} 的数量）。它跟玩家有没有客户端
  * 没关系，两边都要有。
  *
@@ -45,6 +46,7 @@ public final class RewindServerConfig {
     private static final String KEY_INTERVAL_MINUTES = "autoCheckpoint.intervalMinutes";
     private static final String KEY_SYNC_RECIPE_BOOK = "rollback.syncRecipeBook";
     private static final String KEY_SYNC_CHUNKS_NEAR_PLAYER = "rollback.syncChunksNearPlayer";
+    private static final String KEY_ROLLBACK_ON_DEATH = "rollback.rollbackOnDeath";
     private static final String KEY_ROLLBACK_COOLDOWN_SECONDS = "rollback.cooldownSeconds";
     private static final String KEY_MANUAL_SLOT_COUNT = "slots.manualSlotCount";
     /** 写进文件开头的说明；一行一条，写的时候前面各加一个 {@code # }。 */
@@ -61,6 +63,8 @@ public final class RewindServerConfig {
             KEY_SYNC_RECIPE_BOOK + ": Re-sync the player's recipe book on rollback.",
             KEY_SYNC_CHUNKS_NEAR_PLAYER + "：回溯时只同步读回玩家视野内的区块。",
             KEY_SYNC_CHUNKS_NEAR_PLAYER + ": On rollback, sync-load only chunks near the player.",
+            KEY_ROLLBACK_ON_DEATH + "：死亡后自动回溯到时间线上最近的那个节点。",
+            KEY_ROLLBACK_ON_DEATH + ": Roll back to the nearest node on the timeline after death.",
             KEY_ROLLBACK_COOLDOWN_SECONDS + "：读档冷却（秒），0 = 关闭。",
             KEY_ROLLBACK_COOLDOWN_SECONDS + ": Rollback cooldown in seconds, 0 = off.",
             "槽位布局。",
@@ -71,9 +75,10 @@ public final class RewindServerConfig {
     /** 配置文件里那一份值：{@link #setAutoCheckpointEnabled} / {@link #setAutoSaveIntervalMinutes} 落盘时写的就是它。 */
     private static volatile boolean storedAutoCheckpointEnabled = DEFAULT_AUTO_CHECKPOINT;
     private static volatile int storedAutoSaveIntervalMinutes = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
-    /** 回溯行为的三份值：{@link #setSyncRecipeBook} / {@link #setSyncChunksNearPlayer} / {@link #setRollbackCooldownSeconds} 落盘时写的就是它们。 */
+    /** 回溯行为的四份值：{@link #setSyncRecipeBook} / {@link #setSyncChunksNearPlayer} / {@link #setRollbackOnDeath} / {@link #setRollbackCooldownSeconds} 落盘时写的就是它们。 */
     private static volatile boolean storedSyncRecipeBook = RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK;
     private static volatile boolean storedSyncChunksNearPlayer = RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
+    private static volatile boolean storedRollbackOnDeath = RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH;
     private static volatile int storedRollbackCooldownSeconds = RollbackSettings.DEFAULT_COOLDOWN_SECONDS;
     /** 手动槽位数量那一份值：{@link #setManualSlotCount} 落盘时写的就是它。 */
     private static volatile int storedManualSlotCount = SlotSettings.DEFAULT_MANUAL_SLOT_COUNT;
@@ -93,6 +98,7 @@ public final class RewindServerConfig {
         int minutes = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
         boolean recipeBook = RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK;
         boolean chunksNearPlayer = RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
+        boolean rollbackOnDeath = RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH;
         int cooldownSeconds = RollbackSettings.DEFAULT_COOLDOWN_SECONDS;
         int manualSlots = SlotSettings.DEFAULT_MANUAL_SLOT_COUNT;
         try {
@@ -107,6 +113,8 @@ public final class RewindServerConfig {
                         RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK);
                 chunksNearPlayer = parseBoolean(properties.getProperty(KEY_SYNC_CHUNKS_NEAR_PLAYER),
                         RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
+                rollbackOnDeath = parseBoolean(properties.getProperty(KEY_ROLLBACK_ON_DEATH),
+                        RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH);
                 cooldownSeconds = parseCooldownSeconds(properties.getProperty(KEY_ROLLBACK_COOLDOWN_SECONDS));
                 manualSlots = parseManualSlotCount(properties.getProperty(KEY_MANUAL_SLOT_COUNT));
             }
@@ -116,6 +124,7 @@ public final class RewindServerConfig {
             minutes = DEFAULT_AUTO_SAVE_INTERVAL_MINUTES;
             recipeBook = RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK;
             chunksNearPlayer = RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
+            rollbackOnDeath = RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH;
             cooldownSeconds = RollbackSettings.DEFAULT_COOLDOWN_SECONDS;
             manualSlots = SlotSettings.DEFAULT_MANUAL_SLOT_COUNT;
         }
@@ -124,19 +133,22 @@ public final class RewindServerConfig {
         storedAutoSaveIntervalMinutes = AutoCheckpointSettings.clampMinutes(minutes);
         storedSyncRecipeBook = recipeBook;
         storedSyncChunksNearPlayer = chunksNearPlayer;
+        storedRollbackOnDeath = rollbackOnDeath;
         storedRollbackCooldownSeconds = RollbackSettings.clampCooldownSeconds(cooldownSeconds);
         storedManualSlotCount = SlotSettings.clamp(manualSlots);
         AutoCheckpointSettings.apply(storedAutoCheckpointEnabled, storedAutoSaveIntervalMinutes);
-        RollbackSettings.apply(storedSyncRecipeBook, storedSyncChunksNearPlayer, storedRollbackCooldownSeconds);
+        RollbackSettings.apply(storedSyncRecipeBook, storedSyncChunksNearPlayer, storedRollbackCooldownSeconds,
+                storedRollbackOnDeath);
         SlotSettings.apply(storedManualSlotCount);
         // 无论刚才是读出来的还是兜底出来的，都写回去一次：文件缺失时补上，值被夹过时纠正
         write();
 
         Rewind.LOGGER.info(
                 "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={} "
-                        + "cooldownSeconds={}, slots manualSlotCount={}",
+                        + "rollbackOnDeath={} cooldownSeconds={}, slots manualSlotCount={}",
                 AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes(),
                 RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer(),
+                RollbackSettings.rollbackOnDeath(),
                 RollbackSettings.cooldownSeconds(),
                 SlotSettings.manualSlotCount());
     }
@@ -203,6 +215,19 @@ public final class RewindServerConfig {
         storedSyncRecipeBook = value;
         write();
         Rewind.LOGGER.info("Rewind: rollback syncRecipeBook={} (toggled)", value);
+    }
+
+    /** 死亡后要不要自动回溯到时间线上最近的那个节点。 */
+    public static boolean rollbackOnDeath() {
+        return RollbackSettings.rollbackOnDeath();
+    }
+
+    /** 改「死亡后自动回溯」开关并立刻落盘。 */
+    public static void setRollbackOnDeath(boolean value) {
+        RollbackSettings.setRollbackOnDeath(value);
+        storedRollbackOnDeath = value;
+        write();
+        Rewind.LOGGER.info("Rewind: rollback rollbackOnDeath={} (toggled)", value);
     }
 
     /** 读档冷却时长（秒；0 表示不冷却）。 */
@@ -303,6 +328,7 @@ public final class RewindServerConfig {
         lines.add(KEY_INTERVAL_MINUTES + "=" + storedAutoSaveIntervalMinutes);
         lines.add(KEY_SYNC_RECIPE_BOOK + "=" + storedSyncRecipeBook);
         lines.add(KEY_SYNC_CHUNKS_NEAR_PLAYER + "=" + storedSyncChunksNearPlayer);
+        lines.add(KEY_ROLLBACK_ON_DEATH + "=" + storedRollbackOnDeath);
         lines.add(KEY_ROLLBACK_COOLDOWN_SECONDS + "=" + storedRollbackCooldownSeconds);
         lines.add(KEY_MANUAL_SLOT_COUNT + "=" + storedManualSlotCount);
         try {

@@ -14,7 +14,7 @@ import net.neoforged.neoforge.common.ModConfigSpec;
  * 服务端行为的配置，落在 {@code run/config/rewind-common.toml}。
  *
  * <p>目前分三组：{@code autoCheckpoint}（跟着原版自动保存建点、间隔分钟数）、{@code rollback}
- * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块、以及两次回溯之间的「读档冷却」）
+ * （回溯时要不要重发配方书、要不要只同步读回玩家视野内的区块、死亡后要不要自动回溯、以及两次回溯之间的「读档冷却」）
  * 与 {@code slots}（界面上那排手动编号卡片 {@code s1}…{@code sN} 的数量）。它是 COMMON 配置而不是 CLIENT，
  * 因为建点与回滚都发生在服务端线程上，跟玩家有没有客户端没关系。
  *
@@ -36,6 +36,7 @@ public final class RewindServerConfig {
     private static ModConfigSpec.IntValue autoSaveIntervalMinutes;
     private static ModConfigSpec.BooleanValue syncRecipeBook;
     private static ModConfigSpec.BooleanValue syncChunksNearPlayer;
+    private static ModConfigSpec.BooleanValue rollbackOnDeath;
     private static ModConfigSpec.IntValue rollbackCooldownSeconds;
     private static ModConfigSpec.IntValue manualSlotCount;
     private static ModConfigSpec spec;
@@ -73,6 +74,10 @@ public final class RewindServerConfig {
                 .comment("回溯时只同步读回玩家视野内的区块。",
                         "On rollback, sync-load only chunks near the player.")
                 .define("syncChunksNearPlayer", RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER);
+        rollbackOnDeath = builder
+                .comment("死亡后自动回溯到时间线上最近的那个节点。",
+                        "Roll back to the nearest node on the timeline after death.")
+                .define("rollbackOnDeath", RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH);
         rollbackCooldownSeconds = builder
                 .comment("读档冷却（秒），0 = 关闭。",
                         "Rollback cooldown in seconds, 0 = off.")
@@ -118,7 +123,10 @@ public final class RewindServerConfig {
                             : syncChunksNearPlayer.get(),
                     rollbackCooldownSeconds == null
                             ? RollbackSettings.DEFAULT_COOLDOWN_SECONDS
-                            : rollbackCooldownSeconds.get());
+                            : rollbackCooldownSeconds.get(),
+                    rollbackOnDeath == null
+                            ? RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH
+                            : rollbackOnDeath.get());
             SlotSettings.apply(manualSlotCount == null
                     ? SlotSettings.DEFAULT_MANUAL_SLOT_COUNT
                     : manualSlotCount.get());
@@ -126,14 +134,16 @@ public final class RewindServerConfig {
             AutoCheckpointSettings.apply(DEFAULT_AUTO_CHECKPOINT, DEFAULT_AUTO_SAVE_INTERVAL_MINUTES);
             RollbackSettings.apply(RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK,
                     RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER,
-                    RollbackSettings.DEFAULT_COOLDOWN_SECONDS);
+                    RollbackSettings.DEFAULT_COOLDOWN_SECONDS,
+                    RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH);
             SlotSettings.apply(SlotSettings.DEFAULT_MANUAL_SLOT_COUNT);
         }
         Rewind.LOGGER.info(
                 "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={} "
-                        + "cooldown={}s, slots manualSlotCount={}",
+                        + "rollbackOnDeath={} cooldown={}s, slots manualSlotCount={}",
                 AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes(),
                 RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer(),
+                RollbackSettings.rollbackOnDeath(),
                 RollbackSettings.cooldownSeconds(),
                 SlotSettings.manualSlotCount());
     }
@@ -190,6 +200,11 @@ public final class RewindServerConfig {
         return RollbackSettings.syncChunksNearPlayer();
     }
 
+    /** 死亡后要不要自动回溯到时间线上最近的那个节点。 */
+    public static boolean rollbackOnDeath() {
+        return RollbackSettings.rollbackOnDeath();
+    }
+
     /** 读档冷却时长（秒，已夹到范围内）；0 表示不冷却。 */
     public static int rollbackCooldownSeconds() {
         return RollbackSettings.cooldownSeconds();
@@ -214,6 +229,16 @@ public final class RewindServerConfig {
         }
         save();
         Rewind.LOGGER.info("Rewind: rollback syncChunksNearPlayer={} (toggled)", value);
+    }
+
+    /** 改「死亡后自动回溯」开关并立刻落盘。 */
+    public static void setRollbackOnDeath(boolean value) {
+        RollbackSettings.setRollbackOnDeath(value);
+        if (rollbackOnDeath != null) {
+            rollbackOnDeath.set(value);
+        }
+        save();
+        Rewind.LOGGER.info("Rewind: rollback rollbackOnDeath={} (toggled)", value);
     }
 
     /** 改这个开关并立刻落盘。 */

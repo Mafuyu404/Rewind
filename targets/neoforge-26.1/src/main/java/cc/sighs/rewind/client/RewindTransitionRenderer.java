@@ -21,7 +21,7 @@ import net.minecraft.resources.Identifier;
 
 /**
  * 存档点 / 回溯的过渡后处理。每帧结束时把整幅画面（或它的冻结副本）重新采样一遍画回主渲染目标：
- * 存档是饱和度提高，读档是高斯模糊，强度由 {@link RewindTransition} 的包络给出。
+ * 存档是饱和度提高，读档是高斯模糊，死亡回溯是模糊 + 视野红边，强度由 {@link RewindTransition} 的包络给出。
  *
  * <p>为什么要有「冻结副本」：回溯要走原版那条「关世界 → 换文件 → 重开世界」的路，
  * 中间有一段客户端根本没有 {@code ClientLevel} 的时间（原版用加载界面盖住它）。
@@ -54,16 +54,18 @@ public final class RewindTransitionRenderer {
     /** 单帧最多按多少秒推进包络，避免卡顿后效果跳变。 */
     private static final float MAX_FRAME_SECONDS = 0.1F;
     /** 着色器里的效果编号，必须和 rewind_transition.fsh 保持一致。 */
+    private static final int MODE_BLUR = 0;
     private static final int MODE_SATURATION = 1;
+    private static final int MODE_DEATH = 2;
     /** 顶点着色器：原版的全屏三角形。 */
     private static final Identifier VERTEX_SHADER = Identifier.withDefaultNamespace("core/screenquad");
     /** 片元着色器：{@code assets/rewind/shaders/post/rewind_transition.fsh}。 */
     private static final Identifier FRAGMENT_SHADER = Identifier.fromNamespaceAndPath("rewind", "post/rewind_transition");
     /** uniform 块名，必须和 fsh 里的 {@code layout(std140) uniform RewindConfig} 一致。 */
     private static final String UNIFORM_GROUP = "RewindConfig";
-    /** 四个 float + 一个 vec2，见 fsh 里 uniform 块的字段顺序。 */
+    /** 五个 float + 一个 vec2，见 fsh 里 uniform 块的字段顺序。 */
     private static final int UNIFORM_SIZE = new Std140SizeCalculator()
-            .putFloat().putFloat().putFloat().putFloat().putVec2().get();
+            .putFloat().putFloat().putFloat().putFloat().putFloat().putVec2().get();
 
     private static RenderPipeline pipeline;
     private static boolean pipelineFailed;
@@ -84,8 +86,8 @@ public final class RewindTransitionRenderer {
 
         boolean active = RewindTransition.isActive();
         if (active) {
-            // 两种效果都是后处理：存档提高饱和度，读档高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
-            // 遮罩」把那段盖过去）
+            // 各种过渡都是后处理：存档提高饱和度，读档 / 死亡回溯做高斯模糊（世界中间会消失，靠「模糊 + 最后一帧
+            // 遮罩」把那段盖过去），死亡回溯再叠一层视野红边
             renderTransition(minecraft);
         }
     }
@@ -161,6 +163,18 @@ public final class RewindTransitionRenderer {
                 0, 0, 0, 0, main.width, main.height);
     }
 
+    /** 当前过渡对应的着色器效果编号。 */
+    private static int effectMode() {
+        switch (RewindTransition.effect()) {
+            case SATURATION:
+                return MODE_SATURATION;
+            case DEATH:
+                return MODE_DEATH;
+            default:
+                return MODE_BLUR;
+        }
+    }
+
     /** 每帧把包络强度、效果编号、配置里的浓度/半径以及像素尺寸写进 uniform buffer。 */
     private static GpuBuffer uploadUniforms(int width, int height) {
         if (uniformRing == null) {
@@ -181,9 +195,10 @@ public final class RewindTransitionRenderer {
                 .mapBuffer(buffer, false, true)) {
             Std140Builder builder = Std140Builder.intoBuffer(view.data());
             builder.putFloat(RewindTransition.strength())
-                    .putFloat(RewindTransition.effect() == RewindTransition.Effect.SATURATION ? MODE_SATURATION : 0.0F)
+                    .putFloat((float) effectMode())
                     .putFloat(RewindClientConfig.saturationBoost())
                     .putFloat(RewindClientConfig.blurRadius())
+                    .putFloat(RewindTransition.deathReach())
                     .putVec2(1.0F / width, 1.0F / height);
         }
         return buffer;

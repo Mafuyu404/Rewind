@@ -61,7 +61,7 @@ dependencies {
     // （典型：MenuScreens.m_96206_）。MDG legacyforge 会为 implementation/runtimeOnly/compileOnly/
     // api/compileOnlyApi 各自动建一个「同名前面加 mod」的 remapping 配置（modImplementation …），
     // 把里面的 SRG 产物经 RemappingTransform 转成 named 再回灌给原配置，所以 mod 依赖必须写在这里。
-    modImplementation 'com.sighs:ApricityUI-forge-1.20.1:1.2.6'
+    modImplementation 'com.sighs:ApricityUI-forge-1.20.1:1.2.7'
     // Mixin 注解处理器必须显式挂在 annotationProcessor 上：java 插件会把 -processorpath 设成这个
     // 配置（而不是编译类路径），不声明的话处理器根本不会跑，`mixin { add ... }` 声明的 refmap /
     // tsrg 不会生成，reobfJar 会因为找不到映射文件直接失败。版本与 Forge 用户 dev 里跑的那份一致；
