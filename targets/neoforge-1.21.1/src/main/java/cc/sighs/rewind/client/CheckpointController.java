@@ -53,6 +53,8 @@ import net.minecraft.world.level.storage.WorldData;
 public final class CheckpointController {
     public enum Phase {
         IDLE,
+        /** 在死亡界面里回溯：已经请求原版重生，等客户端拿到新的 LocalPlayer 再开始。 */
+        AWAITING_RESPAWN,
         /** 过渡淡入完成之后，在服务端线程上跑 {@link RewindApi} 的同步入口，客户端这边轮询。 */
         WORKING,
         /** F8（回退路径）：等过渡淡入完成，然后关世界。 */
@@ -79,6 +81,8 @@ public final class CheckpointController {
 
     private static final int TIMEOUT_PAUSE_TICKS = 200;
     private static final int TIMEOUT_REWRITE_TICKS = 24000;
+    /** 等原版重生回来的上限（tick）；死亡界面上的回溯用它兜底，超时按失败处理。 */
+    private static final int TIMEOUT_RESPAWN_TICKS = 200;
     /** 服务端线程上的活干得异常久时，每隔这么多 tick 记一条警告（不硬超时）。 */
     private static final int WORK_WARN_INTERVAL_TICKS = 6000;
 
@@ -285,8 +289,27 @@ public final class CheckpointController {
             Rewind.LOGGER.warn("Rewind: {}", lastMessage);
             return;
         }
-        closeScreen(minecraft);
         requestSource = source;
+        // 死亡界面上的回溯要特殊处理：客户端在死亡满 1 秒后会把 LocalPlayer 从客户端世界里移除
+        // （ClientLevel.shouldTickDeath → LocalPlayer.tickDeath），而回溯只把「服务端那个玩家」救活，
+        // 客户端手里那个已经移除的实体找不回来——结果就是一个不能动、不能交互、没有手也没有 HUD 的
+        // 幽灵玩家。所以先走一次原版重生（等价于点死亡界面的「重生」），等新的 LocalPlayer 到位再回溯；
+        // 重生把人放到出生点无所谓，回溯随后会用快照把位置 / 物品 / 血量一起盖回来。
+        if (minecraft.player != null && minecraft.player.isDeadOrDying()) {
+            Rewind.LOGGER.info("Rewind: player is dead, respawning before the rollback");
+            minecraft.player.respawn();
+            lastOutcome = Outcome.NONE;
+            lastMessage = "";
+            phase = Phase.AWAITING_RESPAWN;
+            phaseTicks = 0;
+            return;
+        }
+        beginRestore(minecraft);
+    }
+
+    /** 真正开始回溯：摘屏、起过渡，然后等服务端线程上的 {@link RewindApi#rollbackInPlace}（或退回关世界重开）。 */
+    private static void beginRestore(Minecraft minecraft) {
+        closeScreen(minecraft);
         lastOutcome = Outcome.NONE;
         lastMessage = "";
         lastRestoreInPlace = false;
@@ -315,6 +338,18 @@ public final class CheckpointController {
         phaseTicks++;
 
         switch (phase) {
+            case AWAITING_RESPAWN: {
+                // 死亡界面上的回溯：已经请求原版重生，等客户端真的活过来（新的 LocalPlayer 到位、
+                // 死亡界面被 handleRespawn 关掉）再开始。这里不碰过渡——那几帧交给原版重生自己的画面。
+                if (minecraft.player != null && !minecraft.player.isRemoved() && !minecraft.player.isDeadOrDying()) {
+                    beginRestore(minecraft);
+                    return;
+                }
+                if (phaseTicks > TIMEOUT_RESPAWN_TICKS) {
+                    fail(minecraft, "rewind.error.respawn_timeout", "");
+                }
+                return;
+            }
             case WORKING: {
                 // 等过渡淡入到位再动手，这样真正危险的动作玩家看不到
                 if (!RewindTransition.isFadeInDone()) {

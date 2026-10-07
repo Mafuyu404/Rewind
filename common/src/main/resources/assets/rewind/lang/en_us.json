@@ -23,6 +23,7 @@
   "rewind.error.close_failed": "Failed to close the world",
   "rewind.error.no_snapshot": "No checkpoint yet - press F7 first",
   "rewind.error.rollback_cooldown": "Rollback is on cooldown",
+  "rewind.error.respawn_timeout": "Timed out waiting to respawn before the rollback",
 
   "rewind.cmd.status_empty": "No checkpoints yet",
 

@@ -23,6 +23,7 @@
   "rewind.error.close_failed": "关闭世界失败",
   "rewind.error.no_snapshot": "还没有存档点，先按 F7 建立一个",
   "rewind.error.rollback_cooldown": "读档冷却中，暂时不能再次读档",
+  "rewind.error.respawn_timeout": "回溯前等待重生超时",
 
   "rewind.cmd.status_empty": "还没有任何存档点",
 
