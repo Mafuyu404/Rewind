@@ -31,7 +31,8 @@
   ],
   "client": [
     "KeyBindsListMixins$OnlyRewindKeys",
-    "KeyBindsListMixins$KeyBindsScreenAccess"
+    "KeyBindsListMixins$KeyBindsScreenAccess",
+    "WorldRepairMixins$SelectWorldRepair"
   ],
   "injectors": {
     "defaultRequire": 1

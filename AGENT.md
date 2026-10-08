@@ -154,6 +154,7 @@ target/server     WorldFlush / NeoForgeRewindPlatform  强制落盘 + 玩家展�
                   RewindServerConfig / RewindVersion  配置落盘与 mod 版本号（值存 common）
 client            CheckpointController            客户端策略：过渡、界面、失败回退、状态机
                   RewindTreeScreen                「时间树」管理界面（Java 侧驱动 AUI 的 HTML）
+                  WorldRepair / WorldRepairScreen 进世界之前的修复入口（世界列表上那颗按钮）
                   RewindClient / RewindCommands   热键与命令，只做转交
 ```
 
@@ -174,6 +175,47 @@ client            CheckpointController            客户端策略：过渡、界
   > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `RegionHeader.fromSnapshot` 从块存储拼出前 8 KiB（读活动存档那份走 `RegionHeader.read`）。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」这几条。
 
 `CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
+
+### 进世界之前的修复入口（世界选择界面上的「用存档点修复这个世界」）
+
+F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开，就按不了 F8。所以世界选择界面
+（`SelectWorldScreen`）的底部按钮区多了一颗按钮：对当前选中的存档，用它的存档点把磁盘上的世界文件
+覆盖回去——这是唯一一条「进世界之前」的恢复路径。
+
+- **走的是离线那条管线**：目标槽位由 `RewindApi.repairSlot(worldRoot)` 挑（时间线的头，取不到时退回
+  保存时间最新的完整存档点，一个都没有时返回空串），动作是 `RewindApi.restoreFiles(worldRoot, slot)`
+  （纯文件操作、任意线程）。**不要**改走 `requestRollback`：那条带过渡的在线管线要求
+  `minecraft.level` 与 `player` 都在。
+- **世界根目录自己拼**：`Minecraft.getInstance().getLevelSource()` + 存档名——1.21.1 / 26.1 是
+  `getLevelPath(levelId)`，1.20.1 那个方法是 private，走 `getBaseDir().resolve(levelId)`。也**不要**
+  为了拿路径去 `createAccess` / `validateAndCreateAccess`：它会创建并锁住 `session.lock`。
+- **按钮只在选中某个存档之后可用**，与旁边「进入世界」那颗一致；判据是「没有被别的实例锁着
+  （`LevelSummary.isDisabled()`）且 `repairSlot` 不为空」。1.21.1 / 26.1 挂在原版的
+  `updateButtonStatus(LevelSummary)` 上（那是选中项变化时原版自己走的钩子）；1.20.1 那个方法只收两个
+  布尔量、拿不到存档，只能每 tick 对一次当前选中行（选中项没变就直接返回，不重复读索引）。
+- **按钮放哪儿按版本算**——四个版本的**存档行里都没有按钮**，per-world 的操作全在底部按钮区，所以这颗
+  也放底部：1.21.1 列表与按钮之间本来就有 60 像素空档（列表底是 `height - 112`），直接占一排新的；
+  26.1 往 footer 那个 4 列 `GridLayout` 里加第三排，并把 footer 高度从 60 放宽到 84（列表因此短 24 像素）；
+  1.20.1 底部两排已经排满，所以把原版那两排整体上移 24 像素、列表跟着收短 24 像素（一个
+  `@Redirect Button$Builder.bounds` 就挪了 6 颗，加一个 `@ModifyArg` 改列表高度）。
+- **界面会把状态说出来**（`WorldRepairScreen`）：目标存档点、会覆盖什么、进行到哪一步 / 结果。这与
+  「界面不放提示、只写日志」的约定不冲突——它是玩家主动打开的修复入口，做完不告诉人只能去翻日志；
+  聊天框与提示条仍然一概不碰，日志照写。还原跑在后台线程上（拷大存档要几秒），结果回渲染线程再显示。
+- **它绕不过读档冷却**：`restoreFiles` 照样会因 `rollback.cooldownSeconds` 被拒，被拒时界面显示原因、
+  日志里也有。
+
+**mixin 侧两条硬性经验（四个 target 通用）**：
+
+1. **内层 mixin 要 `extends Screen`**，否则 `addRenderableWidget` / `repositionElements` 这些 protected
+   方法跨包调不到（mixin 类与 `Screen` 不同包、也不是它的子类）。构造器只为喂 javac，Mixin 不合并它。
+   `@Invoker` 那条路**走不通**：0.8.5 的注解处理器对**带参数的方法**解析不出来——它拿「点号形式的名字」
+   去比「描述符形式的签名」，只有 `()V` 这类没有参数的方法才碰巧对得上（所以现有的
+   `@Invoker("initCapabilities")` 能过，`@Invoker("addRenderableWidget")` 会直接**编译失败**：
+   `Could not locate @Invoker target ...`）。注意这条只在跑得动注解处理器的 target 上暴露
+   （forge / fabric；两个 NeoForge target 没有 refmap 也不需要它，编译期不会校验）。
+2. **mixin 里不要写 lambda / 匿名类**：它们会被编成挂在 mixin 类上的合成成员，合并进目标类之后那份引用
+   不保证还对得上。按钮的回调因此做成 `WorldRepair.PRESS`（常驻实例、方法体写在普通类里），
+   「当前选中的存档」也由 mixin 通过 `WorldRepair.rememberSelection(...)` 交给普通类存着。
 
 ### 回滚窗口与快速重启（neoforge-1.21.1）
 

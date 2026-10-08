@@ -34,7 +34,9 @@
     "ClientScreenMixins",
     "ClientWorldLoadMixins",
     "KeyBindsListMixins$OnlyRewindKeys",
-    "KeyBindsListMixins$KeyBindsScreenAccess"
+    "KeyBindsListMixins$KeyBindsScreenAccess",
+    "WorldRepairMixins$WorldListEntryAccess",
+    "WorldRepairMixins$SelectWorldRepair"
   ],
   "injectors": {
     "defaultRequire": 1

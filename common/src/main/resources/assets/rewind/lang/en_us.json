@@ -147,5 +147,14 @@
   "rewind.ui.biome.unknown": "Unknown biome",
   "rewind.ui.size.bytes": "%s B",
   "rewind.ui.size.kb": "%s KB",
-  "rewind.ui.size.mb": "%s MB"
+  "rewind.ui.size.mb": "%s MB",
+
+  "rewind.repair.button": "Repair from checkpoint",
+  "rewind.repair.title": "Repair \"%s\" with a checkpoint",
+  "rewind.repair.target": "Restore to checkpoint: %s",
+  "rewind.repair.warning": "Overwrites the world files on disk (no backup).",
+  "rewind.repair.start": "Restore now",
+  "rewind.repair.running": "Restoring…",
+  "rewind.repair.done": "Restored (%s)",
+  "rewind.repair.failed": "Failed: %s"
 }

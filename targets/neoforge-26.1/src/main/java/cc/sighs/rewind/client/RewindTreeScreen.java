@@ -1840,7 +1840,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         return tr("rewind.ui.slot.manual", SnapshotLayout.manualIndex(slot));
     }
 
-    private static String title(String slot, @Nullable SnapshotMeta meta) {
+    static String title(String slot, @Nullable SnapshotMeta meta) {
         if (meta != null && !meta.displayName.isEmpty()) {
             return meta.displayName;
         }
@@ -1922,7 +1922,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         return tr("rewind.ui.time.days", hours / 24L);
     }
 
-    private static String absoluteTime(long savedAtMillis) {
+    static String absoluteTime(long savedAtMillis) {
         return ABSOLUTE_TIME.format(Instant.ofEpochMilli(savedAtMillis));
     }
 

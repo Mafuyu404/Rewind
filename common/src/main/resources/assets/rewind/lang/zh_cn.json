@@ -147,5 +147,14 @@
   "rewind.ui.biome.unknown": "未知群系",
   "rewind.ui.size.bytes": "%s B",
   "rewind.ui.size.kb": "%s KB",
-  "rewind.ui.size.mb": "%s MB"
+  "rewind.ui.size.mb": "%s MB",
+
+  "rewind.repair.button": "用存档点修复",
+  "rewind.repair.title": "用存档点修复「%s」",
+  "rewind.repair.target": "还原到存档点：%s",
+  "rewind.repair.warning": "这会用存档点覆盖磁盘上的世界文件，不会先做备份。",
+  "rewind.repair.start": "开始还原",
+  "rewind.repair.running": "正在还原……",
+  "rewind.repair.done": "还原完成（%s）",
+  "rewind.repair.failed": "还原失败：%s"
 }

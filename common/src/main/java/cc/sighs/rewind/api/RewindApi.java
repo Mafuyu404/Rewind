@@ -315,6 +315,40 @@ public final class RewindApi {
         }
     }
 
+    /**
+     * 「用存档点修复这个世界」该用哪个存档点：时间线的头（{@link #currentSlot}，世界当前站着的那个），
+     * 头不可用（不存在 / 还没写完 / 指向已被删掉的槽位）时退回保存时间最新的那个完整存档点。
+     *
+     * <p>纯文件查询，任意线程可调——进世界之前的世界列表界面就靠它挑目标。一个可用的完整存档点
+     * 都没有时返回空串。
+     */
+    public static String repairSlot(Path worldRoot) {
+        if (worldRoot == null) {
+            return "";
+        }
+        try {
+            SnapshotIndex index = SnapshotIndex.load(SnapshotLayout.indexFile(worldRoot));
+            SnapshotMeta head = index.get(index.getHead());
+            if (head != null && head.isComplete()) {
+                return head.slot;
+            }
+            SnapshotMeta newest = null;
+            for (String slot : index.slots()) {
+                SnapshotMeta meta = index.get(slot);
+                if (meta == null || !meta.isComplete()) {
+                    continue;
+                }
+                if (newest == null || meta.savedAtMillis > newest.savedAtMillis) {
+                    newest = meta;
+                }
+            }
+            return newest == null ? "" : newest.slot;
+        } catch (IOException e) {
+            RewindLog.LOGGER.error("Rewind: failed to read snapshot index", e);
+            return "";
+        }
+    }
+
     /** 槽位的背包快照；没建过点或文件缺失时返回空快照。 */
     public static SnapshotInventory readInventory(Path worldRoot, String slot) {
         return SnapshotInventory.load(SnapshotLayout.inventoryFile(worldRoot, slot));
