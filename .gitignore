@@ -6,3 +6,4 @@ out/
 .idea/
 
 .env
+/targets/neoforge-26.1/libs

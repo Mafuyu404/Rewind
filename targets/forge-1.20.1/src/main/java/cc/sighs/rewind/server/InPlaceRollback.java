@@ -1,7 +1,7 @@
 package cc.sighs.rewind.server;
 
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -30,7 +30,9 @@ import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.common.compat.SophisticatedCoreCompat;
 import cc.sighs.rewind.common.config.RollbackSettings;
+import cc.sighs.rewind.common.core.SavedDataRollback;
 import cc.sighs.rewind.common.store.SnapshotBlockIo;
+import cc.sighs.rewind.snapshot.RegionHeader;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
 import cc.sighs.rewind.snapshot.SnapshotBlocks;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
@@ -379,7 +381,7 @@ public final class InPlaceRollback {
         if (snapshotDirs.size() < 2) {
             return false;
         }
-        int[] header = snapshotHeader(cache, store, slotDir, blocks, snapshotDirs.get(1), regionFileName(pos));
+        int[] header = RegionHeader.fromSnapshot(cache, store, slotDir, blocks, snapshotDirs.get(1), regionFileName(pos));
         return header[(pos.x & 31) + (pos.z & 31) * 32] != 0;
     }
 
@@ -415,75 +417,13 @@ public final class InPlaceRollback {
         int index = (pos.x & 31) + (pos.z & 31) * 32;
         int count = Math.min(liveDirs.size(), snapshotDirs.size());
         for (int i = 0; i < count; i++) {
-            int[] live = readRegionHeader(cache, liveDirs.get(i).resolve(name));
-            int[] snapshot = snapshotHeader(cache, store, slotDir, blocks, snapshotDirs.get(i), name);
+            int[] live = RegionHeader.read(cache, liveDirs.get(i).resolve(name));
+            int[] snapshot = RegionHeader.fromSnapshot(cache, store, slotDir, blocks, snapshotDirs.get(i), name);
             if (live[index] != snapshot[index] || live[1024 + index] != snapshot[1024 + index]) {
                 return true;
             }
         }
         return false;
-    }
-
-    /**
-     * 快照里这个 region 文件的头部。
-     *
-     * <p>块编码的 .mca 在槽位里没有实体文件，所以得从块存储拼出来——反正只要前两个 4 KiB 块。
-     * 老格式的槽位（映射里没有这个文件）照旧直接读文件。
-     */
-    private static int[] snapshotHeader(Map<Path, int[]> cache, SnapshotBlockStore store, Path slotDir,
-            SnapshotBlocks blocks, Path snapshotDir, String name) throws IOException {
-        Path file = snapshotDir.resolve(name);
-        SnapshotBlocks.Entry entry = blocks == null ? null : blocks.get(SnapshotLayout.relativize(slotDir, file));
-        if (entry == null) {
-            return readRegionHeader(cache, file);
-        }
-        int[] cached = cache.get(file);
-        if (cached != null) {
-            return cached;
-        }
-        byte[] prefix = store.readPrefix(entry.hashes, 8192);
-        int[] header = decodeHeader(prefix);
-        cache.put(file, header);
-        return header;
-    }
-
-    /**
-     * 头部前 4 KiB 是 1024 个偏移，接着 4 KiB 是 1024 个时间戳；读成 int[2048]。
-     * 文件不存在或读不满时返回全 0，这样「两边都没有这个区块」会被判成没变，
-     * 而不是因为「region 文件在一边不存在」就整片误判。
-     */
-    private static int[] readRegionHeader(Map<Path, int[]> cache, Path file) {
-        int[] cached = cache.get(file);
-        if (cached != null) {
-            return cached;
-        }
-        int[] header = new int[2048];
-        if (Files.isRegularFile(file)) {
-            byte[] bytes = new byte[8192];
-            try (InputStream in = Files.newInputStream(file)) {
-                if (in.readNBytes(bytes, 0, 8192) == 8192) {
-                    header = decodeHeader(bytes);
-                }
-            } catch (IOException e) {
-                Rewind.LOGGER.warn("Rewind: cannot read region header {}", file, e);
-            }
-        }
-        cache.put(file, header);
-        return header;
-    }
-
-    /** 把 8 KiB 的 region 头部解析成 2048 个 int（前 1024 个偏移、后 1024 个时间戳，都是大端）。 */
-    private static int[] decodeHeader(byte[] bytes) {
-        int[] header = new int[2048];
-        int count = Math.min(2048, bytes.length / 4);
-        for (int i = 0; i < count; i++) {
-            int base = i * 4;
-            header[i] = ((bytes[base] & 0xFF) << 24)
-                    | ((bytes[base + 1] & 0xFF) << 16)
-                    | ((bytes[base + 2] & 0xFF) << 8)
-                    | (bytes[base + 3] & 0xFF);
-        }
-        return header;
     }
 
     // ------------------------------------------------------------------ 2. 强制卸载
@@ -999,47 +939,87 @@ public final class InPlaceRollback {
      */
     private static void restoreSavedData(MinecraftServer server, Path slotDir, SnapshotMirror.Result mirror)
             throws IOException {
-        // 1. 作废各维度的存档数据缓存：下一次访问会从（已被快照覆盖的）磁盘重读。
-        //    被强引用的那几个条目要排除在外（见 isStronglyReferencedSavedData），它们由下面几步显式重建。
-        for (ServerLevel level : server.getAllLevels()) {
-            cacheOf(level.getDataStorage()).keySet().removeIf(id -> !isStronglyReferencedSavedData(id));
+        // 骨架（作废 → 重建 → 记日志 → 通知模组丢缓存）在 common，这里只提供版本相关的四处钩子。
+        SavedDataRollback.restore(new SavedDataHook(server, slotDir), mirror.files);
+    }
+
+    /** {@link SavedDataRollback.Hook} 的 1.20.1 实现：持有这次回滚用的服务器与槽位目录。 */
+    private static final class SavedDataHook implements SavedDataRollback.Hook {
+        private final MinecraftServer server;
+        private final Path slotDir;
+
+        SavedDataHook(MinecraftServer server, Path slotDir) {
+            this.server = server;
+            this.slotDir = slotDir;
         }
 
-        // 2. 袭击：ServerLevel.raids 是 final 字段，摘掉缓存条目再 computeIfAbsent 读回刚还原的文件。
-        //    1.20.1 的 Raids 没有 factory(ServerLevel)，用与 ServerLevel 构造函数逐字相同的那对 lambda。
-        for (ServerLevel level : server.getAllLevels()) {
-            String fileId = Raids.getFileId(level.dimensionTypeRegistration());
-            DimensionDataStorage levelStorage = level.getDataStorage();
-            cacheOf(levelStorage).remove(fileId);
-            levelAccess(level).rewind$setRaids(levelStorage.computeIfAbsent(
-                    tag -> Raids.load(level, tag), () -> new Raids(level), fileId));
-        }
-
-        // 3. 等级能力：摘掉缓存条目 → initCapabilities() 重建空表并从刚还原的 capabilities.dat 灌回
-        for (ServerLevel level : server.getAllLevels()) {
-            cacheOf(level.getDataStorage()).remove(LevelCapabilityData.ID);
-            levelAccess(level).rewind$initCapabilities();
-        }
-
-        // 4. 记分板：把快照内容灌回活着的 ServerScoreboard
-        Path file = slotDir.resolve("data").resolve("scoreboard.dat");
-        if (Files.isRegularFile(file)) {
-            CompoundTag data = NbtIo.readCompressed(file.toFile()).getCompound("data");
-            ServerScoreboard scoreboard = server.getScoreboard();
-            for (Objective objective : new ArrayList<>(scoreboard.getObjectives())) {
-                scoreboard.removeObjective(objective);
+        /**
+         * 1. 作废各维度的存档数据缓存：下一次访问会从（已被快照覆盖的）磁盘重读。
+         *    被强引用的那几个条目要排除在外（见 {@link #isStronglyReferencedSavedData}），它们由
+         *    {@link #rebuild()} 显式重建。
+         */
+        @Override
+        public int purge() {
+            int removed = 0;
+            for (ServerLevel level : server.getAllLevels()) {
+                Map<String, SavedData> cache = cacheOf(level.getDataStorage());
+                int before = cache.size();
+                cache.keySet().removeIf(id -> !isStronglyReferencedSavedData(id));
+                removed += before - cache.size();
             }
-            for (PlayerTeam team : new ArrayList<>(scoreboard.getPlayerTeams())) {
-                scoreboard.removePlayerTeam(team);
-            }
-            new ScoreboardSaveData(scoreboard).load(data);
+            return removed;
         }
 
-        // 5. 把这次覆盖到的存档数据文件打进日志；非原版的聚合一条 WARN 提示关开关
-        logRestoredSavedData(mirror.files);
+        @Override
+        public void rebuild() {
+            // 2. 袭击：ServerLevel.raids 是 final 字段，摘掉缓存条目再 computeIfAbsent 读回刚还原的文件。
+            //    1.20.1 的 Raids 没有 factory(ServerLevel)，用与 ServerLevel 构造函数逐字相同的那对 lambda。
+            for (ServerLevel level : server.getAllLevels()) {
+                String fileId = Raids.getFileId(level.dimensionTypeRegistration());
+                DimensionDataStorage levelStorage = level.getDataStorage();
+                cacheOf(levelStorage).remove(fileId);
+                levelAccess(level).rewind$setRaids(levelStorage.computeIfAbsent(
+                        tag -> Raids.load(level, tag), () -> new Raids(level), fileId));
+            }
 
-        // 6. 模组自己缓存的解码结果不归世界生命周期管，只能单独通知它们丢掉
-        SophisticatedCoreCompat.clearCaches();
+            // 3. 等级能力：摘掉缓存条目 → initCapabilities() 重建空表并从刚还原的 capabilities.dat 灌回
+            for (ServerLevel level : server.getAllLevels()) {
+                cacheOf(level.getDataStorage()).remove(LevelCapabilityData.ID);
+                levelAccess(level).rewind$initCapabilities();
+            }
+
+            // 4. 记分板：把快照内容灌回活着的 ServerScoreboard
+            Path file = slotDir.resolve("data").resolve("scoreboard.dat");
+            if (Files.isRegularFile(file)) {
+                CompoundTag data;
+                try {
+                    data = NbtIo.readCompressed(file.toFile()).getCompound("data");
+                } catch (IOException e) {
+                    // 读不出来就照旧让整段收尾失败：由 run 的 catch (Throwable) 记同一句日志
+                    throw new UncheckedIOException(e);
+                }
+                ServerScoreboard scoreboard = server.getScoreboard();
+                for (Objective objective : new ArrayList<>(scoreboard.getObjectives())) {
+                    scoreboard.removeObjective(objective);
+                }
+                for (PlayerTeam team : new ArrayList<>(scoreboard.getPlayerTeams())) {
+                    scoreboard.removePlayerTeam(team);
+                }
+                new ScoreboardSaveData(scoreboard).load(data);
+            }
+        }
+
+        /** 存档数据文件（相对世界根）→ id：转发给本类那份（落盘布局随版本不同）。 */
+        @Override
+        public String idOf(String mirroredFile) {
+            return savedDataId(mirroredFile);
+        }
+
+        /** 原版 id 白名单：转发给本类那份（名单与前缀规则随版本不同）。 */
+        @Override
+        public boolean isVanillaId(String id) {
+            return SavedDataRollback.matchesPrefixes(id, VANILLA_SAVED_DATA, VANILLA_SAVED_DATA_PREFIXES);
+        }
     }
 
     /**
@@ -1050,7 +1030,13 @@ public final class InPlaceRollback {
             "scoreboard", "raids", "raids_end", "random_sequences", "chunks", "idcounts", "capabilities");
 
     /**
-     * 被长生命周期对象用**字段**强引用的存档数据 id：清缓存时要把它们排除在外。
+     * 原版 id 白名单里的前缀规则：{@code map_*} 是地图、{@code raids_*} 是各维度袭击、
+     * {@code command_storage_*} 是命令存储。
+     */
+    private static final Set<String> VANILLA_SAVED_DATA_PREFIXES = Set.of("map_", "raids_", "command_storage_");
+
+    /**
+     * 被长生命周期对象用**字段**强引用、必须显式重建的存档数据 id 精确名单。
      *
      * <p>理由见 {@link #restoreSavedData}：{@code save()} 只遍历缓存，条目被摘掉又没人重新登记，
      * 对应的 {@code .dat} 就再也不落盘。1.20.1（vanilla + Forge）里这类 id 有：
@@ -1063,68 +1049,35 @@ public final class InPlaceRollback {
      *       （{@code MinecraftServer.java:294}，注册点 {@code createLevels} :339）。</li>
      *   <li>{@code capabilities}（Forge）：{@code ServerLevel.capabilityData}
      *       （{@code ServerLevel.java:196}，{@code initCapabilities} :1421）。</li>
-     *   <li>{@code *_index}：{@code LegacyStructureDataHandler.indexMap} 持有的
-     *       {@code StructureFeatureIndexSavedData}（{@code LegacyStructureDataHandler.java:46,186}）。
-     *       只对「从 1.13 之前升级上来的世界」存在，同样没有重建入口。</li>
      * </ul>
      *
      * <p>命令存储 {@code command_storage_*} 表面上也被 {@code MinecraftServer.commandStorage.namespaces}
      * 强引用，但它的 {@code get} / {@code set} 每次都走存储层（{@code CommandStorage.get/set}），清掉缓存
      * 条目后会重新读盘、装进一个新的 {@code Container}：内容跟着回滚，也继续正常落盘，所以**不保护**。
      */
-    private static boolean isStronglyReferencedSavedData(String id) {
-        return id.equals("scoreboard")
-                || id.equals("raids") || id.equals("raids_nether") || id.equals("raids_end")
-                || id.equals("random_sequences")
-                || id.equals("capabilities")
-                || id.endsWith("_index");
-    }
+    private static final Set<String> PROTECTED_SAVED_DATA = Set.of(
+            "scoreboard", "raids", "raids_nether", "raids_end", "random_sequences", "capabilities");
 
     /**
-     * 把这次回滚覆盖到的 {@code <维度>/data/*.dat} 打进日志，遇到模组数据再额外提示一句。
+     * 被长生命周期对象用**字段**强引用的存档数据 id：清缓存时要把它们排除在外。
      *
-     * <p>这是「原地回滚少了什么」唯一能被看见的线索：模组把世界状态写在这些文件里时，磁盘回滚了、
-     * 内存不一定回滚，游戏里就可能出现「文件回去了、数据没回去」。真遇到了就关掉
-     * {@code rollback.inPlaceRollback} 走完整重开那条路。
+     * <p>除 {@link #PROTECTED_SAVED_DATA} 那份精确名单外，还有一条后缀规则 {@code *_index}：
+     * {@code LegacyStructureDataHandler.indexMap} 持有的 {@code StructureFeatureIndexSavedData}
+     * （{@code LegacyStructureDataHandler.java:46,186}）。只对「从 1.13 之前升级上来的世界」存在，
+     * 同样没有重建入口。
      */
-    private static void logRestoredSavedData(List<String> files) {
-        List<String> dataFiles = new ArrayList<>();
-        Set<String> modIds = new HashSet<>();
-        for (String file : files) {
-            if (!isSavedDataFile(file)) {
-                continue;
-            }
-            dataFiles.add(file);
-            String id = savedDataId(file);
-            if (!isVanillaSavedData(id)) {
-                modIds.add(id);
-            }
-        }
-        if (dataFiles.isEmpty()) {
-            return;
-        }
-        Rewind.LOGGER.info("Rewind: saved data covered by this rollback: {}", String.join(", ", dataFiles));
-        if (!modIds.isEmpty()) {
-            Rewind.LOGGER.warn("Rewind: rollback also covers non-vanilla saved data ({}); if a mod's data looks like it "
-                            + "did not roll back, disable rollback.inPlaceRollback and retry",
-                    String.join(", ", modIds));
-        }
-    }
-
-    /** {@code data/*.dat} 或 {@code <维度>/data/*.dat} 才算存档数据文件。 */
-    private static boolean isSavedDataFile(String relative) {
-        return relative.endsWith(".dat") && (relative.startsWith("data/") || relative.contains("/data/"));
+    private static boolean isStronglyReferencedSavedData(String id) {
+        return SavedDataRollback.matchesSuffixes(id, PROTECTED_SAVED_DATA, Set.of("_index"));
     }
 
     /** 文件名去掉目录与 {@code .dat} 就是 id（见 {@code DimensionDataStorage.getDataFile}）。 */
+    /** 存档数据文件（相对世界根）→ id：1.20.1 / 1.21.1 的扁平布局映射在 common，这里只转发。 */
     private static String savedDataId(String relative) {
-        String name = relative.substring(relative.lastIndexOf('/') + 1);
-        return name.substring(0, name.length() - ".dat".length());
+        return SavedDataRollback.flatIdOf(relative);
     }
 
     private static boolean isVanillaSavedData(String id) {
-        return VANILLA_SAVED_DATA.contains(id)
-                || id.startsWith("map_") || id.startsWith("raids_") || id.startsWith("command_storage_");
+        return SavedDataRollback.matchesPrefixes(id, VANILLA_SAVED_DATA, VANILLA_SAVED_DATA_PREFIXES);
     }
 
     private static Map<String, SavedData> cacheOf(DimensionDataStorage storage) {

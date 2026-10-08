@@ -142,10 +142,12 @@ cd targets\neoforge-1.21.1
 common/api        RewindApi / RewindResult        对外门面；不引用任何 net.minecraft.* 类
 common/core       CheckpointWriter                纯机制：索引、清单、块映射、镜像编排、时间线边
                   AutoCheckpoint                  「跟着原版自动保存建点」的策略与跳过条件
+                  SavedDataRollback               回滚收尾把内存里的存档数据拉回存档点：骨架在 common，版本相关的四处走 Hook
 common/store      SnapshotStore / SnapshotBlockIo 槽位记录的删除改名、块存储会话
 common/spi        RewindPlatform / FlushOutcome    平台能力接口（世界根、线程判定、落盘、原地回滚）
                   RollbackOutcome / RewindPlatforms  结果类型与平台实现的持有者
 common/snapshot   Snapshot*                       槽位文件格式、索引、镜像、块存储、背包快照
+                  RegionHeader                    .mca 头部 8 KiB 的解析（四版本格式一致；快照侧走块存储拼）
 common/compat     SophisticatedCoreCompat         可选模组适配：回滚后清掉第三方自己缓存的解码结果（反射它的 clearCache()，类加载器问平台要；不在场就什么都不做）
 target/server     WorldFlush / NeoForgeRewindPlatform  强制落盘 + 玩家展示信息；SPI 的 NeoForge 1.21.1 实现
                   InPlaceRollback                 原地回滚引擎（吃原版内部结构，按版本各写一份）
@@ -157,6 +159,8 @@ client            CheckpointController            客户端策略：过渡、界
 
 `server` 之外的共享部分都在 common；target 侧只留「平台怎么接」和「原版内部长什么样」。`RewindPlatform` 的参数是各平台自己的服务器对象（不透明的 `Object`），target 在模组构造阶段 `RewindPlatforms.install(new NeoForgeRewindPlatform())` 装好，`RewindApi` 才拿得到世界根、线程判定与落盘/回滚能力。
 
+**迁移边界看的是「是不是 MC-无关」，不是「有没有版本差异」**：`InPlaceRollback` 里那几段（`.mca` 头部解析、存档数据回滚骨架、文件→id 分类与日志、保护/白名单判定）不碰 `net.minecraft.*`，四个 target 逐字节相同，所以都在 common（`RegionHeader` / `SavedDataRollback`）；而卸载 / 重载 / 玩家 / 世界时间那几百行**即使四个 target 逐字节相同也搬不动**——它们调用的原版内部结构要经各 target 自己的 mixin 访问器（`ChunkMapAccess` / `IOWorkerAccess` / …）和 `net.minecraft.*` 类型，common 引用不了。判据手法：`grep -rl` 比方法体 + 看签名/方法体里有没有 MC 类型或 `cc.sighs.mixin.*`。唯一剩下的一处 MC-无关重复是每个文件里那句一行的 `millisSince`（16 个调用点 × 4 份），迁移收益低于改动风险，暂时留着。
+
 - **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
 - **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位；时间树界面上的「读取」走的就是它们（「覆盖」不走——它要界面一直开着，见「时间树」一节）。
 - **原地回滚开关**：COMMON 配置 `rollback.inPlaceRollback`（`RollbackSettings.inPlaceRollback()`，默认开）。关掉之后 F8 / 界面上的「读取」都退回「关世界 → 覆盖 → 重开」那条路（`CheckpointController.beginRestore` 里是 `inPlaceEnabled && RewindServerConfig.inPlaceRollback()`）。原地回滚快，但它只保证**磁盘**与内存里那些被显式重建的状态回到过去——模组自己缓存的「解码后的世界状态」不归世界生命周期管，整合包里就可能出现「文件回滚了、游戏里看着没回滚」，那种情况就关掉这个开关。
@@ -167,7 +171,7 @@ client            CheckpointController            客户端策略：过渡、界
 - **槽位清单**：`SnapshotLayout.uiSlots()` = `auto`、`quick`，然后是 8 个手动槽位 `s1`..`s8`。`quick` 就是 F7/F8 用的 `DEFAULT_SLOT`；`auto` 是「跟着原版自动保存建点」用的槽位（见「自动存档点」一节），也可以手动覆盖。槽位名会当目录名用，所以 `isValidSlotName` 限定 `[A-Za-z0-9_-]`；玩家起的名字由 `isValidDisplayName` 限定 1-20 字符。
 - **结果**：`RewindResult` 是只读的（final 字段 + 静态工厂），`success` / `failure` / `millis` / `copiedFiles` / `skippedFiles` / `totalFiles` / `inPlace` / `summary`；`RewindApi.lastResult()` 给最近一次结果。`CheckpointController.lastRestore*()` 那几个给自测看的统计现在是它的转发。
 - **按 4 KiB 扇区共享数据块**：`region` / `entities` / `poi` 的 `.mca` 不再整份拷贝，而是切成 4 KiB 块、以内容哈希命名存进 `rewind_snapshots/blocks/`（`SnapshotBlockStore`），每个槽位只多一份 `<槽位>.blocks` 映射（`SnapshotBlocks`，格式 `<大小>\t<相对路径>\t<块哈希…>`）。于是**换一个槽位建点只为真正变了的扇区付字节**。同一份 30 MB 测试世界的实测：整文件级只能省 8.3%（只有「从来没被写过的文件」跳得过），按扇区切块省 **79.9%**（一个 8.9 MB 的 region 文件实际只动了 19.7% 的扇区，整文件级却要整份拷）。块是不可变的（临时文件 + 原子替换），所以多个槽位引用同一个块永远安全。映射和清单一样，必须在把槽位标成 `complete` 之前落盘。
-  > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `snapshotHeader` 从块存储拼出前 8 KiB。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」这几条。
+  > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `RegionHeader.fromSnapshot` 从块存储拼出前 8 KiB（读活动存档那份走 `RegionHeader.read`）。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」这几条。
 
 `CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
 
@@ -207,7 +211,7 @@ F8 默认走**原地回滚**（`cc.sighs.rewind.server.InPlaceRollback`）：世
 
 需要的原版内部入口全部集中在 `cc.sighs.mixin.RollbackAccessMixins`（`@Accessor` / `@Invoker`），业务代码不直接碰反射。`RollbackDiscardMixins` 另外挡掉了 `ChunkMap.save(ChunkAccess)`——卸载路径本身会调它，回滚窗口内整段跳过（省掉 `ChunkSerializer.write`）。
 
-**已知边界**：回滚只保证**磁盘**，加上「能被重新读回来的那部分内存状态」。收尾时先把每个维度（以及 26.1 的服务器级）存档数据缓存里**没被强引用**的条目全摘掉，让它们下次访问时从快照重读；被长生命周期对象用字段（或脏标记回调）钉住的那些必须显式重建，其中**能从磁盘重读内容的**才真回滚（袭击、记分板、等级附件 / 等级能力），**没有重建入口的**只保证「继续落盘」、内存内容留在原处、下次自动保存写回磁盘——各版本的清单不同（见「已知的跨 target 差异」）。⚠️ **摘一个条目之前先确认它还有没有别的登记点**：`DimensionDataStorage.save()` 只遍历缓存，摘掉又没人重新登记，那个 `.dat` 就再也不会被写（静默丢数据）。记分板另外有两个坑：它的缓存条目**不能摘**（`ServerScoreboard.dirtyListeners` 里存着它的脏标记回调），而且要先清空活着的记分板再灌内容（`Scoreboard.addObjective` 对重名会抛异常，原版日志里那句 `Error loading saved data: scoreboard`）——所以走的是「清 objective / team → `new ScoreboardSaveData(scoreboard).load(...)`」，不是 `computeIfAbsent`（后者每回滚一次就多加一条脏标记回调）。此外：卸载时还有生成任务在飞的少数区块会被跳过（日志里以 `stuck=` 计数出现）；只要区块内存里还有会被保存的实体，它就会被判成受影响并重载——实体回滚的代价与「视野内有多少带实体的区块」相关，这是实体存储没有脏标记的直接后果；**模组自己缓存的解码结果**（典型：精妙核心的 `StorageWrapperRepository`）不归世界生命周期管，只能靠针对性适配去清，没适配的模组就只能关掉 `rollback.inPlaceRollback` 走完整重开。
+**已知边界**：回滚只保证**磁盘**，加上「能被重新读回来的那部分内存状态」。收尾时先把每个维度（以及 26.1 的服务器级）存档数据缓存里**没被强引用**的条目全摘掉，让它们下次访问时从快照重读；被长生命周期对象用字段（或脏标记回调）钉住的那些必须显式重建，其中**能从磁盘重读内容的**才真回滚（袭击、记分板、等级附件 / 等级能力），**没有重建入口的**只保证「继续落盘」、内存内容留在原处、下次自动保存写回磁盘——各版本的清单不同（见「已知的跨 target 差异」）。⚠️ **摘一个条目之前先确认它还有没有别的登记点**：`DimensionDataStorage.save()` 只遍历缓存，摘掉又没人重新登记，那个 `.dat` 就再也不会被写（静默丢数据）。记分板另外有两个坑：它的缓存条目**不能摘**（`ServerScoreboard.dirtyListeners` 里存着它的脏标记回调），而且要先清空活着的记分板再灌内容（`Scoreboard.addObjective` 对重名会抛异常，原版日志里那句 `Error loading saved data: scoreboard`）——所以走的是「清 objective / team → `new ScoreboardSaveData(scoreboard).load(...)`」，不是 `computeIfAbsent`（后者每回滚一次就多加一条脏标记回调）。此外：卸载时还有生成任务在飞的少数区块会被跳过（日志里以 `stuck=` 计数出现）；只要区块内存里还有会被保存的实体，它就会被判成受影响并重载——实体回滚的代价与「视野内有多少带实体的区块」相关，这是实体存储没有脏标记的直接后果；**模组自己缓存的解码结果**（典型：精妙核心的 `StorageWrapperRepository`）不归世界生命周期管，只能靠针对性适配去清，没适配的模组就只能关掉 `rollback.inPlaceRollback` 走完整重开（精妙核心这层适配的**逐版本情形**写在 `SophisticatedCoreCompat` 的类注释里：1.21.1 / 26.1 的 Core 有那个缓存类、可清；1.20.1 的 Core **没有**这个类——那一版根本没有静态 wrapper 缓存，所以是「正确的空操作」；精妙也没有 1.20.1 的 Fabric 构建，Fabric 上永远不会命中）。
 
 自测里的耗时口径是「过渡淡入完成、真正开始动世界」到回溯结束，不含前面的淡入，两条路径用同一把尺子（`Rewind: rewind body finished in N ms`）。
 

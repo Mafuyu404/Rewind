@@ -15,8 +15,21 @@ import cc.sighs.rewind.common.spi.RewindPlatforms;
  * 的「原地回滚」与「已知边界」）。
  *
  * <p>这里是**纯反射、零依赖**：精妙核心不在场时 {@link #isLoaded()} 为 false，什么也不做；
- * 在场时调它的 {@code StorageWrapperRepository.clearCache()}（public static，模组自己在世界重载时也这么清）。
+ * 在场且那个缓存类存在时调它的 {@code StorageWrapperRepository.clearCache()}（public static，模组自己在世界重载时也这么清）。
  * 之所以不用 {@code compileOnly} 依赖，是因为四个 target 里只有一个装了它，反射是唯一一份代码能覆盖四个 target 的做法。
+ *
+ * <p><b>每个版本的实际情形（逐个 jar 核过）</b>：
+ * <ul>
+ *   <li>{@code neoforge-1.21.1}：Core 1.5.7.2381 里 {@code StorageWrapperRepository.clearCache()} 在 ✓，
+ *       实测（探针 + 端到端数据包）能真的清掉。</li>
+ *   <li>{@code neoforge-26.1}：Core 1.4.26.1688 里同样有这个方法（javap 核过），实测见 AGENT.md。</li>
+ *   <li>{@code forge-1.20.1}：Core 1.5.6.2378 里**没有这个类**——那一版根本没有静态 wrapper 缓存
+ *       （整包唯一的 Guava Cache 是 Create 兼容与配方缓存），所以这层适配在 1.20.1 上是**正确的空操作**，
+ *       内容回滚由 {@code SavedDataRollback} 那套（世界级 {@code sophisticatedbackpacks.dat}）与 playerdata 负责。</li>
+ *   <li>{@code fabric-1.20.1}：精妙背包/核心**没有 1.20.1 的 Fabric 构建**（Modrinth 上 1.20.1 只有
+ *       forge/neoforge），所以这条适配在 Fabric 上永远不会命中；代码仍在，将来有移植版就能直接用
+ *       （Fabric 只有 {@code modClassLoader} 那一步的差别，见 {@link RewindPlatform#modClassLoader(String)}）。</li>
+ * </ul>
  *
  * <p><b>加载器要问平台要</b>（{@link RewindPlatform#modClassLoader(String)}）：NeoForge / Forge 的模组是 JPMS
  * 模块，各自那个加载器只看得到自己读得到的模块，拿 common 自己那个去 {@code Class.forName} 是看不见它的
