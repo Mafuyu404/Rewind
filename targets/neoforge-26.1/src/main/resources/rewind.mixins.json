@@ -12,6 +12,7 @@
     "RollbackDiscardMixins$RegionFileDiscard",
     "RollbackDiscardMixins$SinglePlayerSaveDiscard",
     "RollbackDiscardMixins$LevelDataDiscard",
+    "RollbackAccessMixins$AttachmentHolderAccess",
     "RollbackAccessMixins$ChunkMapAccess",
     "RollbackAccessMixins$GenerationChunkHolderAccess",
     "RollbackAccessMixins$DistanceManagerAccess",

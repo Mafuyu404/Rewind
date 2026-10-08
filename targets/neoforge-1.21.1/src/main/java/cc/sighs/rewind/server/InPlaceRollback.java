@@ -16,6 +16,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
+import cc.sighs.mixin.RollbackAccessMixins.AttachmentHolderAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ChunkMapAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ChunkStorageAccess;
 import cc.sighs.mixin.RollbackAccessMixins.DimensionDataStorageAccess;
@@ -29,6 +30,7 @@ import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.mixin.RollbackAccessMixins.SimpleRegionStorageAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.compat.SophisticatedCoreCompat;
 import cc.sighs.rewind.common.config.RollbackSettings;
 import cc.sighs.rewind.common.store.SnapshotBlockIo;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
@@ -74,6 +76,8 @@ import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.PlayerTeam;
+import net.minecraft.world.scores.ScoreboardSaveData;
+import net.neoforged.neoforge.attachment.LevelAttachmentsSavedData;
 
 /**
  * 原地回滚：不关世界、不重开世界，在活着的集成服务器里把世界倒回存档点。
@@ -94,12 +98,15 @@ import net.minecraft.world.scores.PlayerTeam;
  *       被拷回来，其余文件本来就还是存档点内容。</li>
  *   <li><b>重载</b>：给卸载掉的区块重建 holder，让它们从（已还原的）磁盘读回来；原版的发送流水线
  *       会自动把新数据推给客户端。</li>
- *   <li><b>内存状态</b>：玩家 / 时间天气 / 被强引用的存档数据（记分板、袭击）单独还原。</li>
+ *   <li><b>内存状态</b>：玩家 / 时间天气单独还原；每个维度的存档数据缓存整体作废、从（已还原的）磁盘重读，
+ *       其中「被长生命周期对象强引用」的那几个（袭击、记分板、等级数据附件）显式重建。</li>
  * </ol>
  *
- * <p>已知边界（比「关世界再重开」那条路少了什么）：只还原上面列出的那几类 SavedData，其它
- * {@code <维度>/data/*.dat}（地图、自定义 boss 条等）只还原了磁盘文件，内存里的实例保持原样，
- * 会在下一次自动保存时把旧内容写回去。
+ * <p>已知边界（比「关世界再重开」那条路少了什么）：**磁盘**与「每次用时 {@code computeIfAbsent} 取一次」
+ * 的存档数据都能回滚（含模组写在 {@code <维度>/data/*.dat} 里的那些）；但**模组自己缓存的解码结果**
+ * 不归世界生命周期管，同一进程里还会被复用（典型：精妙核心的包装器缓存，见 {@link SophisticatedCoreCompat}），
+ * 也没有通用手段能替它清掉。装了这类模组、数据看起来没回滚时，把 COMMON 配置 {@code rollback.inPlaceRollback}
+ * 关掉，退回「关世界 → 覆盖 → 重开」那条路——服务端对象全部重建，模组跟着世界重载走一遍。
  */
 public final class InPlaceRollback {
     /** 卸载流水线的推进轮数上限：正常 1-2 轮就收敛，余量留给「还有生成任务在飞」的少数情况。 */
@@ -266,7 +273,7 @@ public final class InPlaceRollback {
             result.reloadMs += millisSince(stepNanos);
 
             try {
-                restoreSavedData(server, slotDir);
+                restoreSavedData(server, slotDir, mirror);
             } catch (Throwable t) {
                 Rewind.LOGGER.error("Rewind: failed to reload saved data in place", t);
             }
@@ -936,38 +943,173 @@ public final class InPlaceRollback {
                 .orElse(null);
     }
 
+    /** NeoForge 等级数据附件的存档 id（= {@code <维度>/data/neoforge_data_attachments.dat}）。 */
+    private static final String LEVEL_ATTACHMENTS_FILE_ID = "neoforge_data_attachments";
+
     /**
-     * 被强引用的 SavedData 要换掉实例（或者把内容重新灌进去）才算真回滚。
-     *
-     * <p>记分板：不能走 {@code DimensionDataStorage.computeIfAbsent}——那个存储实例是服务端建服时
-     * 单独创建的，{@code ServerLevel} 手里是另一个（同一个目录、不同对象），拿不到；而且
-     * {@code Scoreboard.addObjective} 对重名会抛异常，直接 load 到活着的记分板上必然失败
-     * （原版日志里那句 {@code Error loading saved data: scoreboard}）。所以先把现有 objective / team
-     * 清掉，再用 {@code ServerScoreboard.dataFactory().deserializer()} 把快照内容灌回同一个记分板对象；
-     * 老的那个 save data 实例仍然持有脏标记回调，读的是同一个记分板，下一次自动保存会写回正确内容。
-     *
-     * <p>袭击：{@code ServerLevel.raids} 是 final 字段，直接换实例。
+     * 原版（含 NeoForge 自己）会往 {@code <维度>/data/} 里写的那些存档数据 id。
+     * 不在这份名单里的就算「模组数据」——原地回滚只能保证它们的**磁盘文件**被还原。
      */
-    private static void restoreSavedData(MinecraftServer server, Path slotDir) throws IOException {
-        Path file = slotDir.resolve("data").resolve("scoreboard.dat");
-        if (Files.isRegularFile(file)) {
-            CompoundTag data = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap()).getCompound("data");
-            ServerScoreboard scoreboard = server.getScoreboard();
-            for (Objective objective : new ArrayList<>(scoreboard.getObjectives())) {
-                scoreboard.removeObjective(objective);
-            }
-            for (PlayerTeam team : new ArrayList<>(scoreboard.getPlayerTeams())) {
-                scoreboard.removePlayerTeam(team);
-            }
-            scoreboard.dataFactory().deserializer().apply(data, server.registryAccess());
+    private static final Set<String> VANILLA_SAVED_DATA = Set.of(
+            ScoreboardSaveData.FILE_ID, "raids", "raids_end", "random_sequences", "chunks", "idcounts",
+            LEVEL_ATTACHMENTS_FILE_ID);
+
+    /**
+     * 不该被「作废缓存」摘掉的存档数据 id。
+     *
+     * <p>{@code DimensionDataStorage.save()} **只遍历它自己的缓存**，所以条目一旦被摘掉又没人重新登记，
+     * 那个 {@code .dat} 就再也不会被写（静默丢数据）。下面这些正是被长生命周期对象用**字段**（或脏标记回调）
+     * 钉住的——不会再有人来 {@code computeIfAbsent} 一次：
+     *
+     * <ul>
+     *   <li>{@code raids} / {@code raids_end}：{@code ServerLevel.raids}（final 字段）。</li>
+     *   <li>{@code scoreboard}：{@code ServerScoreboard.dirtyListeners} 里存着它的脏标记回调。</li>
+     *   <li>{@code random_sequences}：{@code ServerLevel.randomSequences}（final 字段；几个维度共用主世界那一份）。</li>
+     *   <li>{@code neoforge_data_attachments}：{@code init()} 只调一次，之后没人再取它。</li>
+     * </ul>
+     *
+     * <p>其中袭击 / 记分板 / 等级附件下面会**显式重建**，内容照样回滚；剩下的（随机序列、以及老存档的结构
+     * 索引）只保住「继续落盘」，内容不回滚——归入「已知边界」。
+     */
+    private static final Set<String> PROTECTED_SAVED_DATA = Set.of(
+            "raids", "raids_end", ScoreboardSaveData.FILE_ID, "random_sequences", LEVEL_ATTACHMENTS_FILE_ID);
+
+    /**
+     * 把「内存里的存档数据」拉回存档点那一刻。
+     *
+     * <p>做法是**先作废缓存、再从磁盘重读**：把每个维度的 {@code DimensionDataStorage} 缓存里
+     * 「没被强引用」的条目摘掉（见 {@link #PROTECTED_SAVED_DATA}），之后任何 {@code computeIfAbsent}
+     * 都会重新读一遍（那些文件在几步之前刚被快照覆盖过）。这样所有「每次用时取一次」的存档数据——
+     * **包括模组写在 {@code <维度>/data/*.dat} 里的那些**——都会自动拿到快照内容，不需要认识任何具体模组。
+     *
+     * <p>被强引用的那几个要单独处理，因为它们手里是旧实例、而且不能一摘了事：
+     *
+     * <ul>
+     *   <li><b>袭击</b>：{@code ServerLevel.raids} 是 final 字段；摘掉缓存条目再 {@code computeIfAbsent}
+     *       换一个新实例。</li>
+     *   <li><b>等级数据附件</b>：那个 SavedData 只是个壳子，真数据挂在 {@code Level} 自己的附件表上，
+     *       由它的反序列化器灌回去；而反序列化是「按 key 覆盖」而不是替换，所以要先清空那张表，
+     *       快照里没有的附件才不会留下来。同样必须先摘掉缓存条目，否则 {@code computeIfAbsent}
+     *       直接命中旧壳子、反序列化器根本不会跑。</li>
+     *   <li><b>记分板</b>：{@code MinecraftServer.createLevels} 拿的就是**主世界**那份
+     *       {@code DimensionDataStorage}（{@code readScoreboard(serverlevel.getDataStorage())}）。
+     *       它的缓存条目要**留着**（被脏标记回调钉着，摘掉就再也不落盘），只把内容灌回活着的记分板：
+     *       先清空 objective / team，再按快照文件 {@code load} 一遍。{@code Scoreboard.addObjective} 对重名
+     *       会抛异常（原版日志里那句 {@code Error loading saved data: scoreboard}），所以必须先清空；
+     *       也没走 {@code dataFactory().deserializer()}——那条路每次都会 {@code createData()} 出一个新实例、
+     *       往 {@code dirtyListeners} 里多加一条回调。</li>
+     * </ul>
+     *
+     * <p>最后通知模组侧丢掉它们自己缓存的解码结果（见 {@link SophisticatedCoreCompat}）。
+     */
+    private static void restoreSavedData(MinecraftServer server, Path slotDir, SnapshotMirror.Result mirror)
+            throws IOException {
+        // 1. 作废「没被强引用」的条目：下一次访问会从（已被快照覆盖的）磁盘重读
+        for (ServerLevel level : server.getAllLevels()) {
+            cacheOf(level.getDataStorage()).keySet().removeIf(id -> !isProtectedSavedData(id));
         }
 
+        // 2. 重建被强引用、又能从磁盘重读内容的那两类
         for (ServerLevel level : server.getAllLevels()) {
-            String fileId = Raids.getFileId(level.dimensionTypeRegistration());
-            DimensionDataStorage levelStorage = level.getDataStorage();
-            cacheOf(levelStorage).remove(fileId);
-            levelAccess(level).rewind$setRaids(levelStorage.computeIfAbsent(Raids.factory(level), fileId));
+            DimensionDataStorage storage = level.getDataStorage();
+            String raidsId = Raids.getFileId(level.dimensionTypeRegistration());
+            cacheOf(storage).remove(raidsId);
+            levelAccess(level).rewind$setRaids(storage.computeIfAbsent(Raids.factory(level), raidsId));
+            cacheOf(storage).remove(LEVEL_ATTACHMENTS_FILE_ID);
+            clearLevelAttachments(level);
+            LevelAttachmentsSavedData.init(level);
         }
+
+        // 3. 记分板：缓存条目留着，只把内容灌回活着的记分板
+        restoreScoreboard(server, slotDir);
+
+        logRestoredSavedData(mirror.files);
+
+        // 4. 模组自己缓存的解码结果不归世界生命周期管，只能单独通知它们丢掉
+        SophisticatedCoreCompat.clearCaches();
+    }
+
+    /**
+     * 记分板：先清空活着的记分板，再把（已被快照覆盖的）文件灌回去。
+     *
+     * <p>灌的是**活着的那个记分板对象**——缓存里那条 {@code ScoreboardSaveData} 包的就是它，
+     * 所以内容一改，下一次自动保存写出去的就是快照内容；反之缓存条目不能摘，摘了就不再落盘。
+     * 这里故意 {@code new} 一个临时实例来 {@code load}：构造函数不加脏标记回调（加回调的是
+     * {@code ServerScoreboard.createData()}），不会随着回滚次数越攒越多。
+     */
+    private static void restoreScoreboard(MinecraftServer server, Path slotDir) throws IOException {
+        Path file = slotDir.resolve("data").resolve("scoreboard.dat");
+        if (!Files.isRegularFile(file)) {
+            return;
+        }
+        CompoundTag data = NbtIo.readCompressed(file, NbtAccounter.unlimitedHeap()).getCompound("data");
+        ServerScoreboard scoreboard = server.getScoreboard();
+        for (Objective objective : new ArrayList<>(scoreboard.getObjectives())) {
+            scoreboard.removeObjective(objective);
+        }
+        for (PlayerTeam team : new ArrayList<>(scoreboard.getPlayerTeams())) {
+            scoreboard.removePlayerTeam(team);
+        }
+        new ScoreboardSaveData(scoreboard).load(data, server.registryAccess());
+    }
+
+    /** 见 {@link #PROTECTED_SAVED_DATA}；老存档的结构索引用后缀兜住。 */
+    private static boolean isProtectedSavedData(String id) {
+        return PROTECTED_SAVED_DATA.contains(id) || id.endsWith("_index");
+    }
+
+    /** 清掉 {@code Level} 内存里那张附件表（反序列化器只按 key 覆盖，不清的话快照里没有的附件会留下来）。 */
+    private static void clearLevelAttachments(ServerLevel level) {
+        Map<?, ?> attachments = ((AttachmentHolderAccess) (Object) level).rewind$attachments();
+        if (attachments != null) {
+            attachments.clear();
+        }
+    }
+
+    /**
+     * 把这次回滚覆盖到的 {@code <维度>/data/*.dat} 打进日志，遇到模组数据再额外提示一句。
+     *
+     * <p>这是「原地回滚少了什么」唯一能被看见的线索：模组把世界状态写在这些文件里时，磁盘回滚了、
+     * 内存不一定回滚，游戏里就可能出现「文件回去了、数据没回去」。真遇到了就关掉
+     * {@code rollback.inPlaceRollback} 走完整重开那条路。
+     */
+    private static void logRestoredSavedData(List<String> files) {
+        List<String> dataFiles = new ArrayList<>();
+        Set<String> modIds = new HashSet<>();
+        for (String file : files) {
+            if (!isSavedDataFile(file)) {
+                continue;
+            }
+            dataFiles.add(file);
+            String id = savedDataId(file);
+            if (!isVanillaSavedData(id)) {
+                modIds.add(id);
+            }
+        }
+        if (dataFiles.isEmpty()) {
+            return;
+        }
+        Rewind.LOGGER.info("Rewind: saved data covered by this rollback: {}", String.join(", ", dataFiles));
+        if (!modIds.isEmpty()) {
+            Rewind.LOGGER.warn("Rewind: rollback also covers non-vanilla saved data ({}); if a mod's data looks like it "
+                            + "did not roll back, disable rollback.inPlaceRollback and retry",
+                    String.join(", ", modIds));
+        }
+    }
+
+    /** {@code data/*.dat} 或 {@code <维度>/data/*.dat} 才算存档数据文件。 */
+    private static boolean isSavedDataFile(String relative) {
+        return relative.endsWith(".dat") && (relative.startsWith("data/") || relative.contains("/data/"));
+    }
+
+    /** 文件名去掉目录与 {@code .dat} 就是 id（见 {@code DimensionDataStorage.getDataFile}）。 */
+    private static String savedDataId(String relative) {
+        String name = relative.substring(relative.lastIndexOf('/') + 1);
+        return name.substring(0, name.length() - ".dat".length());
+    }
+
+    private static boolean isVanillaSavedData(String id) {
+        return VANILLA_SAVED_DATA.contains(id) || id.startsWith("map_") || id.startsWith("raids_");
     }
 
     private static Map<String, SavedData> cacheOf(DimensionDataStorage storage) {

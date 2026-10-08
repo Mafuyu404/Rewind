@@ -140,7 +140,10 @@ public final class CheckpointController {
     private static WorldData reusableWorldData;
     /** 是否走快速重启；留个开关给 A/B 测量（默认开）。 */
     private static boolean fastRestartEnabled = true;
-    /** 是否走原地回滚；留个开关给 A/B 测量（默认开）。关掉就退回「关世界 → 重开」那条路。 */
+    /**
+     * 调试用的强制开关：关掉就一定不走原地回滚。真正生效与否还要看 COMMON 配置
+     * {@code rollback.inPlaceRollback}——模组数据看起来没回滚时，玩家会把那个关掉。
+     */
     private static boolean inPlaceEnabled = true;
 
     /** 回退路径里在后台线程上做文件回拷。 */
@@ -340,7 +343,8 @@ public final class CheckpointController {
         lastRestoreCopied = -1;
         lastRestoreSkipped = -1;
         lastRestoreFiles = -1;
-        if (inPlaceEnabled) {
+        // 原地回滚要么被调试开关关掉、要么被 COMMON 配置关掉；两种都退回「关世界 → 覆盖 → 重开」
+        if (inPlaceEnabled && RewindServerConfig.inPlaceRollback()) {
             startWork(Work.ROLLBACK);
         } else {
             startWork(Work.NONE);

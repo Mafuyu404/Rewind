@@ -69,6 +69,15 @@ public final class FabricRewindPlatform implements RewindPlatform {
                 rolled.mirrorFiles, rolled.totalMs);
     }
 
+    /**
+     * 某个模组的类加载器：Fabric 只有一个 KnotClassLoader，所有模组的类都在它里面，所以返回它自己那个。
+     * 跨模组反射要用它，见 {@code cc.sighs.rewind.common.compat.SophisticatedCoreCompat}。
+     */
+    @Override
+    public ClassLoader modClassLoader(String modId) {
+        return FabricRewindPlatform.class.getClassLoader();
+    }
+
     private static MinecraftServer server(Object server) {
         return (MinecraftServer) server;
     }

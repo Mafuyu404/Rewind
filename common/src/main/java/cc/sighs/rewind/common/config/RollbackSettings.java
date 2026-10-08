@@ -49,10 +49,23 @@ public final class RollbackSettings {
      */
     public static final boolean DEFAULT_ROLLBACK_ON_DEATH = false;
 
+    /**
+     * 回溯要不要走「原地回滚」（世界不关、客户端不重登，直接在活着的集成服务器里倒回去）。默认 {@code true}。
+     *
+     * <p>原地回滚快，但它**只回滚磁盘上的文件与内存里那部分被显式重建的状态**：进程里其它对象图
+     * （第三方模组自己缓存的解码数据、静态单例……）不会跟着回到过去。所以只要装了这类模组，
+     * 就可能出现「文件回滚了、游戏里看起来没有」。关掉它就退回「关世界 → 覆盖 → 重开」那条路：
+     * 服务端对象全部重建、模组跟着世界重载走一遍，语义最干净，代价是慢（几秒 vs 几百毫秒）。
+     *
+     * <p>判定一个模组会不会中招见 {@code docs/AGENT.md} 的「原地回滚」一节。
+     */
+    public static final boolean DEFAULT_IN_PLACE_ROLLBACK = true;
+
     private static volatile boolean syncRecipeBook = DEFAULT_SYNC_RECIPE_BOOK;
     private static volatile boolean syncChunksNearPlayer = DEFAULT_SYNC_CHUNKS_NEAR_PLAYER;
     private static volatile int cooldownSeconds = DEFAULT_COOLDOWN_SECONDS;
     private static volatile boolean rollbackOnDeath = DEFAULT_ROLLBACK_ON_DEATH;
+    private static volatile boolean inPlaceRollback = DEFAULT_IN_PLACE_ROLLBACK;
 
     private RollbackSettings() {
     }
@@ -82,12 +95,19 @@ public final class RollbackSettings {
         return rollbackOnDeath;
     }
 
+    /** 回溯是不是走原地回滚（关掉就退回「关世界 → 覆盖 → 重开」）。 */
+    public static boolean inPlaceRollback() {
+        return inPlaceRollback;
+    }
+
     /** 配置加载 / 重载时把值抄进来。 */
-    public static void apply(boolean recipeBook, boolean chunksNearPlayer, int cooldownSeconds, boolean rollbackOnDeath) {
+    public static void apply(boolean recipeBook, boolean chunksNearPlayer, int cooldownSeconds, boolean rollbackOnDeath,
+            boolean inPlaceRollback) {
         syncRecipeBook = recipeBook;
         syncChunksNearPlayer = chunksNearPlayer;
         setCooldownSeconds(cooldownSeconds);
         RollbackSettings.rollbackOnDeath = rollbackOnDeath;
+        RollbackSettings.inPlaceRollback = inPlaceRollback;
     }
 
     /** 改配方书开关（只改内存；落盘由平台配置层负责）。 */
@@ -103,6 +123,11 @@ public final class RollbackSettings {
     /** 改「死亡后自动回溯」开关（只改内存；落盘由平台配置层负责）。 */
     public static void setRollbackOnDeath(boolean value) {
         rollbackOnDeath = value;
+    }
+
+    /** 改「原地回滚」开关（只改内存；落盘由平台配置层负责）。 */
+    public static void setInPlaceRollback(boolean value) {
+        inPlaceRollback = value;
     }
 
     /**

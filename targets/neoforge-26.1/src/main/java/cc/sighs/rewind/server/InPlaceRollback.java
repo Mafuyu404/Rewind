@@ -17,6 +17,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
+import cc.sighs.mixin.RollbackAccessMixins.AttachmentHolderAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ChunkMapAccess;
 import cc.sighs.mixin.RollbackAccessMixins.DistanceManagerAccess;
 import cc.sighs.mixin.RollbackAccessMixins.EntitySectionManagerAccess;
@@ -30,6 +31,7 @@ import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.mixin.RollbackAccessMixins.SimpleRegionStorageAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.compat.SophisticatedCoreCompat;
 import cc.sighs.rewind.common.config.RollbackSettings;
 import cc.sighs.rewind.common.store.SnapshotBlockIo;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
@@ -45,6 +47,7 @@ import net.minecraft.nbt.Tag;
 import net.minecraft.network.protocol.game.ClientboundSetHeldSlotPacket;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.ServerScoreboard;
+import net.minecraft.server.bossevents.CustomBossEvents;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkLevel;
 import net.minecraft.server.level.ChunkMap;
@@ -52,11 +55,15 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.ProblemReporter;
+import net.minecraft.world.RandomSequences;
+import net.minecraft.world.Stopwatches;
+import net.minecraft.world.clock.ServerClockManager;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.village.poi.PoiManager;
 import net.minecraft.world.entity.raid.Raids;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.TicketStorage;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.storage.EntityStorage;
@@ -64,10 +71,14 @@ import net.minecraft.world.level.chunk.storage.IOWorker;
 import net.minecraft.world.level.chunk.storage.RegionFile;
 import net.minecraft.world.level.chunk.storage.RegionFileStorage;
 import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
+import net.minecraft.world.level.dimension.end.EnderDragonFight;
 import net.minecraft.world.level.entity.EntityAccess;
 import net.minecraft.world.level.entity.EntitySectionStorage;
+import net.minecraft.world.level.gamerules.GameRuleMap;
+import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
+import net.minecraft.world.level.saveddata.WanderingTraderData;
 import net.minecraft.world.level.saveddata.WeatherData;
 import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.level.storage.LevelResource;
@@ -75,10 +86,12 @@ import net.minecraft.world.level.storage.SavedDataStorage;
 import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.level.storage.TagValueInput;
 import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.level.timers.TimerQueue;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.PlayerTeam;
 import net.minecraft.world.scores.ScoreboardSaveData;
+import net.neoforged.neoforge.attachment.LevelAttachmentsSavedData;
 
 /**
  * 原地回滚：不关世界、不重开世界，在活着的集成服务器里把世界倒回存档点。
@@ -99,12 +112,23 @@ import net.minecraft.world.scores.ScoreboardSaveData;
  *       被拷回来，其余文件本来就还是存档点内容。</li>
  *   <li><b>重载</b>：给卸载掉的区块重建 holder，让它们从（已还原的）磁盘读回来；原版的发送流水线
  *       会自动把新数据推给客户端。</li>
- *   <li><b>内存状态</b>：玩家 / 时间天气 / 被强引用的存档数据（记分板、袭击）单独还原。</li>
+ *   <li><b>内存状态</b>：玩家 / 世界时间单独还原；每个维度与服务器级的存档数据缓存里，**能重新读盘**的条目
+ *       整体作废、从（已还原的）磁盘重读，而**被长生命周期对象用字段强引用**的那些故意保留（见
+ *       {@link #PROTECTED_SAVED_DATA}）；其中袭击、记分板、天气、等级数据附件显式重建。</li>
  * </ol>
  *
- * <p>已知边界（比「关世界再重开」那条路少了什么）：只还原上面列出的那几类 SavedData，其它
- * {@code <维度>/data/*.dat}（地图、自定义 boss 条等）只还原了磁盘文件，内存里的实例保持原样，
- * 会在下一次自动保存时把旧内容写回去。
+ * <p>已知边界（比「关世界再重开」那条路少了什么）：**磁盘**与「每次用时 {@code SavedDataStorage.get}
+ * 取一次」的存档数据都能回滚（含模组写在 {@code <维度>/data/<namespace>/<path>.dat} 里的那些）；
+ * 但**模组自己缓存的解码结果**不归世界生命周期管，同一进程里还会被复用（典型：精妙核心的包装器缓存，
+ * 见 {@link SophisticatedCoreCompat}），也没有通用手段能替它清掉。
+ *
+ * <p>另一条取舍写在这里：26.1 有一批原版存档数据被长生命周期对象用字段强引用（游戏规则、命令存储、
+ * 流浪商人、区块票据、随机序列、世界时钟、自定义 boss 条、计划事件、秒表、末地龙战），而
+ * {@code SavedDataStorage.scheduleSave()} 只遍历缓存——所以它们**故意不清缓存**（见
+ * {@link #PROTECTED_SAVED_DATA}）：内容不参与回滚、但会继续正常落盘。真正回到存档点内容的只有能重新
+ * 读盘的那几类——袭击、记分板、天气、等级数据附件。装了这类模组、数据看起来没回滚时，把 COMMON 配置
+ * {@code rollback.inPlaceRollback} 关掉，退回「关世界 → 覆盖 → 重开」那条路——服务端对象全部重建，
+ * 模组跟着世界重载走一遍。
  *
  * <h2>26.1 的实现差异（相对 {@code targets/neoforge-1.21.1}）</h2>
  * <ul>
@@ -283,7 +307,7 @@ public final class InPlaceRollback {
             result.holdersMs = millisSince(stepNanos);
             result.reloadMs = result.holdersMs;
 
-            // 玩家 / 时间天气必须排在这里：holder 已经重建、但区块还没成批重发。
+            // 玩家 / 世界时间必须排在这里：holder 已经重建、但区块还没成批重发。
             // 位置包要排在区块包前面，否则客户端得先处理完上百个区块包才会回 ack，而服务端在收到 ack
             // 之前是关着右键交互的（handleUseItemOn 里那道 awaitingPositionFromClient 的门）。
             // 也不能更早：player.load() 会走 Entity.setPosRaw，NeoForge 在那里会 level.getChunk() 请求
@@ -297,7 +321,8 @@ public final class InPlaceRollback {
             result.reloadMs += millisSince(stepNanos);
 
             try {
-                restoreSavedData(server);
+                // 传入 mirror 是为了把这次回滚覆盖到的存档数据文件打进日志（见 logRestoredSavedData）
+                restoreSavedData(server, mirror);
             } catch (Throwable t) {
                 Rewind.LOGGER.error("Rewind: failed to reload saved data in place", t);
             }
@@ -859,12 +884,11 @@ public final class InPlaceRollback {
     }
 
     /**
-     * 世界时间 / 出生点来自 level.dat，天气来自服务器级 {@code WeatherData}（26.1 把它从 level.dat
-     * 拆成了 SavedData）。
+     * 世界时间 / 出生点来自 level.dat。这里不改磁盘上的任何文件，直接把快照值写进活着的
+     * {@code WorldData}。
      *
-     * <p>这里不改磁盘上的任何文件：level.dat 的时间 / 出生点直接写进活着的 {@code WorldData}，
-     * 天气则把快照值灌回那个被 {@code MinecraftServer} 强引用的 {@code WeatherData} 实例
-     * （实例是 final 字段，换不掉，只能就地改）。
+     * <p>天气不在这里：26.1 把它挪进了服务器级 {@code WeatherData} SavedData，由 {@link #restoreWeather}
+     * 在存档数据重建那一步统一处理（必须排在那一步的缓存作废之后，否则刚重建好的条目会被清掉）。
      */
     private static boolean restoreWorldData(MinecraftServer server, Path slotDir) throws IOException {
         boolean restored = false;
@@ -890,7 +914,6 @@ public final class InPlaceRollback {
             }
             restored = true;
         }
-        restoreWeather(server);
         // 26.1：forceTimeSynchronization() 改名成 forceGameTimeSynchronization()，顺带带上 clocks
         server.forceGameTimeSynchronization();
         return restored;
@@ -902,10 +925,15 @@ public final class InPlaceRollback {
      *
      * <p>不硬编码 {@code data/weather.dat}：26.1 的 SavedData 落盘路径是
      * {@code <dataFolder>/<namespace>/<path>.dat}，走存储层就与路径规则无关。
+     *
+     * <p>{@code MinecraftServer.weatherData} 是 final 字段，读（{@code getWeatherData}）与每一 tick 的
+     * 天气推进都用那个活着的实例，所以内容灌回去之后还得把**那个实例**登记进缓存——只 {@code get} 的话
+     * 缓存里放的是刚从磁盘读出来的新实例，活着的那个反而没人遍历，之后天气变化就再也不落盘。
+     *
+     * <p>调用点：{@link #restoreSavedData} 清空缓存之后。
      */
     private static void restoreWeather(MinecraftServer server) {
         SavedDataStorage storage = server.getDataStorage();
-        cacheOf(storage).remove(WeatherData.TYPE);
         WeatherData saved = storage.get(WeatherData.TYPE);
         if (saved == null) {
             return;
@@ -916,6 +944,7 @@ public final class InPlaceRollback {
         live.setThunderTime(saved.getThunderTime());
         live.setRaining(saved.isRaining());
         live.setThundering(saved.isThundering());
+        cacheOf(storage).put(WeatherData.TYPE, Optional.of((SavedData) live));
     }
 
     /**
@@ -1001,33 +1030,83 @@ public final class InPlaceRollback {
     }
 
     /**
-     * 被强引用的 SavedData 要换掉实例（或者把内容重新灌进去）才算真回滚。
+     * 把「内存里的存档数据」拉回存档点那一刻。
      *
-     * <p>两条都走「作废缓存 → 让存储层从磁盘重新读」：这里的磁盘文件在几步之前刚被
-     * {@link SnapshotBlockIo#restoreInto} 换成快照内容，所以重新读到的就是存档点那一刻的值。
+     * <p>做法是**排除法**：只把不在 {@link #PROTECTED_SAVED_DATA} 里的缓存条目作废掉，之后任何
+     * {@code get} / {@code computeIfAbsent} 都会从磁盘重读（那些文件在几步之前刚被快照覆盖过）。
+     * 这样所有「每次用时取一次」的存档数据——**包括模组写在
+     * {@code <维度>/data/<namespace>/<path>.dat} 里的那些**——都会自动拿到快照内容，不需要认识任何具体模组；
+     * 而被长生命周期对象用字段强引用的条目原样留着，继续正常落盘（内容不参与回滚，见类注释的「已知边界」）。
      *
-     * <p>记分板：26.1 的 {@code ScoreboardSaveData} 挂在服务器级存储上，而且
-     * {@code Scoreboard.addObjective} 对重名会抛异常，直接 load 到活着的记分板上必然失败
-     * （原版日志里那句 {@code Error loading saved data: scoreboard}）。所以先把现有 objective / team
-     * 清掉，再用 {@code ServerScoreboard.load(Packed)} 把快照内容灌回同一个记分板对象；
-     * 老的那个 save data 实例仍然持有脏标记回调，读的是同一个记分板，下一次自动保存会写回正确内容。
+     * <p>作废之后还要显式重建**能重新读盘**的那几类（它们也正是不能进 {@link #PROTECTED_SAVED_DATA} 的）：
      *
-     * <p>袭击：{@code ServerLevel.raids} 是 final 字段，直接换实例。
+     * <ul>
+     *   <li><b>袭击</b>：{@code ServerLevel.raids} 是 final 字段，直接换实例；用它的 {@code SavedDataType}
+     *       走一次 {@code computeIfAbsent}，就会从（已还原的）磁盘重新读。</li>
+     *   <li><b>等级数据附件</b>（NeoForge 的 {@code neoforge:data_attachments}）：那个 SavedData 只是个
+     *       壳子，真数据挂在 {@code Level} 自己的附件表上，由它的反序列化器灌回去；而反序列化是「按 key 覆盖」
+     *       而不是替换，所以要先清空那张表，快照里没有的附件才不会留下来。</li>
+     *   <li><b>记分板</b>：26.1 里它挂在**服务器级**存储上（{@code server.getDataStorage()}），
+     *       {@code MinecraftServer.saveAllChunks} 也是用 {@code computeIfAbsent(ScoreboardSaveData.TYPE)}
+     *       拿它——作废缓存会连它一起摘掉，所以必须重建，否则 {@code SavedDataStorage.scheduleSave()} 再也
+     *       遍历不到它，scoreboard.dat 从此不再落盘。{@code storage.get} 既读出快照内容、又把条目登记回去。</li>
+     *   <li><b>天气</b>：26.1 把天气从 level.dat 搬成了服务器级 {@code WeatherData}，见
+     *       {@link #restoreWeather}。必须排在缓存作废之后，否则刚重建的条目会被清掉。</li>
+     * </ul>
+     *
+     * <p>最后通知模组侧丢掉它们自己缓存的解码结果（见 {@link SophisticatedCoreCompat}）。
      */
-    private static void restoreSavedData(MinecraftServer server) {
-        restoreScoreboard(server);
+    private static void restoreSavedData(MinecraftServer server, SnapshotMirror.Result mirror) {
+        // 1. 作废每个维度与服务器级那一份里「能重新读盘」的存档数据缓存
+        for (ServerLevel level : server.getAllLevels()) {
+            clearReloadable(level.getDataStorage());
+        }
+        clearReloadable(server.getDataStorage());
 
+        // 2. 重建能被重新读盘的那几个
         for (ServerLevel level : server.getAllLevels()) {
             SavedDataStorage storage = level.getDataStorage();
-            cacheOf(storage).remove(Raids.TYPE);
             levelAccess(level).rewind$setRaids(storage.computeIfAbsent(Raids.TYPE));
+            clearLevelAttachments(level);
+            LevelAttachmentsSavedData.init(level);
+        }
+        restoreScoreboard(server);
+        restoreWeather(server);
+
+        logRestoredSavedData(mirror.files);
+
+        // 3. 模组自己缓存的解码结果不归世界生命周期管，只能单独通知它们丢掉
+        SophisticatedCoreCompat.clearCaches();
+    }
+
+    /**
+     * 摘掉 {@code storage} 缓存里不属于 {@link #PROTECTED_SAVED_DATA} 的条目。
+     *
+     * <p>只有「能重新读盘」的条目才能摘：{@code scheduleSave()} 只遍历缓存，受保护的那些被长生命周期对象
+     * 用字段强引用、摘掉就再也没人登记回去，那个 {@code .dat} 从此不再落盘。
+     */
+    private static void clearReloadable(SavedDataStorage storage) {
+        cacheOf(storage).keySet().removeIf(type -> !isProtectedSavedData(type));
+    }
+
+    /** 清掉 {@code Level} 内存里那张附件表（反序列化器只按 key 覆盖，不清的话快照里没有的附件会留下来）。 */
+    private static void clearLevelAttachments(ServerLevel level) {
+        Map<?, ?> attachments = ((AttachmentHolderAccess) (Object) level).rewind$attachments();
+        if (attachments != null) {
+            attachments.clear();
         }
     }
 
+    /**
+     * 记分板：从（已还原的）服务器级磁盘读回快照内容，灌进活着的 {@code ServerScoreboard}。
+     *
+     * <p>先清掉现有 objective / team：{@code Scoreboard.addObjective} 对重名会抛异常，直接 load 到活着的
+     * 记分板上必然失败（原版日志里那句 {@code Error loading saved data: scoreboard}）。{@code storage.get}
+     * 既把快照数据读出来、又把缓存条目重新登记回去（{@code saveAllChunks} 随后会用 {@code computeIfAbsent}
+     * 拿同一个条目），所以它不会像被摘掉的条目那样再也不落盘。
+     */
     private static void restoreScoreboard(MinecraftServer server) {
-        SavedDataStorage storage = server.getDataStorage();
-        cacheOf(storage).remove(ScoreboardSaveData.TYPE);
-        ScoreboardSaveData saved = storage.get(ScoreboardSaveData.TYPE);
+        ScoreboardSaveData saved = server.getDataStorage().get(ScoreboardSaveData.TYPE);
         if (saved == null) {
             return;
         }
@@ -1039,6 +1118,126 @@ public final class InPlaceRollback {
             scoreboard.removePlayerTeam(team);
         }
         scoreboard.load(saved.getData());
+    }
+
+    /**
+     * 26.1 原版（含 NeoForge 自己）会写进存档数据目录的那些 id。
+     *
+     * <p>26.1 的落盘路径是 {@code <dataFolder>/<namespace>/<path>.dat}（{@code SavedDataStorage.getDataFile}
+     * + {@code Identifier.resolveAgainst}），所以 id 是 {@code <namespace>:<path>}。不在这份名单里的就算
+     * 「模组数据」——原地回滚只能保证它们的**磁盘文件**被还原。
+     */
+    private static final Set<String> VANILLA_SAVED_DATA = Set.of(
+            "minecraft:scoreboard", "minecraft:weather", "minecraft:random_sequences",
+            "minecraft:game_rules", "minecraft:world_gen_settings", "minecraft:custom_boss_events",
+            "minecraft:scheduled_events", "minecraft:world_clocks", "minecraft:stopwatches",
+            "minecraft:maps/last_id", "minecraft:command_storage",
+            "minecraft:raids", "minecraft:chunk_tickets", "minecraft:world_border",
+            "minecraft:ender_dragon_fight", "minecraft:wandering_trader",
+            "neoforge:data_attachments");
+
+    /**
+     * 把这次回滚覆盖到的存档数据文件打进日志，遇到模组数据再额外提示一句。
+     *
+     * <p>这是「原地回滚少了什么」唯一能被看见的线索：模组把世界状态写在这些文件里时，磁盘回滚了、
+     * 内存不一定回滚，游戏里就可能出现「文件回去了、数据没回去」。真遇到了就关掉
+     * {@code rollback.inPlaceRollback} 走完整重开那条路。
+     */
+    private static void logRestoredSavedData(List<String> files) {
+        List<String> dataFiles = new ArrayList<>();
+        Set<String> modIds = new HashSet<>();
+        for (String file : files) {
+            if (!isSavedDataFile(file)) {
+                continue;
+            }
+            dataFiles.add(file);
+            String id = savedDataId(file);
+            if (!isVanillaSavedData(id)) {
+                modIds.add(id);
+            }
+        }
+        if (dataFiles.isEmpty()) {
+            return;
+        }
+        Rewind.LOGGER.info("Rewind: saved data covered by this rollback: {}", String.join(", ", dataFiles));
+        if (!modIds.isEmpty()) {
+            Rewind.LOGGER.warn("Rewind: rollback also covers non-vanilla saved data ({}); if a mod's data looks like it "
+                            + "did not roll back, disable rollback.inPlaceRollback and retry",
+                    String.join(", ", modIds));
+        }
+    }
+
+    /** {@code data/<namespace>/<path>.dat} 或 {@code <维度>/data/<namespace>/<path>.dat} 才算存档数据文件。 */
+    private static boolean isSavedDataFile(String relative) {
+        return relative.endsWith(".dat") && (relative.startsWith("data/") || relative.contains("/data/"));
+    }
+
+    /**
+     * 从归档相对路径反推存档数据 id：{@code data/minecraft/scoreboard.dat} → {@code minecraft:scoreboard}。
+     * path 里还可以再带斜杠（地图是 {@code minecraft:maps/<n>}，命令存储是 {@code <namespace>:command_storage}）。
+     */
+    private static String savedDataId(String relative) {
+        String tail;
+        if (relative.startsWith("data/")) {
+            tail = relative.substring("data/".length());
+        } else {
+            int marker = relative.indexOf("/data/");
+            tail = marker >= 0 ? relative.substring(marker + "/data/".length()) : relative;
+        }
+        if (tail.endsWith(".dat")) {
+            tail = tail.substring(0, tail.length() - ".dat".length());
+        }
+        int slash = tail.indexOf('/');
+        return slash < 0 ? tail : tail.substring(0, slash) + ':' + tail.substring(slash + 1);
+    }
+
+    private static boolean isVanillaSavedData(String id) {
+        return VANILLA_SAVED_DATA.contains(id) || id.startsWith("minecraft:maps/");
+    }
+
+    /**
+     * **不清缓存**的存档数据：被长生命周期对象用字段强引用、摘掉缓存条目就再也没人登记回去的那些。
+     *
+     * <p>{@code SavedDataStorage.scheduleSave()} 只遍历 {@code cache}，所以条目一旦被摘掉、又没人重新登记，
+     * 对应的 {@code .dat} 就再也不落盘。26.1 里这些类型全是字段持有（1.21.1 那会儿它们大多是
+     * 「每次用时取一次」，作废缓存自然会重读），所以这里用排除法：它们**故意留在缓存里**，
+     * 内容不参与回滚（见类注释的「已知边界」），但会继续正常落盘。
+     *
+     * <p>每一条的「被谁强引用」：
+     * <ul>
+     *   <li>{@code minecraft:chunk_tickets} → {@code ServerChunkCache.ticketStorage}（final 字段）</li>
+     *   <li>{@code minecraft:ender_dragon_fight} → {@code ServerLevel.dragonFight}</li>
+     *   <li>{@code minecraft:random_sequences} → {@code MinecraftServer.randomSequences}（final 字段）</li>
+     *   <li>{@code minecraft:world_gen_settings} → {@code MinecraftServer.worldGenSettings}（final 字段）</li>
+     *   <li>{@code minecraft:custom_boss_events} → {@code MinecraftServer.customBossEvents}（final 字段）</li>
+     *   <li>{@code minecraft:world_clocks} → {@code MinecraftServer.clockManager}（final 字段）</li>
+     *   <li>{@code minecraft:scheduled_events} → {@code MinecraftServer.scheduledEvents}（final 字段）</li>
+     *   <li>{@code minecraft:stopwatches} → {@code MinecraftServer.stopwatches}</li>
+     *   <li>{@code minecraft:game_rules} → {@code MinecraftServer.gameRules} 手里的 {@code GameRules.rules}</li>
+     *   <li>{@code minecraft:wandering_trader} → {@code WanderingTraderSpawner.traderData}</li>
+     * </ul>
+     *
+     * <p>命令存储（{@code <任意命名空间>:command_storage}）也是强引用的（{@code CommandStorage.namespaces}），
+     * 而且 26.1 的 {@code CommandStorage.get} 命中内存里那份 Container 就直接返回、不走存储层，
+     * 所以它由 {@link #isProtectedSavedData} 按 path 一并保护：清掉缓存条目既回滚不了内容
+     * （读取命中内存那份），还会让那份 Container 掉出存储缓存、{@code scheduleSave} 再也写不到它。
+     */
+    private static final Set<SavedDataType<?>> PROTECTED_SAVED_DATA = Set.of(
+            TicketStorage.TYPE,
+            EnderDragonFight.TYPE,
+            RandomSequences.TYPE,
+            WorldGenSettings.TYPE,
+            CustomBossEvents.TYPE,
+            ServerClockManager.TYPE,
+            TimerQueue.TYPE,
+            Stopwatches.TYPE,
+            GameRuleMap.TYPE,
+            WanderingTraderData.TYPE);
+
+    /** 这个类型的缓存条目要不要留着：被长生命周期对象强引用的都留。 */
+    private static boolean isProtectedSavedData(SavedDataType<?> type) {
+        // 命令存储的 id 是 <任意命名空间>:command_storage，命名空间动态，按 path 认
+        return PROTECTED_SAVED_DATA.contains(type) || type.id().getPath().equals("command_storage");
     }
 
     private static Map<SavedDataType<?>, Optional<SavedData>> cacheOf(SavedDataStorage storage) {

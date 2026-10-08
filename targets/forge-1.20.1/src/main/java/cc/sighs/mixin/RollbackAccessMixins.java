@@ -45,6 +45,8 @@ import org.spongepowered.asm.mixin.gen.Invoker;
  *
  * <p>全部是 {@code @Accessor} / {@code @Invoker}，不改变任何原版行为；{@code @Mutable} 只用在
  * {@code ServerLevel.raids} 上（原地回滚要换掉那个被强引用的 SavedData 实例）。
+ * {@code ServerLevel.initCapabilities()} 是回滚重建「等级能力表」用的 Forge 原生入口：它先
+ * {@code gatherCapabilities()} 建一张新表，再把刚还原的 {@code capabilities.dat} 灌回去。
  *
  * <h2>与 {@code targets/neoforge-1.21.1} 那份的差别</h2>
  * 1.20.1 还没有 {@code SimpleRegionStorage}——那个类 1.20.5 才引入，把 {@code ChunkStorage} 里的
@@ -193,6 +195,14 @@ public final class RollbackAccessMixins {
         @Mutable
         @Accessor("raids")
         void rewind$setRaids(Raids raids);
+
+        /**
+         * 重建等级能力表：{@code gatherCapabilities()} 会重新触发 {@code AttachCapabilitiesEvent<Level>}
+         * 建一张空表，紧接着的 {@code computeIfAbsent} 再把 {@code capabilities.dat} 里的内容灌回去
+         * （见 {@code InPlaceRollback.restoreSavedData}）。Forge 没有别的「清空等级能力表」入口。
+         */
+        @Invoker("initCapabilities")
+        void rewind$initCapabilities();
     }
 
     @Mixin(PersistentEntitySectionManager.class)

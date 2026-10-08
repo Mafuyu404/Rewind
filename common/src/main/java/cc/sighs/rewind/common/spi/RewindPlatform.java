@@ -47,4 +47,15 @@ public interface RewindPlatform {
      * 实现只管把世界倒回去。
      */
     RollbackOutcome rollbackInPlace(Object server, Path worldRoot, String slot) throws Exception;
+
+    /**
+     * 某个模组的类加载器；拿不到返回 null。
+     *
+     * <p>跨模组反射要用它：NeoForge / Forge 的模组是 JPMS 模块，各自的类加载器**只看得到自己读得到的
+     * 模块**，拿 common 自己那个去 {@code Class.forName} 看不见别的模组（开发环境实测会
+     * {@code ClassNotFoundException}）。Fabric 只有一个 KnotClassLoader，返回它自己那个即可。
+     *
+     * <p>用于可选模组适配，见 {@code cc.sighs.rewind.common.compat.SophisticatedCoreCompat}。
+     */
+    ClassLoader modClassLoader(String modId);
 }

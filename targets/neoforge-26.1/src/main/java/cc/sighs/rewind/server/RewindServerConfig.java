@@ -37,6 +37,7 @@ public final class RewindServerConfig {
     private static ModConfigSpec.BooleanValue syncRecipeBook;
     private static ModConfigSpec.BooleanValue syncChunksNearPlayer;
     private static ModConfigSpec.BooleanValue rollbackOnDeath;
+    private static ModConfigSpec.BooleanValue inPlaceRollback;
     private static ModConfigSpec.IntValue rollbackCooldownSeconds;
     private static ModConfigSpec.IntValue manualSlotCount;
     private static ModConfigSpec spec;
@@ -79,6 +80,11 @@ public final class RewindServerConfig {
                 .comment("死亡后自动回溯到时间线上最近的那个节点。",
                         "Roll back to the nearest node on the timeline after death.")
                 .define("rollbackOnDeath", RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH);
+
+        inPlaceRollback = builder
+                .comment("原地回滚：世界不关、不重登，直接在活着的服务器里倒回去。模组数据看起来没回滚就关掉它。",
+                        "In-place rollback: rewind without closing the world. Turn off when mod data seems not to roll back.")
+                .define("inPlaceRollback", RollbackSettings.DEFAULT_IN_PLACE_ROLLBACK);
 
         rollbackCooldownSeconds = builder
                 .comment("读档冷却（秒），0 = 关闭。",
@@ -128,7 +134,10 @@ public final class RewindServerConfig {
                             : rollbackCooldownSeconds.get(),
                     rollbackOnDeath == null
                             ? RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH
-                            : rollbackOnDeath.get());
+                            : rollbackOnDeath.get(),
+                    inPlaceRollback == null
+                            ? RollbackSettings.DEFAULT_IN_PLACE_ROLLBACK
+                            : inPlaceRollback.get());
             SlotSettings.apply(manualSlotCount == null
                     ? SlotSettings.DEFAULT_MANUAL_SLOT_COUNT
                     : manualSlotCount.get());
@@ -137,15 +146,17 @@ public final class RewindServerConfig {
             RollbackSettings.apply(RollbackSettings.DEFAULT_SYNC_RECIPE_BOOK,
                     RollbackSettings.DEFAULT_SYNC_CHUNKS_NEAR_PLAYER,
                     RollbackSettings.DEFAULT_COOLDOWN_SECONDS,
-                    RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH);
+                    RollbackSettings.DEFAULT_ROLLBACK_ON_DEATH,
+                    RollbackSettings.DEFAULT_IN_PLACE_ROLLBACK);
             SlotSettings.apply(SlotSettings.DEFAULT_MANUAL_SLOT_COUNT);
         }
         Rewind.LOGGER.info(
                 "Rewind: auto checkpoint enabled={} interval={} min, rollback syncRecipeBook={} syncChunksNearPlayer={}, "
-                        + "rollbackOnDeath={}, cooldown={}s, slots manualSlotCount={}",
+                        + "rollbackOnDeath={} inPlaceRollback={}, cooldown={}s, slots manualSlotCount={}",
                 AutoCheckpointSettings.autoCheckpointEnabled(), AutoCheckpointSettings.autoSaveIntervalMinutes(),
                 RollbackSettings.syncRecipeBook(), RollbackSettings.syncChunksNearPlayer(),
                 RollbackSettings.rollbackOnDeath(),
+                RollbackSettings.inPlaceRollback(),
                 RollbackSettings.cooldownSeconds(),
                 SlotSettings.manualSlotCount());
     }
@@ -215,6 +226,11 @@ public final class RewindServerConfig {
     /** 死亡后要不要自动回溯到时间线上最近的那个节点。 */
     public static boolean rollbackOnDeath() {
         return RollbackSettings.rollbackOnDeath();
+    }
+
+    /** 回溯是不是走原地回滚（关掉就退回「关世界 → 覆盖 → 重开」）。 */
+    public static boolean inPlaceRollback() {
+        return RollbackSettings.inPlaceRollback();
     }
 
     /** 改「死亡后自动回溯」开关并立刻落盘。 */

@@ -26,7 +26,10 @@ public final class RewindCommands {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
         dispatcher.register(Commands.literal("rewind")
                 // 26.1 把权限等级换成了 PermissionSet（原来的 hasPermission(int) 没了）
-                .requires(source -> source.getServer().isSingleplayer()
+                // 加载期（数据包函数解析时，Brigadier 的 canUse 预检）拿到的是 getServer() 为 null 的 source，
+                // 这里必须放行，否则任何引用 /rewind 的 .mcfunction 都会 NPE 加载失败
+                .requires(source -> source.getServer() == null
+                        || source.getServer().isSingleplayer()
                         || source.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER))
                 .then(Commands.literal("status").executes(context -> status(context.getSource())))
                 .then(Commands.literal("ui").executes(context -> {

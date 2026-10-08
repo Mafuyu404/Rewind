@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import cc.sighs.rewind.common.CoverRequest;
 import cc.sighs.rewind.common.RewindLog;
+import cc.sighs.rewind.common.compat.SophisticatedCoreCompat;
 import cc.sighs.rewind.common.spi.FlushOutcome;
 import cc.sighs.rewind.common.spi.RewindPlatform;
 import cc.sighs.rewind.common.spi.RewindPlatforms;
@@ -135,6 +136,9 @@ public final class CheckpointWriter {
      *
      * <p>「关世界 → 覆盖 → 重开」那条回退路径用它（那时候世界已经关了，内存里没有东西要同步）；
      * 原地回滚有自己的回拷逻辑，不走这里。
+     *
+     * <p>回拷完顺手通知一遍「模组侧的解码缓存」（见 {@link SophisticatedCoreCompat}）：那条路径会把世界
+     * 重新开起来，模组跟着重载走一遍，但它们自己缓存的解码结果不归世界生命周期管，同一进程里还会被复用。
      */
     public static Result restoreFiles(Path worldRoot, String slot) throws IOException {
         long startedNanos = System.nanoTime();
@@ -147,6 +151,7 @@ public final class CheckpointWriter {
         SnapshotMirror.Result mirror = SnapshotBlockIo.restoreInto(worldRoot, slot, reference);
         long millis = millisSince(startedNanos);
         RewindLog.LOGGER.info("Rewind: restored slot {} into {} ({}) in {} ms", slot, worldRoot, mirror.summary(), millis);
+        SophisticatedCoreCompat.clearCaches();
         return new Result(null, mirror, millis);
     }
 

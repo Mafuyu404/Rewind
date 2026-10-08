@@ -27,7 +27,11 @@ public final class RewindCommands {
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("rewind")
-                .requires(source -> source.getServer().isSingleplayer() || source.hasPermission(2))
+                // 加载期（数据包函数解析时，Brigadier 的 canUse 预检）拿到的是 getServer() 为 null 的 source，
+                // 这里必须放行，否则任何引用 /rewind 的 .mcfunction 都会 NPE 加载失败
+                .requires(source -> source.getServer() == null
+                        || source.getServer().isSingleplayer()
+                        || source.hasPermission(2))
                 .then(Commands.literal("status").executes(context -> status(context.getSource())))
                 .then(Commands.literal("ui").executes(context -> {
                     // 时间树只在客户端里有；服务端这边只写一条日志

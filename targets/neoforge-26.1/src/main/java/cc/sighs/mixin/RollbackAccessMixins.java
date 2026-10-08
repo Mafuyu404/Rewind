@@ -31,6 +31,8 @@ import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.world.level.storage.SavedDataStorage;
+import net.neoforged.neoforge.attachment.AttachmentHolder;
+import net.neoforged.neoforge.attachment.AttachmentType;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.gen.Accessor;
@@ -214,5 +216,17 @@ public final class RollbackAccessMixins {
     public interface SavedDataStorageAccess {
         @Accessor("cache")
         Map<SavedDataType<?>, Optional<SavedData>> rewind$cache();
+    }
+
+    /**
+     * 等级数据附件（NeoForge）挂在 {@code Level} 自己的附件表上（{@code Level} 继承
+     * {@link AttachmentHolder}），{@code neoforge:data_attachments} 那个 SavedData 只是个序列化壳子。
+     * 回滚要连那张表一起清：它的反序列化器按 key 覆盖、不删多余的键。
+     */
+    @Mixin(AttachmentHolder.class)
+    public interface AttachmentHolderAccess {
+        /** 还没放过任何附件时是 {@code null}。 */
+        @Accessor("attachments")
+        Map<AttachmentType<?>, Object> rewind$attachments();
     }
 }

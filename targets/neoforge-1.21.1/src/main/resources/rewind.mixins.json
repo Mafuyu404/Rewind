@@ -13,6 +13,7 @@
     "RollbackDiscardMixins$SavedDataDiscard",
     "RollbackDiscardMixins$SinglePlayerSaveDiscard",
     "RollbackDiscardMixins$LevelDataDiscard",
+    "RollbackAccessMixins$AttachmentHolderAccess",
     "RollbackAccessMixins$ChunkMapAccess",
     "RollbackAccessMixins$DistanceManagerAccess",
     "RollbackAccessMixins$ServerChunkCacheAccess",

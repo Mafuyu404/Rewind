@@ -28,6 +28,7 @@ import cc.sighs.mixin.RollbackAccessMixins.SectionStorageAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerChunkCacheAccess;
 import cc.sighs.mixin.RollbackAccessMixins.ServerLevelAccess;
 import cc.sighs.rewind.Rewind;
+import cc.sighs.rewind.common.compat.SophisticatedCoreCompat;
 import cc.sighs.rewind.common.config.RollbackSettings;
 import cc.sighs.rewind.common.store.SnapshotBlockIo;
 import cc.sighs.rewind.snapshot.SnapshotBlockStore;
@@ -95,12 +96,21 @@ import net.minecraft.world.scores.ScoreboardSaveData;
  *       文件才会被拷回来，其余文件本来就还是存档点内容。</li>
  *   <li><b>重载</b>：给卸载掉的区块重建 holder，让它们从（已还原的）磁盘读回来；原版的发送流水线
  *       会自动把新数据推给客户端。</li>
- *   <li><b>内存状态</b>：玩家 / 时间天气 / 被强引用的存档数据（记分板、袭击）单独还原。</li>
+ *   <li><b>内存状态</b>：玩家 / 时间天气单独还原；每个维度的存档数据缓存整体作废、从（已还原的）磁盘
+ *       重读，其中「被长生命周期对象用字段强引用」的那几个（袭击、记分板）显式重建。</li>
  * </ol>
  *
- * <p>已知边界（比「关世界再重开」那条路少了什么）：只还原上面列出的那几类 SavedData，其它
- * {@code <维度>/data/*.dat}（地图、自定义 boss 条等）只还原了磁盘文件，内存里的实例保持原样，
- * 会在下一次自动保存时把旧内容写回去。
+ * <p>已知边界（比「关世界再重开」那条路少了什么）：**磁盘**与「每次用时 {@code computeIfAbsent} 取一次」
+ * 的存档数据都能回滚（含模组写在 {@code <维度>/data/*.dat} 里的那些）；但**模组自己缓存的解码结果**
+ * 不归世界生命周期管，同一进程里还会被复用（典型：精妙核心的包装器缓存，见
+ * {@link cc.sighs.rewind.common.compat.SophisticatedCoreCompat}），也没有通用手段能替它清掉。装了这类
+ * 模组、数据看起来没回滚时，把 COMMON 配置 {@code rollback.inPlaceRollback} 关掉，退回
+ * 「关世界 → 覆盖 → 重开」那条路——服务端对象全部重建，模组跟着世界重载走一遍。
+ *
+ * <p>1.20.1 侧还有一处自己的边界，细节写在 {@link #restoreSavedData} 上：{@code <X>_index}（旧世界的
+ * 结构索引）被长生命周期对象强引用、又没有重建入口，**内存里不参与回滚**（只还原磁盘文件）。Fabric 上
+ * 没有 Forge 那套「等级能力 / 数据附件」SavedData（{@code capabilities} 那个 id 是 Forge 独有的），
+ * 所以这里没有对应物。
  *
  * <h2>1.20.1 与 NeoForge 1.21.1 那份实现的差异（逐条核对过 1.20.1 的原版内部结构）</h2>
  * <ul>
@@ -294,7 +304,7 @@ public final class InPlaceRollback {
             result.reloadMs += millisSince(stepNanos);
 
             try {
-                restoreSavedData(server, slotDir);
+                restoreSavedData(server, slotDir, mirror);
             } catch (Throwable t) {
                 Rewind.LOGGER.error("Rewind: failed to reload saved data in place", t);
             }
@@ -969,19 +979,50 @@ public final class InPlaceRollback {
     }
 
     /**
-     * 被强引用的 SavedData 要换掉实例（或者把内容重新灌进去）才算真回滚。
+     * 把「内存里的存档数据」拉回存档点那一刻。
      *
-     * <p>记分板：不能走 {@code DimensionDataStorage.computeIfAbsent}——那个存储实例是服务端建服时
-     * 单独创建的，{@code ServerLevel} 手里是另一个（同一个目录、不同对象），拿不到；而且
-     * {@code Scoreboard.addObjective} 对重名会抛异常，直接 load 到活着的记分板上必然失败
-     * （原版日志里那句 {@code Error loading saved data: scoreboard}）。所以先把现有 objective / team
-     * 清掉，再用 {@code ScoreboardSaveData}（1.20.1 里承载「活着的记分板 ↔ 磁盘」的那个 SavedData）
-     * 把快照内容灌回同一个记分板对象；老的那个 save data 实例仍然持有脏标记回调，读的是同一个记分板，
-     * 下一次自动保存会写回正确内容。
+     * <p>做法是**先作废缓存、再从磁盘重读**：每个维度的 {@code DimensionDataStorage} 缓存整体清空，
+     * 之后任何 {@code computeIfAbsent} 都会重新读一遍（那些文件在几步之前刚被快照覆盖过）。这样所有
+     * 「每次用时取一次」的存档数据——**包括模组写在 {@code <维度>/data/*.dat} 里的那些**——都会自动
+     * 拿到快照内容，不需要认识任何具体模组。
      *
-     * <p>袭击：{@code ServerLevel.raids} 是 final 字段，直接换实例。
+     * <p>但**不能整份 {@code clear()}**：{@code DimensionDataStorage.save()} 只遍历缓存，条目被摘掉
+     * 又没人重新登记，那个 {@code .dat} 就**再也不落盘**（静默数据丢失）。被长生命周期对象用**字段**
+     * 强引用的 id（见 {@link #isStronglyReferencedSavedData}）必须排除在清理之外，然后单独重建：
+     *
+     * <ul>
+     *   <li><b>袭击</b>：{@code ServerLevel.raids} 是 final 字段（1.20.1 {@code ServerLevel.java:184}，
+     *       构造时 {@code computeIfAbsent} 见 :217）。摘掉缓存条目再 {@code computeIfAbsent} 会读到
+     *       刚还原的文件，把新实例换回字段即可。</li>
+     *   <li><b>记分板</b>：活着的 {@code ServerScoreboard} 与主世界存储里的 {@code ScoreboardSaveData}
+     *       在 {@code MinecraftServer.readScoreboard}（1.20.1 {@code MinecraftServer.java:294}，注册点
+     *       {@code createLevels} :339）里绑在一起。1.20.1 没有 {@code Scoreboard.dataFactory()}，承载
+     *       「活着的记分板 ↔ 磁盘」的就是 {@code ScoreboardSaveData}；先把活着的记分板清空
+     *       （{@code addObjective} 对重名会抛异常），再把快照内容灌回同一个对象。缓存里原来那条
+     *       {@code ScoreboardSaveData} 保持不动——它读的是同一个记分板，下一次自动保存照旧写对。</li>
+     * </ul>
+     *
+     * <p>最后通知模组侧丢掉它们自己缓存的解码结果（见 {@link SophisticatedCoreCompat}）。
      */
-    private static void restoreSavedData(MinecraftServer server, Path slotDir) throws IOException {
+    private static void restoreSavedData(MinecraftServer server, Path slotDir, SnapshotMirror.Result mirror)
+            throws IOException {
+        // 1. 作废各维度的存档数据缓存：下一次访问会从（已被快照覆盖的）磁盘重读。
+        //    被强引用的那几个条目要排除在外（见 isStronglyReferencedSavedData），它们由下面几步显式重建。
+        for (ServerLevel level : server.getAllLevels()) {
+            cacheOf(level.getDataStorage()).keySet().removeIf(id -> !isStronglyReferencedSavedData(id));
+        }
+
+        // 2. 袭击：ServerLevel.raids 是 final 字段，摘掉缓存条目再 computeIfAbsent 读回刚还原的文件
+        for (ServerLevel level : server.getAllLevels()) {
+            String fileId = Raids.getFileId(level.dimensionTypeRegistration());
+            DimensionDataStorage levelStorage = level.getDataStorage();
+            cacheOf(levelStorage).remove(fileId);
+            // 1.20.1 没有 Raids.factory(level)，用原版建服时那条工厂（Raids.load + new Raids）
+            levelAccess(level).rewind$setRaids(
+                    levelStorage.<Raids>computeIfAbsent(tag -> Raids.load(level, tag), () -> new Raids(level), fileId));
+        }
+
+        // 3. 记分板：把快照内容灌回活着的 ServerScoreboard
         Path file = slotDir.resolve("data").resolve("scoreboard.dat");
         if (Files.isRegularFile(file)) {
             CompoundTag data = readNbt(file).getCompound("data");
@@ -998,14 +1039,93 @@ public final class InPlaceRollback {
             new ScoreboardSaveData(scoreboard).load(data);
         }
 
-        for (ServerLevel level : server.getAllLevels()) {
-            String fileId = Raids.getFileId(level.dimensionTypeRegistration());
-            DimensionDataStorage levelStorage = level.getDataStorage();
-            cacheOf(levelStorage).remove(fileId);
-            // 1.20.1 没有 Raids.factory(level)，用原版建服时那条工厂（Raids.load + new Raids）
-            levelAccess(level).rewind$setRaids(
-                    levelStorage.<Raids>computeIfAbsent(tag -> Raids.load(level, tag), () -> new Raids(level), fileId));
+        // 4. 把这次覆盖到的存档数据文件打进日志；非原版的聚合一条 WARN 提示关开关
+        logRestoredSavedData(mirror.files);
+
+        // 5. 模组自己缓存的解码结果不归世界生命周期管，只能单独通知它们丢掉
+        SophisticatedCoreCompat.clearCaches();
+    }
+
+    /**
+     * 原版（1.20.1 的 vanilla；Fabric 侧没有 Forge 那种等级能力 SavedData）会往 {@code <维度>/data/}
+     * 里写的那些存档数据 id。不在这份名单里的就算「模组数据」——原地回滚只能保证它们的**磁盘文件**被还原。
+     */
+    private static final Set<String> VANILLA_SAVED_DATA = Set.of(
+            "scoreboard", "raids", "raids_end", "random_sequences", "chunks", "idcounts");
+
+    /**
+     * 被长生命周期对象用**字段**强引用的存档数据 id：清缓存时要把它们排除在外。
+     *
+     * <p>理由见 {@link #restoreSavedData}：{@code save()} 只遍历缓存，条目被摘掉又没人重新登记，
+     * 对应的 {@code .dat} 就再也不落盘。1.20.1（vanilla）里这类 id 有：
+     * <ul>
+     *   <li>{@code raids} / {@code raids_end}：{@code ServerLevel.raids}（final 字段，
+     *       {@code ServerLevel.java:184}，构造时 {@code computeIfAbsent} 见 :217）。</li>
+     *   <li>{@code random_sequences}：{@code ServerLevel.randomSequences}（final 字段，
+     *       {@code ServerLevel.java:195}，构造时 {@code computeIfAbsent} 见 :238）。</li>
+     *   <li>{@code scoreboard}：{@code MinecraftServer.readScoreboard(DimensionDataStorage)}
+     *       （{@code MinecraftServer.java:294}，注册点 {@code createLevels} :339）。</li>
+     *   <li>{@code *_index}：{@code LegacyStructureDataHandler.indexMap} 持有的
+     *       {@code StructureFeatureIndexSavedData}（{@code LegacyStructureDataHandler.java:46,186}）。
+     *       只对「从 1.13 之前升级上来的世界」存在，同样没有重建入口。</li>
+     * </ul>
+     *
+     * <p>命令存储 {@code command_storage_*} 表面上也被 {@code MinecraftServer.commandStorage.namespaces}
+     * 强引用，但它的 {@code get} / {@code set} 每次都走存储层（{@code CommandStorage.get/set}），清掉缓存
+     * 条目后会重新读盘、装进一个新的 {@code Container}：内容跟着回滚，也继续正常落盘，所以**不保护**。
+     */
+    private static boolean isStronglyReferencedSavedData(String id) {
+        return id.equals("scoreboard")
+                || id.equals("raids") || id.equals("raids_nether") || id.equals("raids_end")
+                || id.equals("random_sequences")
+                || id.endsWith("_index");
+    }
+
+    /**
+     * 把这次回滚覆盖到的 {@code <维度>/data/*.dat} 打进日志，遇到模组数据再额外提示一句。
+     *
+     * <p>这是「原地回滚少了什么」唯一能被看见的线索：模组把世界状态写在这些文件里时，磁盘回滚了、
+     * 内存不一定回滚，游戏里就可能出现「文件回去了、数据没回去」。真遇到了就关掉
+     * {@code rollback.inPlaceRollback} 走完整重开那条路。
+     */
+    private static void logRestoredSavedData(List<String> files) {
+        List<String> dataFiles = new ArrayList<>();
+        Set<String> modIds = new HashSet<>();
+        for (String file : files) {
+            if (!isSavedDataFile(file)) {
+                continue;
+            }
+            dataFiles.add(file);
+            String id = savedDataId(file);
+            if (!isVanillaSavedData(id)) {
+                modIds.add(id);
+            }
         }
+        if (dataFiles.isEmpty()) {
+            return;
+        }
+        Rewind.LOGGER.info("Rewind: saved data covered by this rollback: {}", String.join(", ", dataFiles));
+        if (!modIds.isEmpty()) {
+            Rewind.LOGGER.warn("Rewind: rollback also covers non-vanilla saved data ({}); if a mod's data looks like it "
+                            + "did not roll back, disable rollback.inPlaceRollback and retry",
+                    String.join(", ", modIds));
+        }
+    }
+
+    /** {@code data/*.dat} 或 {@code <维度>/data/*.dat} 才算存档数据文件。 */
+    private static boolean isSavedDataFile(String relative) {
+        return relative.endsWith(".dat") && (relative.startsWith("data/") || relative.contains("/data/"));
+    }
+
+    /** 文件名去掉目录与 {@code .dat} 就是 id（见 {@code DimensionDataStorage.getDataFile}）。 */
+    private static String savedDataId(String relative) {
+        String name = relative.substring(relative.lastIndexOf('/') + 1);
+        return name.substring(0, name.length() - ".dat".length());
+    }
+
+    private static boolean isVanillaSavedData(String id) {
+        return VANILLA_SAVED_DATA.contains(id)
+                || id.startsWith("map_") || id.startsWith("raids_") || id.startsWith("command_storage_");
     }
 
     /** 1.20.1 的 {@code NbtIo} 只有 {@code readCompressed(File)} 一种重载（没有 Path 版）。 */

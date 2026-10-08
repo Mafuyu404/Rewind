@@ -392,7 +392,8 @@ public final class CheckpointController {
         lastRestoreCopied = -1;
         lastRestoreSkipped = -1;
         lastRestoreFiles = -1;
-        if (inPlaceEnabled) {
+        // 原地回滚要么被调试开关关掉、要么被 COMMON 配置关掉；两种都退回「关世界 → 覆盖 → 重开」
+        if (inPlaceEnabled && RewindServerConfig.inPlaceRollback()) {
             startWork(Work.ROLLBACK);
         } else {
             startWork(Work.NONE);

@@ -30,6 +30,8 @@ import net.minecraft.world.level.entity.EntitySectionStorage;
 import net.minecraft.world.level.entity.PersistentEntitySectionManager;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.storage.DimensionDataStorage;
+import net.neoforged.neoforge.attachment.AttachmentHolder;
+import net.neoforged.neoforge.attachment.AttachmentType;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Mutable;
 import org.spongepowered.asm.mixin.gen.Accessor;
@@ -193,10 +195,21 @@ public final class RollbackAccessMixins {
         LongSet rewind$chunksToUnload();
     }
 
-    /** 存档数据缓存：回滚后清掉对应条目，下一次 {@code computeIfAbsent} 会重新读盘。 */
+    /** 存档数据缓存：回滚时整份清空（{@code null} 是「文件不存在」的占位，也要一起清），之后每次访问都会重新读盘。 */
     @Mixin(DimensionDataStorage.class)
     public interface DimensionDataStorageAccess {
         @Accessor("cache")
         Map<String, SavedData> rewind$cache();
+    }
+
+    /**
+     * 等级数据附件（NeoForge）挂在 {@code Level} 自己的附件表上，{@code neoforge_data_attachments}
+     * 那个 SavedData 只是个序列化壳子。回滚要连那张表一起清：它的反序列化器按 key 覆盖、不删多余的键。
+     */
+    @Mixin(AttachmentHolder.class)
+    public interface AttachmentHolderAccess {
+        /** 还没放过任何附件时是 {@code null}。 */
+        @Accessor("attachments")
+        Map<AttachmentType<?>, Object> rewind$attachments();
     }
 }

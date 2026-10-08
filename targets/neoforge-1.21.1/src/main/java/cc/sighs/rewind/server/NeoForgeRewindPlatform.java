@@ -6,6 +6,7 @@ import cc.sighs.rewind.common.spi.RewindPlatform;
 import cc.sighs.rewind.common.spi.RollbackOutcome;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
+import net.neoforged.fml.loading.FMLLoader;
 
 /**
  * NeoForge 1.21.1 的 {@link RewindPlatform} 实现：把 common 需要知道的全部平台能力接进来。
@@ -62,6 +63,21 @@ public final class NeoForgeRewindPlatform implements RewindPlatform {
         InPlaceRollback.Result rolled = InPlaceRollback.run(server(server), worldRoot, slot);
         return new RollbackOutcome(rolled.summary(), rolled.mirrorCopied, rolled.mirrorSkipped,
                 rolled.mirrorFiles, rolled.totalMs);
+    }
+
+    /**
+     * 某个模组的类加载器：NeoForge 的模组是 JPMS 模块，模块名就是 modid（崩溃报告里那串
+     * {@code TRANSFORMER/rewind@1.0.0} 就是它的模块名）。跨模组反射要用它，见
+     * {@code cc.sighs.rewind.common.compat.SophisticatedCoreCompat}——common 自己那个加载器看不见别的模组。
+     */
+    @Override
+    public ClassLoader modClassLoader(String modId) {
+        try {
+            ModuleLayer layer = FMLLoader.getGameLayer();
+            return layer == null ? null : layer.findLoader(modId);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private static MinecraftServer server(Object server) {
