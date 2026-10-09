@@ -176,7 +176,7 @@ client            CheckpointController            客户端策略：过渡、界
 
 `CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
 
-### 进世界之前的修复入口（世界选择界面上的「用存档点修复这个世界」）
+### 进世界之前的修复入口（世界选择界面上的「读取存档点」）
 
 F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开，就按不了 F8。所以世界选择界面
 （`SelectWorldScreen`）的底部按钮区多了一颗按钮：对当前选中的存档，用它的存档点把磁盘上的世界文件
@@ -193,11 +193,15 @@ F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开�
   （`LevelSummary.isDisabled()`）且 `repairSlot` 不为空」。1.21.1 / 26.1 挂在原版的
   `updateButtonStatus(LevelSummary)` 上（那是选中项变化时原版自己走的钩子）；1.20.1 那个方法只收两个
   布尔量、拿不到存档，只能每 tick 对一次当前选中行（选中项没变就直接返回，不重复读索引）。
-- **按钮放哪儿按版本算**——四个版本的**存档行里都没有按钮**，per-world 的操作全在底部按钮区，所以这颗
-  也放底部：1.21.1 列表与按钮之间本来就有 60 像素空档（列表底是 `height - 112`），直接占一排新的；
-  26.1 往 footer 那个 4 列 `GridLayout` 里加第三排，并把 footer 高度从 60 放宽到 84（列表因此短 24 像素）；
-  1.20.1 底部两排已经排满，所以把原版那两排整体上移 24 像素、列表跟着收短 24 像素（一个
-  `@Redirect Button$Builder.bounds` 就挪了 6 颗，加一个 `@ModifyArg` 改列表高度）。
+- **第一排三颗等宽**——四个版本的**存档行里都没有按钮**，per-world 的操作全在底部按钮区，所以这颗也放第一排：
+  原版第一排 `[进入世界 150][创建新的世界 150]`（整排 308）被收成三颗等宽 100、间隔 4 像素
+  （3 * 100 + 2 * 4 = 308），中间那颗就是「读取存档点」；三颗等宽之后第一排的竖缝**不会**与第二排那四颗
+  （各 72）对齐，这是等宽的必然结果。1.20.1 / 1.21.1 用两个 `@Redirect` 改写 `ordinal = 0/1` 那两次
+  `Button$Builder.bounds`（进入世界：宽度 150 → 100、左边缘不动；创建新的世界：右边缘不动、
+  宽度 150 → 100）；26.1 的 footer 是 4 列 `GridLayout`（列宽由第二排那四颗的 71 定死），
+  三颗 100 塞不进去、塞进去还会把网格撑宽从而挤歪第二排，所以**网格保持原版不动**，第一排三颗改在
+  `init` 的尾巴上按同一套坐标手工摆（`playWorldButton` 用 `@Shadow` 拿、创建新的世界是个局部变量、
+  在它进网格那次 `addChild` 上 `@Redirect` 截下来）。
 - **界面会把状态说出来**（`WorldRepairScreen`）：目标存档点、会覆盖什么、进行到哪一步 / 结果。这与
   「界面不放提示、只写日志」的约定不冲突——它是玩家主动打开的修复入口，做完不告诉人只能去翻日志；
   聊天框与提示条仍然一概不碰，日志照写。还原跑在后台线程上（拷大存档要几秒），结果回渲染线程再显示。
@@ -380,6 +384,10 @@ $env:CURSEFORGE_TOKEN = '...'
 $env:MODRINTH_TOKEN = '...'
 .\gradlew.bat publishMods
 ```
+
+- **版本号只有一处**：根 `gradle.properties` 的 `mod_version`——各 target 的 metadata（`neoforge.mods.toml` / `mods.toml` / `fabric.mod.json`）都是 `processResources` 时把 `${mod_version}` 展开进去的，所以改完必须重新 `clean build` 才会进产物。
+- **只发一个平台**用平台自己的任务：`publishCurseforge` / `publishModrinth`。**别拿 `publishMods` 当「只发 CurseForge」**：它是「两个平台都发」，而且 `publish.gradle` 的凭据预检会把「缺 Modrinth 项目 ID 或 token」直接判成失败（`Cannot publish mods; missing: ...`），哪怕你根本不想发 Modrinth。
+- **更新日志放在仓库根 `CHANGELOG.md`**，上传时按 UTF-8 自动读它（`publish.gradle` 里的 `changelog`；`PUBLISH_CHANGELOG` 环境变量优先）。**不要用环境变量传长日志**：多行 + 非 ASCII 经过 `gradlew.bat` / `cmd` 传到 JVM 时不保证还原（中文会变乱码），而且 `publishMods` 的预检只校验「有没有设」，不会告诉你内容坏没坏。
 
 发布前必须执行该 target 的 `clean build`，检查 jar 内的 metadata、共享 class、共享资源和版本范围。不要从根项目或错误 target 发布。
 

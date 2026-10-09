@@ -149,7 +149,7 @@
   "rewind.ui.size.kb": "%s KB",
   "rewind.ui.size.mb": "%s MB",
 
-  "rewind.repair.button": "Repair from checkpoint",
+  "rewind.repair.button": "Rewind",
   "rewind.repair.title": "Repair \"%s\" with a checkpoint",
   "rewind.repair.target": "Restore to checkpoint: %s",
   "rewind.repair.warning": "Overwrites the world files on disk (no backup).",

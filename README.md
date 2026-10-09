@@ -56,7 +56,7 @@ targets/neoforge-26.1/libs/
 
 ## 发布
 
-每个 target 都提供 `publishMods`，可手动发布其自身的产物至 CurseForge 与 Modrinth。两个平台的项目 ID 是所有 target 共用的非敏感信息，在根 `gradle.properties` 中取消注释并填写：
+每个 target 都提供 `publishMods`，可手动发布其自身的产物至 CurseForge 与 Modrinth。两个平台分别发布用 `publishCurseforge` / `publishModrinth`（`publishMods` 要求两个平台的凭据都在，只发一个平台时别用它）。更新日志取自仓库根的 `CHANGELOG.md`，上传前会自动读进去；版本号在根 `gradle.properties` 的 `mod_version`，改完要重新 `clean build`。两个平台的项目 ID 是所有 target 共用的非敏感信息，在根 `gradle.properties` 中取消注释并填写：
 
 ```properties
 publish_curseforge_project_id=你的CurseForge项目ID

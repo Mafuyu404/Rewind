@@ -11,7 +11,7 @@ import cc.sighs.rewind.api.RewindApi;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 
 /**
- * 「用存档点修复这个世界」：世界选择界面那颗按钮背后干的事。
+ * 「读取存档点」：世界选择界面那颗按钮背后干的事。
  *
  * <p>它干活的时机是**世界还没进**，所以一条都不能碰服务器：存档目录由存档名直接拼出来（与原版
  * {@code LevelStorageSource.getLevelPath} 同一个算法），还原走 {@link RewindApi#restoreFiles}——

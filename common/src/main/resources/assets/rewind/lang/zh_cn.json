@@ -149,7 +149,7 @@
   "rewind.ui.size.kb": "%s KB",
   "rewind.ui.size.mb": "%s MB",
 
-  "rewind.repair.button": "用存档点修复",
+  "rewind.repair.button": "读取存档点",
   "rewind.repair.title": "用存档点修复「%s」",
   "rewind.repair.target": "还原到存档点：%s",
   "rewind.repair.warning": "这会用存档点覆盖磁盘上的世界文件，不会先做备份。",

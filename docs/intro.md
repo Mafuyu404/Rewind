@@ -39,7 +39,7 @@ The first restore needs a warm-up and is a little slower; later restores usually
 
 ### Other Notes
 
-- Restoring happens *inside* a loaded world, so a world that no longer opens puts it out of reach. The "Repair from checkpoint" button on the world list covers that case: it overwrites the selected world's files on disk with one of its checkpoints, without having to load the world first. Open the world afterwards.
+- Restoring happens *inside* a loaded world, so a world that no longer opens puts it out of reach. The "Restore" button on the world list covers that case: it overwrites the selected world's files on disk with one of its checkpoints, without having to load the world first. Open the world afterwards.
 
 - Thanks to a built-in "baby Git", checkpoints are typically only a few KB in size. Restoring does not restart the world or reload every chunk, so it completes in an instant — which is what makes the time tree possible.
 

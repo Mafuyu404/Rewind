@@ -10,20 +10,23 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import cc.sighs.rewind.client.WorldRepair;
 
 /**
- * 世界选择界面上的「用存档点修复这个世界」——进世界之前就能用的那条恢复入口。
+ * 世界选择界面上的「读取存档点」——进世界之前就能用的那条恢复入口。
  *
- * <p><b>为什么落在底部按钮区，而不是存档行上</b>：1.21.1 的存档行（{@code WorldSelectionList$WorldListEntry}）
- * 里一颗按钮都没有，「进入世界 / 编辑 / 删除 / 重建」全在 {@code SelectWorldScreen.init()} 建的底部按钮上，
+ * <p><b>第一排三颗等宽</b>：原版第一排是 {@code [进入世界 150][创建新的世界 150]}（整排 308 像素宽），
+ * 这里把两颗都收成 100 宽，中间插进「读取存档点」——于是
+ * {@code [进入世界 100][读取存档点 100][创建新的世界 100]}，三颗等宽、间隔 4 像素
+ * （3 * 100 + 2 * 4 = 308），整排总宽与原来一样。三颗等宽之后第一排的竖缝不会与第二排那四颗
+ * （都是 72 宽）对齐——这是等宽的必然结果。
+ *
+ * <p><b>为什么是底部按钮区</b>：1.21.1 的存档行（{@code WorldSelectionList$WorldListEntry}）里一颗
+ * 按钮都没有，「进入世界 / 编辑 / 删除 / 重建」全在 {@code SelectWorldScreen.init()} 建的底部按钮上，
  * 作用对象是当前选中的那一行。这颗按钮跟着同样的规矩来，所以它只在选中了某个存档之后才可用（与
  * 「进入世界」那颗一致的语义）。
- *
- * <p><b>位置算在列表与底部按钮之间的空档里</b>：1.21.1 传给列表的高度是 {@code height - 112}，
- * 而底部第一排按钮在 {@code height - 52}，中间那 60 像素原本是空的——所以这颗按钮不动原版任何一颗
- * 按钮的坐标。（1.20.1 没有这个空档，那边的实现要把底部两排整体上移，见 forge / fabric target。）
  *
  * <p><b>可用状态与目标存档都从 {@code updateButtonStatus(LevelSummary)} 来</b>：那是原版在选中项变化时
  * 走的钩子，参数就是当前选中的 {@code LevelSummary}（没选中时为 null）。不自己每 tick 去读列表，是因为
@@ -41,6 +44,12 @@ public final class WorldRepairMixins {
      */
     @Mixin(SelectWorldScreen.class)
     public abstract static class SelectWorldRepair extends Screen {
+        /** 第一排三颗按钮的宽度。3 * 100 + 2 * 4 = 308，与原版第一排的总宽一致。 */
+        private static final int BUTTON_WIDTH = 100;
+        /** 第一排到屏幕底边的距离，与原版一致（原版那两颗在 {@code height - 52}）。 */
+        private static final int ROW_BOTTOM_OFFSET = 52;
+        private static final int BUTTON_HEIGHT = 20;
+
         /** 我们那颗按钮。 */
         @Unique
         @Nullable
@@ -50,10 +59,34 @@ public final class WorldRepairMixins {
             super(Component.empty());
         }
 
+        /** 「进入世界」收成等宽的一格：它原本 150 宽，左边缘不动。 */
+        @Redirect(
+                method = "init()V",
+                at = @At(
+                        value = "INVOKE",
+                        target = "Lnet/minecraft/client/gui/components/Button$Builder;bounds(IIII)Lnet/minecraft/client/gui/components/Button$Builder;",
+                        ordinal = 0))
+        private Button.Builder rewind$shrinkSelectButton(Button.Builder builder, int x, int y, int width, int height) {
+            return builder.bounds(x, y, BUTTON_WIDTH, height);
+        }
+
+        /** 「创建新的世界」收成等宽的一格并右移：右边缘不动，空出来的那格给「读取存档点」。 */
+        @Redirect(
+                method = "init()V",
+                at = @At(
+                        value = "INVOKE",
+                        target = "Lnet/minecraft/client/gui/components/Button$Builder;bounds(IIII)Lnet/minecraft/client/gui/components/Button$Builder;",
+                        ordinal = 1))
+        private Button.Builder rewind$shrinkCreateButton(Button.Builder builder, int x, int y, int width, int height) {
+            return builder.bounds(x + width - BUTTON_WIDTH, y, BUTTON_WIDTH, height);
+        }
+
         @Inject(method = "init()V", at = @At("TAIL"))
         private void rewind$addRepairButton(CallbackInfo ci) {
+            // 我们占中间那一格：整排左右对称，左右各留一格给「进入世界 / 创建新的世界」
             Button button = Button.builder(Component.translatable("rewind.repair.button"), WorldRepair.PRESS)
-                    .bounds(this.width / 2 - 154, this.height - 76, 308, 20)
+                    .bounds(this.width / 2 - BUTTON_WIDTH / 2, this.height - ROW_BOTTOM_OFFSET,
+                            BUTTON_WIDTH, BUTTON_HEIGHT)
                     .build();
             this.addRenderableWidget(button);
             // init 末尾那次 updateButtonStatus(null) 跑在我们前面，所以初始一定是关的

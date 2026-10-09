@@ -12,7 +12,7 @@ import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.snapshot.SnapshotMeta;
 
 /**
- * {@link RewindApi#repairSlot(Path)}：「用存档点修复这个世界」该挑哪个存档点。
+ * {@link RewindApi#repairSlot(Path)}：「读取存档点」该挑哪个存档点。
  *
  * <p>守着三件事：优先时间线的头；头不可用（不存在 / 还没写完）时退回最新的完整存档点；
  * 一个可用的都没有时返回空串，而不是抛异常。

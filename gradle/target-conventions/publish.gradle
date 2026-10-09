@@ -35,7 +35,11 @@ def modrinthProjectId = providers.provider { findProperty('publish_modrinth_proj
 
 publishMods {
     file = publishFile
-    changelog = providers.environmentVariable('PUBLISH_CHANGELOG').getOrElse('See the project changelog for details.')
+    // 上传用的更新日志：优先取环境变量 PUBLISH_CHANGELOG；没设就读仓库根的 CHANGELOG.md
+    // （按 UTF-8 读——Windows 的默认字符集会把中文读坏）。别把长文本塞进环境变量：
+    // 多行 + 非 ASCII 经过 bat / cmd 传到 JVM 时不保证还原。
+    changelog = providers.environmentVariable('PUBLISH_CHANGELOG').orElse(
+            providers.provider { file('../../CHANGELOG.md').getText('UTF-8') })
     type = STABLE
     modLoaders.add(publishLoader)
 
