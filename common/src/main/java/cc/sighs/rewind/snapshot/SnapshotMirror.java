@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import cc.sighs.rewind.common.RewindLog;
 
 /**
  * 目录镜像：把 sourceRoot 的内容（含相对路径结构）镜像到 targetRoot。
@@ -32,6 +33,14 @@ import java.util.Set;
  * <p>回溯方向的「源」不是齐全的目录树——块编码的 .mca 在槽位里没有实体文件，所以文件列表要把
  * 目录、清单、块映射三者并起来（见 {@code sourceFiles}）。少一个都会漏还原或者反过来把世界里的
  * 文件当多余的删掉。
+ *
+ * <p><b>单个文件动不了不会失败</b>：被别的进程锁着（典型：模组自己开着的嵌入式数据库，Windows 上
+ * 连读都读不动）、正好被删掉、写不进去、该删的删不掉——这些都不该让整次建点（或整次回溯）泡汤，
+ * 毕竟世界目录里躺着谁的文件不由我们决定。这种路径会被跳过，并在清单里留一条
+ * {@link SnapshotManifest#putUntouched(String) 「没动它」}的记录（回溯方向因此不会回拷它、也不会
+ * 把它当多余文件删掉），计数进 {@link Result#untouched} / {@link Result#undeleted}，前几条还会写
+ * WARN 日志。**唯一照旧直接失败的是从块存储重建时的块缺失**——那是存档点自己损坏，宁可失败也不写
+ * 半个文件（见 {@link #storeBlockEncoded}）。
  */
 public final class SnapshotMirror {
     /** 镜像方向。 */
@@ -81,10 +90,26 @@ public final class SnapshotMirror {
         /** 完全没动的文件数。 */
         public int skipped;
         public int deleted;
+        /**
+         * **动不了**而跳过的文件数：源读不动（被别的进程锁着、正好被删掉）、或者写不进目标。
+         *
+         * <p>这些路径在清单里留下一条 {@link SnapshotManifest#putUntouched(String)} 的记录，
+         * 回溯方向不会再碰它们，所以两次镜像加起来这个数就是「没能跟存档点一起回去」的文件数。
+         */
+        public int untouched;
+        /** 该删（目标里多出来的）但删不掉的，通常是那个文件正被别的进程占着。 */
+        public int undeleted;
         /** 真正写盘的字节数——块存储里已经存在的块不计入，那正是省钱的地方。 */
         public long copiedBytes;
         /** 快照里所有文件的总字节数（用于展示占用）。 */
         public long totalBytes;
+
+        /** 收下一个文件：进清单、进文件数、累加总字节。 */
+        void record(String relative, long size, long modified) {
+            manifest.put(relative, size, modified);
+            files.add(relative);
+            totalBytes += size;
+        }
 
         public String summary() {
             StringBuilder builder = new StringBuilder("copied=").append(copied);
@@ -97,9 +122,15 @@ public final class SnapshotMirror {
             if (reused > 0) {
                 builder.append(" reused=").append(reused);
             }
-            return builder.append(" skipped=").append(skipped)
-                    .append(" deleted=").append(deleted)
-                    .append(" bytes=").append(copiedBytes)
+            builder.append(" skipped=").append(skipped)
+                    .append(" deleted=").append(deleted);
+            if (untouched > 0) {
+                builder.append(" untouched=").append(untouched);
+            }
+            if (undeleted > 0) {
+                builder.append(" undeleted=").append(undeleted);
+            }
+            return builder.append(" bytes=").append(copiedBytes)
                     .append(" files=").append(files.size())
                     .toString();
         }
@@ -107,6 +138,12 @@ public final class SnapshotMirror {
 
     /** {@link #copyAtomically} 用的临时文件后缀；{@link SnapshotLayout#isExcluded(String)} 会把它排除掉。 */
     public static final String TEMP_SUFFIX = ".rewind-tmp";
+
+    /**
+     * 每个动不了的文件都值得看见，但一个世界坏起来可能一次几千个：前 {@value} 条逐条写，
+     * 之后只留计数（总数在 {@link Result#summary()} 里）。
+     */
+    private static final int MAX_LOGGED_SKIPS = 5;
 
     private SnapshotMirror() {
     }
@@ -137,6 +174,10 @@ public final class SnapshotMirror {
         }
 
         List<String> sourceFiles = sourceFiles(sourceRoot, direction, reference, blocks);
+        // 回溯方向的列表是「目录 ∪ 清单 ∪ 块映射」拼出来的，后两者里可能记着今天已经被排除的路径
+        // （典型：排除规则是后加的，老槽位还记着跨视距模组的库）。排除的路径在这里统一滤掉，
+        // 免得照单子去回拷一个读不动的文件、或者反过来删掉世界里那个文件。
+        sourceFiles.removeIf(SnapshotLayout::isExcluded);
         Collections.sort(sourceFiles);
         Set<String> wanted = new LinkedHashSet<>(sourceFiles);
         int total = sourceFiles.size();
@@ -148,17 +189,35 @@ public final class SnapshotMirror {
                 progress.onFile(index, total, relative);
             }
             Path source = sourceRoot.resolve(relative);
+            boolean sourceFile = Files.isRegularFile(source);
             SnapshotManifest.Entry recorded = reference == null ? null : reference.get(relative);
             SnapshotBlocks.Entry mapped = blocks == null || blocks.existing == null
                     ? null
                     : blocks.existing.get(relative);
             boolean encoded = isEncoded(relative, direction, mapped, blocks);
 
+            // 上次建点就「没动它」（那会儿读不动 / 写不进槽位）的文件：快照里没有它的内容。
+            // 回溯方向直接跳过——拿不存在的快照内容去覆盖世界只会白失败一次；建点方向再试一次机会：
+            // 这次收得进去就照常收（下面的记录会盖掉旧记录），收不进去就继续留着那条记录。
+            if (recorded != null && recorded.untouched() && (direction == Direction.TO_WORLD || !sourceFile)) {
+                result.manifest.putUntouched(relative);
+                result.untouched++;
+                continue;
+            }
+
             long size;
             long modified;
-            if (Files.isRegularFile(source)) {
-                size = Files.size(source);
-                modified = Files.getLastModifiedTime(source).toMillis();
+            if (sourceFile) {
+                try {
+                    size = Files.size(source);
+                    modified = Files.getLastModifiedTime(source).toMillis();
+                } catch (IOException vanished) {
+                    // 列目录之后、取属性之前被删掉 / 挪走：和读不动一样按「没动它」处理
+                    result.manifest.putUntouched(relative);
+                    result.untouched++;
+                    warnSkipped("read", relative, vanished, result.untouched);
+                    continue;
+                }
             } else if (encoded && mapped != null) {
                 // 块编码、槽位里没有实体文件：大小来自映射，mtime 只可能来自清单
                 size = mapped.size;
@@ -171,44 +230,76 @@ public final class SnapshotMirror {
                 continue;
             }
 
-            result.manifest.put(relative, size, modified);
-            result.files.add(relative);
-            result.totalBytes += size;
-
             Path target = targetRoot.resolve(relative);
             if (isAlreadyInPlace(direction, relative, target, size, modified, reference, recorded)) {
+                result.record(relative, size, modified);
                 result.skipped++;
                 continue;
             }
-            Path parent = target.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
 
-            if (encoded) {
-                storeBlockEncoded(relative, source, target, size, modified, mapped, recorded, blocks, direction, result);
+            try {
+                Path parent = target.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+                if (encoded) {
+                    storeBlockEncoded(relative, source, target, size, modified, mapped, recorded, blocks, direction,
+                            result);
+                } else {
+                    copyAtomically(source, target);
+                    result.copied++;
+                    result.copiedBytes += size;
+                    if (direction == Direction.TO_WORLD) {
+                        restoreModifiedTime(target, recorded);
+                    }
+                }
+            } catch (IOException failure) {
+                if (encoded && direction == Direction.TO_WORLD) {
+                    // 从块存储重建失败 = 快照自己的块缺失，属于存档点损坏：宁可直接失败，也不写半个文件
+                    throw failure;
+                }
+                // 被别的进程锁着 / 正好被删掉 / 写不进去：一个文件动不了，不该让整次建点（或整次回溯）
+                // 泡汤。记一条「别动它」——快照里没有它的内容，回溯也不能反过来把世界里的那一份删掉。
+                result.manifest.putUntouched(relative);
+                result.untouched++;
+                warnSkipped("copy", relative, failure, result.untouched);
                 continue;
             }
-
-            copyAtomically(source, target);
-            result.copied++;
-            result.copiedBytes += size;
-            if (direction == Direction.TO_WORLD) {
-                restoreModifiedTime(target, recorded);
-            }
+            result.record(relative, size, modified);
         }
 
         for (String relative : listFiles(targetRoot)) {
             if (wanted.contains(relative)) {
                 continue;
             }
-            if (Files.deleteIfExists(targetRoot.resolve(relative))) {
-                result.deleted++;
+            try {
+                if (Files.deleteIfExists(targetRoot.resolve(relative))) {
+                    result.deleted++;
+                }
+            } catch (IOException failure) {
+                // 删除的失败同理：留着就是，别让整次镜像失败
+                result.undeleted++;
+                warnSkipped("delete", relative, failure, result.undeleted);
             }
         }
 
+        if (result.untouched > 0) {
+            RewindLog.LOGGER.warn("Rewind: {} file(s) are untouched ({})",
+                    result.untouched,
+                    direction == Direction.TO_WORLD
+                            ? "left as they are in the world, not restored"
+                            : "not part of this checkpoint");
+        }
         pruneEmptyDirectories(targetRoot);
         return result;
+    }
+
+    private static void warnSkipped(String action, String relative, IOException failure, int count) {
+        if (count <= MAX_LOGGED_SKIPS) {
+            RewindLog.LOGGER.warn("Rewind: cannot {} {} ({}); leaving it as is", action, relative, failure);
+        } else if (count == MAX_LOGGED_SKIPS + 1) {
+            RewindLog.LOGGER.warn("Rewind: more files cannot be {}; the total is in the summary", action);
+        }
     }
 
     /** 块编码文件的两个方向：建点方向切块入库，回溯方向从块存储重建。 */
@@ -283,15 +374,30 @@ public final class SnapshotMirror {
      * 临时文件 + 原子替换地拷贝一个文件，绝不原地改写目标。
      *
      * <p>这样中途失败或进程被杀都不会在槽位里留下半个文件（槽位里留半个文件比没有更糟：
-     * 它有正确的大小，看起来像是好的）。
+     * 它有正确的大小，看起来像是好的）。失败时顺手把临时文件删掉——它在排除规则里不会进快照，
+     * 但会一直躺在槽位或世界目录里。
      */
     private static void copyAtomically(Path source, Path target) throws IOException {
         Path temp = target.resolveSibling(target.getFileName().toString() + TEMP_SUFFIX);
-        Files.copy(source, temp, StandardCopyOption.REPLACE_EXISTING);
         try {
-            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException atomicUnsupported) {
-            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            Files.copy(source, temp, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicUnsupported) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException failure) {
+            deleteQuietly(temp);
+            throw failure;
+        }
+    }
+
+    /** 删掉可能留下的临时文件；删不掉就算了，不能因为它把原始失败盖掉。 */
+    private static void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException ignored) {
+            // 只是清理，失败不影响正确性
         }
     }
 
@@ -355,6 +461,9 @@ public final class SnapshotMirror {
 
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                // 读不到属性的条目（没权限、走到一半被删掉）只能跳过；写一条 WARN，别让它无声无息
+                RewindLog.LOGGER.warn("Rewind: cannot list {} ({}); the mirror skips it",
+                        SnapshotLayout.relativize(root, file), exc);
                 return FileVisitResult.CONTINUE;
             }
         });

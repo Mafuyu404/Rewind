@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.DosFileAttributeView;
 import java.nio.file.attribute.FileTime;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
@@ -261,6 +263,107 @@ class SnapshotMirrorTest {
         assertEquals(1, result.files.size());
         assertEquals(1, result.encoded);
         assertFalse(Files.exists(slotA.resolve("session.lock")));
+    }
+
+    @Test
+    void neverTouchesTheLodModsWorldData() throws IOException {
+        prepare();
+        write(world.resolve("level.dat"), "level", 1_000L);
+        write(world.resolve("voxy/storage/LOCK"), "", 1_000L);
+        write(world.resolve("voxy/storage/000001.sst"), "lod", 1_000L);
+
+        SnapshotMirror.Result first = snapshot(world, slotA, SnapshotManifest.empty(), SnapshotBlocks.empty(),
+                SnapshotBlocks.empty());
+
+        assertEquals(1, first.files.size(), "只有 level.dat 进快照");
+        assertFalse(Files.exists(slotA.resolve("voxy")), "跨视距模组的 LOD 库不该被镜像进槽位");
+        assertFalse(first.manifest.paths().contains("voxy/storage/LOCK"), "清单里不该留下它的条目");
+
+        SnapshotMirror.Result restored = restore(slotA, world, first.manifest, SnapshotBlocks.empty());
+
+        assertEquals(0, restored.deleted, "回溯不该把模组自己的数据当多余文件删掉");
+        assertTrue(Files.exists(world.resolve("voxy/storage/LOCK")));
+        assertTrue(Files.exists(world.resolve("voxy/storage/000001.sst")));
+    }
+
+    @Test
+    void ignoresExcludedPathsThatAnOldManifestStillReferences() throws IOException {
+        prepare();
+        write(world.resolve("voxy/storage/LOCK"), "", 1_000L);
+        // 排除规则是后加的：老槽位的清单里还记着这个路径
+        SnapshotManifest manifest = SnapshotManifest.empty();
+        manifest.put("voxy/storage/LOCK", 0L, 1_000L);
+
+        SnapshotMirror.Result restored = restore(slotA, world, manifest, SnapshotBlocks.empty());
+
+        assertEquals(0, restored.copied, "老清单里记着的排除路径不该去回拷");
+        assertEquals(0, restored.deleted);
+        assertTrue(Files.exists(world.resolve("voxy/storage/LOCK")), "被排除的路径既不该回拷也不该删");
+    }
+
+    @Test
+    void keepsGoingWhenAFileCannotBeCopied() throws IOException {
+        prepare();
+        write(world.resolve("level.dat"), "level", 1_000L);
+        write(world.resolve("locked.dat"), "locked", 1_000L);
+        // 目标位置上放一个**非空**目录：最后那步替换必然失败（空目录会被直接替换掉），
+        // 用来造成一次「这个文件动不了」。真实场景是文件被别的进程锁着（Windows 上表现为共享冲突），
+        // 纯 Java 造不出那种占用。
+        Files.createDirectories(slotA.resolve("locked.dat/inner"));
+
+        SnapshotMirror.Result first = snapshot(world, slotA, SnapshotManifest.empty(), SnapshotBlocks.empty(),
+                SnapshotBlocks.empty());
+
+        assertEquals(1, first.untouched, "一个文件动不了不该让整次建点失败");
+        assertEquals(1, first.copied);
+        assertEquals(1, first.files.size(), "只有 level.dat 进了快照");
+        assertTrue(first.manifest.get("locked.dat").untouched(), "动不了的文件要在清单里留一条「没动它」");
+        assertFalse(Files.exists(slotA.resolve("locked.dat" + SnapshotMirror.TEMP_SUFFIX)), "失败留下的临时文件要清掉");
+
+        // 「没动它」要能落盘、能读回来：它是跨进程的约定，回溯时才认得出这个文件不能碰
+        Path manifestFile = tempRoot.resolve("left-alone.manifest");
+        first.manifest.save(manifestFile);
+        SnapshotManifest reloaded = SnapshotManifest.load(manifestFile);
+        assertTrue(reloaded.get("locked.dat").untouched());
+        assertFalse(reloaded.matches("locked.dat", 6L, 1_000L), "「没动它」不该被当成「内容没变」");
+    }
+
+    @Test
+    void leavesUntouchedFilesAloneWhenRestoring() throws IOException {
+        prepare();
+        write(world.resolve("locked.dat"), "current", 5_000L);
+        // 槽位里还留着一份老内容，但清单记着建点时没动它：不能拿老内容盖回去，也不能删掉世界里的
+        write(slotA.resolve("locked.dat"), "stale", 1_000L);
+        SnapshotManifest manifest = SnapshotManifest.empty();
+        manifest.putUntouched("locked.dat");
+
+        SnapshotMirror.Result restored = restore(slotA, world, manifest, SnapshotBlocks.empty());
+
+        assertEquals(0, restored.copied);
+        assertEquals(0, restored.deleted);
+        assertEquals(1, restored.untouched);
+        assertEquals("current", new String(Files.readAllBytes(world.resolve("locked.dat")), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void keepsGoingWhenAFileCannotBeDeleted() throws IOException {
+        prepare();
+        write(world.resolve("level.dat"), "level", 1_000L);
+        Path extra = slotA.resolve("drop.dat");
+        write(extra, "drop", 1_000L);
+        DosFileAttributeView dos = Files.getFileAttributeView(extra, DosFileAttributeView.class);
+        assumeTrue(dos != null, "「只读文件删不掉」是 Windows 的行为，别的文件系统上这条没有意义");
+        dos.setReadOnly(true);
+        try {
+            SnapshotMirror.Result result = snapshot(world, slotA, SnapshotManifest.empty(), SnapshotBlocks.empty(),
+                    SnapshotBlocks.empty());
+
+            assertEquals(1, result.undeleted, "删不掉的多余文件留着就是，不该让整次建点失败");
+            assertTrue(Files.exists(extra));
+        } finally {
+            // 留着只读会让 @TempDir 的清理也失败
+            dos.setReadOnly(false);
+        }
     }
 
     @Test

@@ -10,9 +10,15 @@
 - 第一排现在是**三颗等宽按钮**（进入选中的世界 / 读取存档点 / 创建新的世界），整排宽度与原版一致。
 - 新增查询接口 `RewindApi.repairSlot(worldRoot)`，整合包作者可以自己接。
 
+### 修复
+
+- **被别的进程占着的文件不再让建点 / 回溯整个失败**：以前只要世界目录里有一个文件动不了（典型：模组自己开着的嵌入式数据库，比如跨视距模组 Voxy 的 `voxy/storage/LOCK`——Windows 上它被独占打开，连读都读不动），建点就会以 `FileSystemException: ... 另一个程序正在使用此文件` 失败、槽位停在 `incomplete`，回溯同样会半途而废。现在这类文件只被跳过：记进清单（回溯时既不会回拷它、也不会把世界里的那一份当多余文件删掉），计数写进结果与日志（`untouched=` / `undeleted=`，前几条附完整原因），其余文件照常处理。这是通用规则，不需要认识是哪个模组、用的什么锁。
+- **Voxy 的世界目录数据干脆不纳入快照**：`voxy/`（按存档的 LOD 键值库，默认 RocksDB）建点与回溯两个方向都不碰——它不是存档状态、能从区块重建，而它大、活着拷下来也不自洽、回溯盖回去也没意义。代价：回溯不会把远处的 LOD 拨回存档点那一刻（LOD 本来就能从区块重建）。
+
 ### 内部
 
 - `.mca` 头部解析（`RegionHeader`）与存档数据回滚骨架（`SavedDataRollback`）从各 target 抽到 common——四个 target 逐字节相同，少一份重复。
+- 镜像的文件列表建点前统一过一遍排除规则：老槽位的清单 / 块映射里记着的、今天已经被排除的路径不再回拷，也不会被当成「快照里没有的多余文件」删掉。
 
 ## 1.0.1（自 1.0.0 起）
 
@@ -64,6 +70,8 @@
 - New **Rewind** button on the world-selection screen: restore a world's files from one of its own checkpoints **before opening it** — the only recovery path when a world no longer loads. It picks the timeline head (falling back to the newest complete checkpoint), asks for confirmation before overwriting anything, then copies on a background thread and reports progress and result.
 - The first button row is now three equal-width buttons (Play Selected World / Rewind / Create New World), the same total width as vanilla.
 - New query API `RewindApi.repairSlot(worldRoot)`.
+- **A file held by another process no longer fails the whole checkpoint or restore**: previously a single unreadable file — typically an embedded database a mod keeps open, like the distance-rendering mod Voxy's `voxy/storage/LOCK` (opened exclusively on Windows, so not even readable) — made the checkpoint die with `FileSystemException: ... being used by another process`, leaving the slot `incomplete`, and aborted restores halfway. Such files are now skipped instead: recorded in the manifest (a restore neither copies them back nor deletes the world's copy as an extra file), counted in the result and the log (`untouched=` / `undeleted=`, with the full reason for the first few), and everything else proceeds. This is a general rule — no knowledge of which mod locks what.
+- **Voxy's world data is left out of snapshots altogether**: `voxy/` (its per-world LOD store, a RocksDB by default) is never touched in either direction — it is not world state, can be rebuilt from chunks, and it is large, inconsistent to copy live and pointless to roll back. The trade-off: a rollback does not rewind far-away LOD data (it is derived from chunks anyway).
 
 ### 1.0.1 (since 1.0.0)
 

@@ -2,8 +2,11 @@ package cc.sighs.rewind.snapshot;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 import cc.sighs.rewind.common.config.SlotSettings;
 
@@ -76,6 +79,22 @@ public final class SnapshotLayout {
     private static final Pattern NEOFORGE_TEMP = Pattern.compile(".+\\.neoforge-tmp");
     /** Rewind 原子替换槽位文件时用的临时文件 {@code *.rewind-tmp}（见 {@code SnapshotMirror}）。 */
     private static final Pattern REWIND_TEMP = Pattern.compile(".+\\.rewind-tmp");
+
+    /**
+     * 世界目录里**模组自己的运行时数据目录**（首层目录名，整棵子树都不纳入快照、也不被回溯覆盖）。
+     *
+     * <p>{@code voxy} 是跨视距 / LOD 模组 Voxy 的按存档存储，内容是它从区块里重建出来的 LOD，
+     * 不是存档状态：一个嵌在世界目录里的键值库（默认 RocksDB，就是 {@code FileSystemException} 里
+     * 那个 {@code <世界>/voxy/storage/LOCK}）。世界开着的时候它自己一直握着这个库，而 RocksDB 的
+     * {@code LOCK} 在 Windows 上是**强制锁**——别的进程连读都读不动，{@code Files.copy} 直接抛
+     * 「另一个程序正在使用此文件」，整个建点就失败了。就算读得动，拷一个活着的数据库也不自洽，
+     * 而回溯把老的 LOD 盖回去同样没有意义（LOD 能从区块重建）。
+     *
+     * <p>同类的跨视距模组只要把嵌入式数据库放进世界目录就会撞上同一个问题：确认过它的路径之后
+     * 往这个集合里加名字即可。
+     */
+    private static final Set<String> MOD_RUNTIME_DIRS = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList("voxy")));
 
     private SnapshotLayout() {
     }
@@ -200,7 +219,8 @@ public final class SnapshotLayout {
     /**
      * 判断一个相对路径是否应该被排除。
      *
-     * <p>排除 {@code session.lock}、存档点目录自身，以及原版与 Rewind 自己写盘留下的临时文件；
+     * <p>排除 {@code session.lock}、存档点目录自身、原版与 Rewind 自己写盘留下的临时文件，以及
+     * {@link #MOD_RUNTIME_DIRS 模组自己的运行时数据目录}（建点 / 回溯两个方向都不碰）；
      * 其余（含 .mcc 超大区块文件、datapacks/、advancements/、stats/ 等）都算存档状态。
      */
     public static boolean isExcluded(String relativePath) {
@@ -213,6 +233,9 @@ public final class SnapshotLayout {
         String last = path.substring(path.lastIndexOf('/') + 1);
 
         if (first.equals(ROOT_DIR_NAME)) {
+            return true;
+        }
+        if (MOD_RUNTIME_DIRS.contains(first)) {
             return true;
         }
         if (path.equals(LOCK_FILE_NAME)) {
