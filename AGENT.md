@@ -154,7 +154,7 @@ target/server     WorldFlush / NeoForgeRewindPlatform  强制落盘 + 玩家展�
                   RewindServerConfig / RewindVersion  配置落盘与 mod 版本号（值存 common）
 client            CheckpointController            客户端策略：过渡、界面、失败回退、状态机
                   RewindTreeScreen                「时间树」管理界面（Java 侧驱动 AUI 的 HTML）
-                  WorldRepair / WorldRepairScreen 进世界之前的修复入口（世界列表上那颗按钮）
+                  WorldRepair                     世界列表上那颗「读取存档点」（按下去开时间树的离线模式）
                   RewindClient / RewindCommands   热键与命令，只做转交
 ```
 
@@ -176,23 +176,41 @@ client            CheckpointController            客户端策略：过渡、界
 
 `CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
 
-### 进世界之前的修复入口（世界选择界面上的「读取存档点」）
+### 进世界之前的回溯入口（世界选择界面上的「读取存档点」）
 
-F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开，就按不了 F8。所以世界选择界面
-（`SelectWorldScreen`）的底部按钮区多了一颗按钮：对当前选中的存档，用它的存档点把磁盘上的世界文件
-覆盖回去——这是唯一一条「进世界之前」的恢复路径。
+F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开，就按不了 F8 / F9。所以世界选择界面
+（`SelectWorldScreen`）的底部按钮区多了一颗按钮：按下去直接打开**完整的回溯页面**（时间树，
+`RewindTreeScreen`），走的是它的**离线模式**——世界还没进，页面里能读档、能删、能改名，建点相关的
+动作会拒绝。这是唯一一条「进世界之前」的恢复路径。
 
-- **走的是离线那条管线**：目标槽位由 `RewindApi.repairSlot(worldRoot)` 挑（时间线的头，取不到时退回
-  保存时间最新的完整存档点，一个都没有时返回空串），动作是 `RewindApi.restoreFiles(worldRoot, slot)`
-  （纯文件操作、任意线程）。**不要**改走 `requestRollback`：那条带过渡的在线管线要求
-  `minecraft.level` 与 `player` 都在。
+- **按钮**：对当前选中的存档，只要它「没被别的实例锁着（`LevelSummary.isDisabled()`）且
+  `RewindApi.repairSlot(root)` 不为空」就可用（`WorldRepair.canRepair`）。1.21.1 / 26.1 挂在原版的
+  `updateButtonStatus(LevelSummary)` 上（选中项变化时原版自己走的钩子）；1.20.1 那个方法只收两个
+  布尔量、拿不到存档，只能每 tick 对一次当前选中行（选中项没变就直接返回，不重复读索引）。
+  按下走 `WorldRepair.PRESS`（常驻实例、方法体写在普通类里，见下面那条 mixin 经验）→
+  `RewindTreeScreen.open(root, parent)`。
 - **世界根目录自己拼**：`Minecraft.getInstance().getLevelSource()` + 存档名——1.21.1 / 26.1 是
   `getLevelPath(levelId)`，1.20.1 那个方法是 private，走 `getBaseDir().resolve(levelId)`。也**不要**
   为了拿路径去 `createAccess` / `validateAndCreateAccess`：它会创建并锁住 `session.lock`。
-- **按钮只在选中某个存档之后可用**，与旁边「进入世界」那颗一致；判据是「没有被别的实例锁着
-  （`LevelSummary.isDisabled()`）且 `repairSlot` 不为空」。1.21.1 / 26.1 挂在原版的
-  `updateButtonStatus(LevelSummary)` 上（那是选中项变化时原版自己走的钩子）；1.20.1 那个方法只收两个
-  布尔量、拿不到存档，只能每 tick 对一次当前选中行（选中项没变就直接返回，不重复读索引）。
+- **离线模式 = 换掉数据源**：`RewindTreeScreen.worldRoot()` 是页面唯一的数据源，离线时它返回
+  `open(...)` 传进来的那个存档目录（`offlineWorldRoot`），在线时照旧返回集成服务端的。所以槽位、封面、
+  时间线、背包快照全都照旧，不用各写一套。
+  - **能干的**：读取（`RewindApi#restoreFiles`，纯文件操作）、删除槽位、重命名。删除 / 改名本来就是
+    纯文件操作；`usable()` 在离线时跳过「要有单人世界 / 不能开局域网」那两道在线检查。
+  - **不能干的**：建点（卡片上的「覆盖」与时间线上那个「在此存档」）。它要在服务端线程上落盘、还要
+    抓封面，离线时没有世界可存——`startBackgroundSave` 直接拒绝（只写一条日志），「覆盖」按钮也是灰的，
+    「在此存档」节点整个不画。
+  - **拿不到的**：当前世界的生物群系 / 坐标 / 游戏内时间 / 游玩时长（HUD 显示不可用）、以及
+    「死亡后回溯目标」那个红框（离线没有死亡这回事）。
+- **离线读档要在后台线程上跑**（拷大存档要几秒），结果由 `tick()` → `flushFinishedRestore()` 收回来，
+  和后台写盘同一套节奏；跑的过程中 `usable()` 会挡住别的动作。写入用的 `restoringSlot` /
+  `restoringResult` 与 `savingSlot` / `savingResult` 是一对。
+- **关界面要回世界列表**：`onClose()` 先走一遍 `super.onClose()`（`ApricityScreen` 那边要放下文档），
+  再 `setScreen(returnTo)`；在线那条路 `returnTo` 是 null，行为与原来完全一致。
+- **反馈照旧只写日志**（`rewind.ui.log.restored` / `restore_failed` / `offline_save`），聊天框与提示条
+  一概不碰；唯一的例外是离线读档前那一次确认（`rewind.ui.modal.restore`）——它会把磁盘上的世界文件
+  覆盖掉，所以复用页面自带的那套确认弹窗先问一句。
+- **它绕不过读档冷却**：`restoreFiles` 照样会因 `rollback.cooldownSeconds` 被拒，日志里能看到原因。
 - **第一排三颗等宽**——四个版本的**存档行里都没有按钮**，per-world 的操作全在底部按钮区，所以这颗也放第一排：
   原版第一排 `[进入世界 150][创建新的世界 150]`（整排 308）被收成三颗等宽 100、间隔 4 像素
   （3 * 100 + 2 * 4 = 308），中间那颗就是「读取存档点」；三颗等宽之后第一排的竖缝**不会**与第二排那四颗
@@ -202,11 +220,6 @@ F7 / F8 与时间树都是**世界里**的动作；世界一旦坏到打不开�
   三颗 100 塞不进去、塞进去还会把网格撑宽从而挤歪第二排，所以**网格保持原版不动**，第一排三颗改在
   `init` 的尾巴上按同一套坐标手工摆（`playWorldButton` 用 `@Shadow` 拿、创建新的世界是个局部变量、
   在它进网格那次 `addChild` 上 `@Redirect` 截下来）。
-- **界面会把状态说出来**（`WorldRepairScreen`）：目标存档点、会覆盖什么、进行到哪一步 / 结果。这与
-  「界面不放提示、只写日志」的约定不冲突——它是玩家主动打开的修复入口，做完不告诉人只能去翻日志；
-  聊天框与提示条仍然一概不碰，日志照写。还原跑在后台线程上（拷大存档要几秒），结果回渲染线程再显示。
-- **它绕不过读档冷却**：`restoreFiles` 照样会因 `rollback.cooldownSeconds` 被拒，被拒时界面显示原因、
-  日志里也有。
 
 **mixin 侧两条硬性经验（四个 target 通用）**：
 
@@ -287,6 +300,8 @@ F7/F8 全程不允许出现任何界面，也不往聊天框发任何提示（�
 ### 时间树（存档槽位管理界面，neoforge-1.21.1）
 
 F9 / `/rewind ui` 打开 `RewindTreeScreen`——「时间树」，一页管所有槽位：自动、快速两个特殊槽位 + 8 个手动槽位。手动槽位每张卡有读取 / 覆盖 / 重命名，**自动 / 快速这两个固定角色没有名字可改，第三个按钮是「设置」**；详情面板另有删除，还有搜索、排序、确认弹窗、设置弹窗、重命名弹窗。
+
+它还有一条**离线入口**：世界列表上那颗「读取存档点」按下去就是同一个页面（`open(worldRoot, parent)`），只是世界还没进——读档走 `restoreFiles`、建点相关的动作拒绝，细节见「进世界之前的回溯入口」一节。
 
 页面有两套布局，标题旁边的开关切换：**档案布局**（下面讲的就是它）与**节点树布局**（时间线，见「时间线」一节）。
 

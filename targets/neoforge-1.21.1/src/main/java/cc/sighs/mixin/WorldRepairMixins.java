@@ -15,7 +15,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import cc.sighs.rewind.client.WorldRepair;
 
 /**
- * 世界选择界面上的「读取存档点」——进世界之前就能用的那条恢复入口。
+ * 世界选择界面上的「读取存档点」——进世界之前就能打开的那条回溯入口（打开的是完整的回溯页面，见 {@code RewindTreeScreen} 的离线模式）。
  *
  * <p><b>第一排三颗等宽</b>：原版第一排是 {@code [进入世界 150][创建新的世界 150]}（整排 308 像素宽），
  * 这里把两颗都收成 100 宽，中间插进「读取存档点」——于是

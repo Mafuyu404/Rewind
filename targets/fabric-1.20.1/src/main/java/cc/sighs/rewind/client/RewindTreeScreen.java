@@ -31,6 +31,7 @@ import com.sighs.apricityui.layout.Size;
 import com.sighs.apricityui.screen.ApricityScreen;
 import com.sighs.apricityui.ui.Tooltip;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.core.BlockPos;
@@ -163,6 +164,9 @@ public final class RewindTreeScreen extends ApricityScreen {
     private String savingSlot;
     /** 服务端线程回填的写盘结果。 */
     private volatile RewindResult savingResult;
+    /** 离线读档正在回拷的槽位；null 表示没有。后台线程回填结果，{@code tick()} 收尾。 */
+    private String restoringSlot;
+    private volatile RewindResult restoringResult;
     /** 刚写完、还在等封面文件落地的槽位（封面比索引晚几十毫秒，见 {@link #flushWaitingCover}）。 */
     private String waitingCoverSlot;
     private long waitingCoverMillis;
@@ -218,14 +222,76 @@ public final class RewindTreeScreen extends ApricityScreen {
     public static void open() {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.screen instanceof RewindTreeScreen) {
-            minecraft.setScreen(null);
+            // 已经开着：关掉。离线打开的那一份要回原来的界面（世界列表），别把玩家扔在空屏上
+            Screen back = returnTo;
+            offlineWorldRoot = null;
+            returnTo = null;
+            minecraft.setScreen(back);
             return;
         }
         if (!minecraft.hasSingleplayerServer() || minecraft.level == null || minecraft.player == null) {
             Rewind.LOGGER.warn("Rewind: the tree screen is only available in-game in a singleplayer world");
             return;
         }
+        offlineWorldRoot = null;
+        returnTo = null;
         minecraft.setScreen(new RewindTreeScreen());
+    }
+
+    /**
+     * 从**世界列表**打开：这个世界还没进，没有服务端、也没有 {@code level} / {@code player}。
+     *
+     * <p>这就是「离线模式」——页面里只有跟文件有关的动作能干活：读取（走
+     * {@link RewindApi#restoreFiles}，会把磁盘上的世界文件覆盖回存档点）、删除、改名。建点
+     * （覆盖 / 「在此存档」）需要活着的世界，会拒绝并只写一条日志。
+     *
+     * <p>数据源与在线模式共用同一条路（{@link #worldRoot()} 换成传进来的存档目录），所以槽位、
+     * 封面、时间线、背包快照照旧；世界名、坐标、游玩时长这些「当前进度」类的东西离线拿不到，
+     * 页面会显示不可用。
+     *
+     * @param worldRoot 这个存档的目录（{@code level.dat} 所在目录）
+     * @param parent    关界面时回到哪个界面（一般是世界列表）
+     */
+    public static void open(@Nullable Path worldRoot, @Nullable Screen parent) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.screen instanceof RewindTreeScreen) {
+            minecraft.setScreen(parent);
+            return;
+        }
+        if (worldRoot == null) {
+            Rewind.LOGGER.warn("Rewind: cannot open the tree screen, the world folder is unknown");
+            return;
+        }
+        Rewind.LOGGER.info("Rewind: opening the tree for {} without entering the world", worldRoot.getFileName());
+        offlineWorldRoot = worldRoot;
+        returnTo = parent;
+        minecraft.setScreen(new RewindTreeScreen());
+    }
+
+    /** 离线模式要用的存档目录；null = 在线（数据从集成服务端来）。 */
+    @Nullable
+    private static Path offlineWorldRoot;
+    /** 离线关界面时要回到的那个界面（世界列表）。 */
+    @Nullable
+    private static Screen returnTo;
+
+    /** 这个页面是不是从世界列表打开的（世界还没进）。 */
+    private static boolean offline() {
+        return offlineWorldRoot != null;
+    }
+
+    /**
+     * 关界面：离线时先走一遍原来的收尾（{@link ApricityScreen} 那边要放下文档），再回世界列表；
+     * 在线时保持不变。
+     */
+    @Override
+    public void onClose() {
+        Screen back = returnTo;
+        returnTo = null;
+        super.onClose();
+        if (back != null) {
+            Minecraft.getInstance().setScreen(back);
+        }
     }
 
     // ------------------------------------------------------------------ 装配
@@ -278,6 +344,15 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
 
         // 属性没法用 <translation>（那是元素），这几处只能在这里按语言文件设
+        if (offline()) {
+            // 离线（从世界列表进来）：标题写明这是哪个存档的
+            Element heading = document.querySelector("#pageTitle");
+            Path world = worldRoot();
+            if (heading != null && world != null) {
+                heading.setInnerText(tr("rewind.ui.title.offline", String.valueOf(world.getFileName())));
+            }
+        }
+
         Element layoutGroup = document.querySelector(".layout-switch");
         if (layoutGroup != null) {
             layoutGroup.setAttribute("aria-label", tr("rewind.ui.layout.group"));
@@ -331,6 +406,7 @@ public final class RewindTreeScreen extends ApricityScreen {
     public void tick() {
         super.tick();
         flushFinishedSave();
+        flushFinishedRestore();
         flushWaitingCover();
         fitFlow();
     }
@@ -360,6 +436,42 @@ public final class RewindTreeScreen extends ApricityScreen {
             waitingCoverSlot = slot;
             waitingCoverMillis = result.meta.savedAtMillis;
             waitingCoverTicks = COVER_WAIT_TICKS;
+        }
+    }
+
+    /**
+     * 离线读档：把槽位的文件镜像回存档目录，跑在后台线程上（拷大存档要几秒，占着渲染线程会把窗口冻住），
+     * 结果由 {@link #flushFinishedRestore()} 在下一 tick 收回来。和后台写盘同一套节奏。
+     */
+    private void restoreSlot(String slot) {
+        Path world = worldRoot();
+        if (world == null) {
+            return;
+        }
+        restoringSlot = slot;
+        restoringResult = null;
+        log("rewind.ui.log.loading", title(slot, RewindApi.describe(world, slot)));
+        Thread worker = new Thread(() -> restoringResult = RewindApi.restoreFiles(world, slot), "rewind-restore");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void flushFinishedRestore() {
+        String slot = restoringSlot;
+        RewindResult result = restoringResult;
+        if (slot == null || result == null) {
+            return;
+        }
+        restoringSlot = null;
+        restoringResult = null;
+        if (result.success) {
+            log("rewind.ui.log.restored", title(slot, RewindApi.describe(worldRoot(), slot)));
+        } else {
+            log("rewind.ui.log.restore_failed", String.valueOf(result.failure));
+        }
+        Document document = getLinkedDocument();
+        if (document != null) {
+            render(document);
         }
     }
 
@@ -496,6 +608,11 @@ public final class RewindTreeScreen extends ApricityScreen {
             log("rewind.ui.log.no_snapshot");
             return;
         }
+        if (offline()) {
+            // 离线这条路会把磁盘上的世界文件覆盖回去，所以先问一句（在线那条是 F8 的语义，不问）
+            askConfirm(document, "restore", slot);
+            return;
+        }
         log("rewind.ui.log.loading", title(slot, meta));
         RewindApi.requestRollback(slot, "ui");
     }
@@ -509,9 +626,15 @@ public final class RewindTreeScreen extends ApricityScreen {
         SnapshotMeta meta = RewindApi.describe(worldRoot(), slot);
         Element body = document.querySelector("#confirmBody");
         if (body != null) {
-            body.setTextContent("delete".equals(action)
-                    ? tr("rewind.ui.modal.delete", title(slot, meta))
-                    : tr("rewind.ui.modal.overwrite", title(slot, meta)));
+            String message;
+            if ("delete".equals(action)) {
+                message = tr("rewind.ui.modal.delete", title(slot, meta));
+            } else if ("restore".equals(action)) {
+                message = tr("rewind.ui.modal.restore", title(slot, meta));
+            } else {
+                message = tr("rewind.ui.modal.overwrite", title(slot, meta));
+            }
+            body.setTextContent(message);
         }
         Element icon = document.querySelector("#confirmIcon");
         if (icon != null) {
@@ -543,6 +666,10 @@ public final class RewindTreeScreen extends ApricityScreen {
             render(document);
             return;
         }
+        if ("restore".equals(action)) {
+            restoreSlot(slot);
+            return;
+        }
         // 覆盖：世界不关、界面不退。任务跑在服务端线程上（那段时间世界不 tick，所以
         // 「拷贝期间没人写盘」这条保证和 F7 一样成立），只是不放过渡、不动界面。
         startBackgroundSave(document, slot);
@@ -560,6 +687,11 @@ public final class RewindTreeScreen extends ApricityScreen {
      * 所以「界面一直开着」和「封面里没有界面」这两件事不冲突。
      */
     private void startBackgroundSave(Document document, String slot) {
+        if (offline()) {
+            // 世界还没进：没有内存里的世界可以落盘，也就没有「当前进度」可存
+            log("rewind.ui.log.offline_save");
+            return;
+        }
         IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
         if (server == null) {
             log("rewind.ui.log.no_world");
@@ -875,9 +1007,13 @@ public final class RewindTreeScreen extends ApricityScreen {
      * 为什么不动作——那边的约定是只写日志、不打扰玩家。
      */
     private boolean usable(Document document) {
-        Minecraft minecraft = Minecraft.getInstance();
         if (savingSlot != null) {
             // 写盘期间世界是放行的：这时候再动索引（删除 / 改名）会和服务端线程上的写盘抢同一张索引
+            log("rewind.ui.log.busy");
+            return false;
+        }
+        if (restoringSlot != null) {
+            // 离线读档正在回拷文件，这会儿也别动同一份索引 / 同一批文件
             log("rewind.ui.log.busy");
             return false;
         }
@@ -885,6 +1021,11 @@ public final class RewindTreeScreen extends ApricityScreen {
             log("rewind.ui.log.busy");
             return false;
         }
+        if (offline()) {
+            // 离线：只有一个存档目录要写，没有服务端、也没有局域网这回事
+            return true;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
         if (!minecraft.hasSingleplayerServer() || minecraft.level == null) {
             log("rewind.ui.log.no_world");
             return false;
@@ -925,7 +1066,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         // 「死亡后回溯的目标」= 时间线的头（世界当前站着的存档点）。开关关着时不标记——
         // 那种情况下死亡不会回溯，标红反而是误导。
         Path world = worldRoot();
-        deathTargetSlot = RewindServerConfig.rollbackOnDeath() && world != null
+        deathTargetSlot = !offline() && RewindServerConfig.rollbackOnDeath() && world != null
                 ? RewindApi.currentSlot(world) : "";
         renderHud(document);
         renderSlots(document, metas);
@@ -1047,7 +1188,8 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
         Path world = worldRoot();
         String head = world == null ? "" : RewindApi.currentSlot(world);
-        boolean headInTree = !head.isEmpty() && metas.containsKey(head);
+        // 离线（世界还没进）没有「当前进度」可存，所以这一格整个不放
+        boolean headInTree = !offline() && !head.isEmpty() && metas.containsKey(head);
         if (headInTree) {
             // 「在此存档」是头这一支的末端，排在它的其他子节点后面
             children.computeIfAbsent(head, key -> new ArrayList<>()).add(NOW_NODE);
@@ -1077,7 +1219,7 @@ public final class RewindTreeScreen extends ApricityScreen {
                 appendTreeNode(html, slot, metas, children, emitted);
             }
         }
-        if (!headInTree) {
+        if (!headInTree && !offline()) {
             html.append(nowNode());
         }
         html.append("</ul>");
@@ -1602,7 +1744,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
         html.append("<div class=\"special-actions\">");
         html.append(actionButton(slot, "load", "button-secondary", tr("rewind.ui.action.load"), !isRestorable(meta)));
-        html.append(actionButton(slot, "save", "", tr("rewind.ui.action.save"), false));
+        html.append(actionButton(slot, "save", "", tr("rewind.ui.action.save"), offline()));
         // 自动 / 快速是固定角色的槽位，没有名字可改：第三个按钮是设置
         html.append(actionButton(slot, "settings", "button-tertiary", tr("rewind.ui.action.settings"), false));
         html.append("</div></div></article>");
@@ -1642,7 +1784,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         }
         html.append("<div class=\"slot-actions\">");
         html.append(actionButton(slot, "load", "button-secondary", tr("rewind.ui.action.load"), !isRestorable(meta)));
-        html.append(actionButton(slot, "save", "", tr("rewind.ui.action.save"), false));
+        html.append(actionButton(slot, "save", "", tr("rewind.ui.action.save"), offline()));
         html.append(actionButton(slot, "rename", "button-tertiary", tr("rewind.ui.action.rename"), meta == null));
         html.append("</div></article>");
         return html.toString();
@@ -1707,6 +1849,10 @@ public final class RewindTreeScreen extends ApricityScreen {
 
     @Nullable
     private static Path worldRoot() {
+        if (offlineWorldRoot != null) {
+            // 离线：世界还没进，数据源就是世界列表传进来的那个存档目录
+            return offlineWorldRoot;
+        }
         IntegratedServer server = Minecraft.getInstance().getSingleplayerServer();
         return server == null ? null : RewindApi.worldRoot(server);
     }
@@ -1847,7 +1993,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         return tr("rewind.ui.slot.manual", SnapshotLayout.manualIndex(slot));
     }
 
-    static String title(String slot, @Nullable SnapshotMeta meta) {
+    private static String title(String slot, @Nullable SnapshotMeta meta) {
         if (meta != null && !meta.displayName.isEmpty()) {
             return meta.displayName;
         }
@@ -1929,7 +2075,7 @@ public final class RewindTreeScreen extends ApricityScreen {
         return tr("rewind.ui.time.days", hours / 24L);
     }
 
-    static String absoluteTime(long savedAtMillis) {
+    private static String absoluteTime(long savedAtMillis) {
         return ABSOLUTE_TIME.format(Instant.ofEpochMilli(savedAtMillis));
     }
 

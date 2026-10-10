@@ -28,6 +28,7 @@
   "rewind.cmd.status_empty": "No checkpoints yet",
 
   "rewind.ui.title": "Time tree",
+  "rewind.ui.title.offline": "Rewind \"%s\"",
   "rewind.ui.hud.biome": "Biome",
   "rewind.ui.hud.position": "Position",
   "rewind.ui.hud.time": "In-game",
@@ -97,6 +98,7 @@
 
   "rewind.ui.modal.confirm_title": "Confirm",
   "rewind.ui.modal.overwrite": "Overwrite \"%s\"? The current progress will be written into this slot.",
+  "rewind.ui.modal.restore": "Load \"%s\"? This overwrites the world files on disk (no backup).",
   "rewind.ui.modal.delete": "Delete \"%s\"? This cannot be undone.",
   "rewind.ui.modal.rename_title": "Rename checkpoint",
   "rewind.ui.modal.rename_label": "Checkpoint name",
@@ -125,6 +127,8 @@
   "rewind.ui.no_match": "No checkpoint matches",
 
   "rewind.ui.log.loading": "Loading \"%s\"…",
+  "rewind.ui.log.restored": "Loaded \"%s\"",
+  "rewind.ui.log.restore_failed": "Failed to load: %s",
   "rewind.ui.log.saved": "Overwrote \"%s\"",
   "rewind.ui.log.saving": "Writing \"%s\"…",
   "rewind.ui.log.save_failed": "Failed to write: %s",
@@ -136,6 +140,7 @@
   "rewind.ui.log.busy": "Another checkpoint operation is still running",
   "rewind.ui.log.no_world": "Checkpoints can only be managed in a singleplayer world",
   "rewind.ui.log.lan": "LAN is open, so checkpoints cannot be written",
+  "rewind.ui.log.offline_save": "Enter the world first - checkpoints can only be written in-game",
 
   "rewind.ui.time.just_now": "just now",
   "rewind.ui.time.minutes": "%s min ago",
@@ -149,12 +154,5 @@
   "rewind.ui.size.kb": "%s KB",
   "rewind.ui.size.mb": "%s MB",
 
-  "rewind.repair.button": "Rewind",
-  "rewind.repair.title": "Repair \"%s\" with a checkpoint",
-  "rewind.repair.target": "Restore to checkpoint: %s",
-  "rewind.repair.warning": "Overwrites the world files on disk (no backup).",
-  "rewind.repair.start": "Restore now",
-  "rewind.repair.running": "Restoring…",
-  "rewind.repair.done": "Restored (%s)",
-  "rewind.repair.failed": "Failed: %s"
+  "rewind.repair.button": "Rewind"
 }

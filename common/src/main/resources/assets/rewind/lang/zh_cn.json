@@ -28,6 +28,7 @@
   "rewind.cmd.status_empty": "还没有任何存档点",
 
   "rewind.ui.title": "时间树",
+  "rewind.ui.title.offline": "回溯「%s」",
   "rewind.ui.hud.biome": "群系",
   "rewind.ui.hud.position": "坐标",
   "rewind.ui.hud.time": "游戏内",
@@ -97,6 +98,7 @@
 
   "rewind.ui.modal.confirm_title": "确认操作",
   "rewind.ui.modal.overwrite": "确定要覆盖「%s」吗？当前进度会写进这个槽位。",
+  "rewind.ui.modal.restore": "确定要读取「%s」吗？会用这个存档点覆盖磁盘上的世界文件，不会先做备份。",
   "rewind.ui.modal.delete": "确定要删除「%s」吗？删掉就找不回来了。",
   "rewind.ui.modal.rename_title": "重命名存档",
   "rewind.ui.modal.rename_label": "存档名称",
@@ -125,6 +127,8 @@
   "rewind.ui.no_match": "没有匹配的存档点",
 
   "rewind.ui.log.loading": "正在读取「%s」…",
+  "rewind.ui.log.restored": "已读取「%s」",
+  "rewind.ui.log.restore_failed": "读取失败：%s",
   "rewind.ui.log.saved": "已覆盖「%s」",
   "rewind.ui.log.saving": "正在写入「%s」…",
   "rewind.ui.log.save_failed": "写入失败：%s",
@@ -136,6 +140,7 @@
   "rewind.ui.log.busy": "上一个存档点操作还没结束",
   "rewind.ui.log.no_world": "只能在单人世界里管理存档点",
   "rewind.ui.log.lan": "局域网已开放，建不了存档点",
+  "rewind.ui.log.offline_save": "这个世界还没进：建点要在游戏里做",
 
   "rewind.ui.time.just_now": "刚刚",
   "rewind.ui.time.minutes": "%s 分钟前",
@@ -149,12 +154,5 @@
   "rewind.ui.size.kb": "%s KB",
   "rewind.ui.size.mb": "%s MB",
 
-  "rewind.repair.button": "读取存档点",
-  "rewind.repair.title": "用存档点修复「%s」",
-  "rewind.repair.target": "还原到存档点：%s",
-  "rewind.repair.warning": "这会用存档点覆盖磁盘上的世界文件，不会先做备份。",
-  "rewind.repair.start": "开始还原",
-  "rewind.repair.running": "正在还原……",
-  "rewind.repair.done": "还原完成（%s）",
-  "rewind.repair.failed": "还原失败：%s"
+  "rewind.repair.button": "读取存档点"
 }

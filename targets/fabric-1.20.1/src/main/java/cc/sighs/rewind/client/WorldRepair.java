@@ -8,14 +8,13 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.world.level.storage.LevelSummary;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
-import cc.sighs.rewind.snapshot.SnapshotMeta;
 
 /**
  * 「读取存档点」：世界选择界面那颗按钮背后干的事。
  *
  * <p>它干活的时机是**世界还没进**，所以一条都不能碰服务器：存档目录由存档名直接拼出来
  * （1.20.1 的 {@code LevelStorageSource.getLevelPath(String)} 是 private，所以走 {@code getBaseDir()}，
- * 与原版 {@code levelSummaryReader} 里那条路径同一个算法），还原走 {@link RewindApi#restoreFiles}——
+ * 与原版 {@code levelSummaryReader} 里那条路径同一个算法），按下按钮就打开**完整的回溯页面**（{@code RewindTreeScreen} 的离线模式），读档走 {@link RewindApi#restoreFiles}——
  * 纯文件操作、任意线程可调。F8 那条带过渡的在线管线在这里用不了：它要求 {@code minecraft.level} 与
  * {@code player} 都在。
  *
@@ -77,7 +76,12 @@ public final class WorldRepair {
         return root != null && !RewindApi.repairSlot(root).isEmpty();
     }
 
-    /** 打开修复界面；没有可用存档点（或拿不到存档目录）时只写一条日志，不进界面。 */
+    /**
+     * 按下那颗按钮：打开**完整的回溯页面**（时间树），世界还没进时走它的离线模式。
+     *
+     * <p>没有可用存档点（或拿不到存档目录）时只写一条日志、不进界面——按钮那会儿本来就是灰的，
+     * 这里只是兜底。
+     */
     public static void open(Screen parent, @Nullable LevelSummary summary) {
         Path root = worldRoot(summary);
         String slot = root == null ? "" : RewindApi.repairSlot(root);
@@ -86,15 +90,6 @@ public final class WorldRepair {
                     summary == null ? "?" : summary.getLevelId());
             return;
         }
-        Minecraft.getInstance().setScreen(new WorldRepairScreen(parent, root, summary.getLevelName(), slot));
-    }
-
-    /** 目标存档点的一行描述：名字 · 建点时刻。文案与时间格式跟时间树共用一套。 */
-    public static String describeTarget(Path worldRoot, String slot) {
-        SnapshotMeta meta = RewindApi.describe(worldRoot, slot);
-        if (meta == null) {
-            return slot;
-        }
-        return RewindTreeScreen.title(slot, meta) + " · " + RewindTreeScreen.absoluteTime(meta.savedAtMillis);
+        RewindTreeScreen.open(root, parent);
     }
 }
