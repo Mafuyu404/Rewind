@@ -8,6 +8,7 @@ import com.mojang.serialization.DynamicOps;
 import cc.sighs.rewind.Rewind;
 import cc.sighs.rewind.api.RewindApi;
 import cc.sighs.rewind.api.RewindResult;
+import cc.sighs.rewind.api.RollbackCanceledException;
 import cc.sighs.rewind.snapshot.SnapshotLayout;
 import cc.sighs.rewind.server.RewindServerConfig;
 import net.minecraft.client.Minecraft;
@@ -590,7 +591,7 @@ public final class CheckpointController {
             try {
                 workResult = work == Work.CHECKPOINT
                         ? RewindApi.createCheckpoint(server, slot, source)
-                        : RewindApi.rollbackInPlace(server, slot);
+                        : RewindApi.rollbackInPlace(server, slot, source);
             } catch (Throwable t) {
                 workFailure = t;
                 Rewind.LOGGER.error("Rewind: {} threw", work, t);
@@ -618,10 +619,17 @@ public final class CheckpointController {
     }
 
     private static void finishRollback(Minecraft minecraft) {
-        if (workFailure != null || workResult == null || !workResult.success) {
+        Throwable failure = workFailure != null ? workFailure
+                : workResult == null ? null : workResult.failure;
+        if (failure instanceof RollbackCanceledException) {
+            // 监听者用「回溯开始」事件取消了这次回滚：不许退回「关世界 → 覆盖 → 重开」那条路——
+            // 那等于绕过取消，文件照样会被盖回去。把这次取消原样报成一次失败。
+            fail(minecraft, "rewind.error.rollback_canceled", failure.getMessage());
+            return;
+        }
+        if (failure != null || workResult == null || !workResult.success) {
             // 原地回滚没做成：退回「关世界 → 覆盖 → 重开」那条已知能成的路
-            Rewind.LOGGER.warn("Rewind: in-place rollback failed, falling back to close-and-reopen",
-                    workFailure != null ? workFailure : workResult == null ? null : workResult.failure);
+            Rewind.LOGGER.warn("Rewind: in-place rollback failed, falling back to close-and-reopen", failure);
             workResult = null;
             workFailure = null;
             startWork(Work.NONE);
@@ -691,7 +699,7 @@ public final class CheckpointController {
         final Path world = worldRoot;
         startWorker("rewind-restore", () -> {
             try {
-                RewindResult result = RewindApi.restoreFiles(world, slot);
+                RewindResult result = RewindApi.restoreFiles(world, slot, requestSource);
                 workerSummary = result.summary;
                 lastRestoreCopied = result.copiedFiles;
                 lastRestoreSkipped = result.skippedFiles;

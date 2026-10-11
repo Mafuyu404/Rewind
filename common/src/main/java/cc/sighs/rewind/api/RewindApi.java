@@ -116,6 +116,18 @@ public final class RewindApi {
      * 平台没有原地回滚引擎时返回一条失败结果（调用方按需回退到「关世界 → 覆盖 → 重开」那条路）。
      */
     public static RewindResult rollbackInPlace(Object server, String slot) {
+        return rollbackInPlace(server, slot, "api");
+    }
+
+    /**
+     * 同上，另外说明这次是谁触发的（{@code key} / {@code ui} / {@code command} / {@code death}…）。
+     *
+     * <p>它进 {@link RollbackRequest#source}，也就是进加载器事件；命令与界面都会如实传自己的来源。
+     *
+     * <p><b>开始事件可以取消</b>（{@link RewindPlatform#beforeRollback}）：被取消时不回滚，返回一条
+     * {@code failure} 为 {@link RollbackCanceledException} 的失败结果，也没有结束事件。
+     */
+    public static RewindResult rollbackInPlace(Object server, String slot, String source) {
         RewindPlatform platform = RewindPlatforms.get();
         if (platform == null) {
             return fail(RewindResult.Kind.ROLLBACK, slot,
@@ -138,6 +150,10 @@ public final class RewindApi {
             RewindLog.LOGGER.warn("Rewind: ignoring the rollback to {}: still on cooldown", slot);
             return cooling;
         }
+        RollbackRequest request = new RollbackRequest(worldRoot, slot, source, true, describe(worldRoot, slot));
+        if (!platform.beforeRollback(request)) {
+            return canceled(request);
+        }
         RewindResult result;
         // 回滚窗口在这一刻打开：从这里到文件还原完，任何世界落盘都是马上要被覆盖掉的
         RewindState.beginDiscard();
@@ -147,12 +163,15 @@ public final class RewindApi {
                     rolled.mirrorCopied, rolled.mirrorSkipped, rolled.mirrorFiles);
         } catch (Throwable t) {
             RewindLog.LOGGER.error("Rewind: in-place rollback for {} failed", slot, t);
-            return fail(RewindResult.Kind.ROLLBACK, slot, t);
+            result = fail(RewindResult.Kind.ROLLBACK, slot, t);
+            platform.afterRollback(request, result);
+            return result;
         } finally {
             RewindState.endDiscard();
         }
         markRolledBack(worldRoot, slot);
         lastResult = result;
+        platform.afterRollback(request, result);
         return result;
     }
 
@@ -162,10 +181,25 @@ public final class RewindApi {
      * <p>「关世界 → 覆盖 → 重开」那条回退路径用它；原地回滚不走这里。任意线程可调。
      */
     public static RewindResult restoreFiles(Path worldRoot, String slot) {
+        return restoreFiles(worldRoot, slot, "api");
+    }
+
+    /**
+     * 同上，另外说明这次是谁触发的（{@code ui} / {@code repair}…），进加载器事件。
+     *
+     * <p>开始事件同样可以取消：这种「世界已经关了」的场合取消不会把世界重新开起来，只是不覆盖文件。
+     * 没有安装平台实现时（纯单元测试）直接跳过事件。
+     */
+    public static RewindResult restoreFiles(Path worldRoot, String slot, String source) {
+        RewindPlatform platform = RewindPlatforms.get();
         RewindResult cooling = cooldownFailure(worldRoot, slot);
         if (cooling != null) {
             RewindLog.LOGGER.warn("Rewind: ignoring the file restore of {}: still on cooldown", slot);
             return cooling;
+        }
+        RollbackRequest request = new RollbackRequest(worldRoot, slot, source, false, describe(worldRoot, slot));
+        if (platform != null && !platform.beforeRollback(request)) {
+            return canceled(request);
         }
         try {
             CheckpointWriter.Result copied = CheckpointWriter.restoreFiles(worldRoot, slot);
@@ -173,11 +207,32 @@ public final class RewindApi {
                     copied.mirror.copied, copied.mirror.skipped, copied.mirror.files.size());
             markRolledBack(worldRoot, slot);
             lastResult = result;
+            if (platform != null) {
+                platform.afterRollback(request, result);
+            }
             return result;
         } catch (Throwable t) {
             RewindLog.LOGGER.error("Rewind: restoring files of slot {} failed", slot, t);
-            return fail(RewindResult.Kind.ROLLBACK, slot, t);
+            RewindResult result = fail(RewindResult.Kind.ROLLBACK, slot, t);
+            if (platform != null) {
+                platform.afterRollback(request, result);
+            }
+            return result;
         }
+    }
+
+    /**
+     * 被开始事件取消：什么都没做，返回一条带原因的失败结果。
+     *
+     * <p>失败类型是 {@link RollbackCanceledException}——调用方（客户端控制器）认得出这个类型，
+     * 于是不会退回文件覆盖那条路。
+     */
+    private static RewindResult canceled(RollbackRequest request) {
+        String reason = request.cancelReason == null || request.cancelReason.trim().isEmpty()
+                ? "canceled by a listener"
+                : request.cancelReason.trim();
+        RewindLog.LOGGER.warn("Rewind: the rollback to {} was canceled: {}", request.slot, reason);
+        return fail(RewindResult.Kind.ROLLBACK, request.slot, new RollbackCanceledException(reason));
     }
 
     /**

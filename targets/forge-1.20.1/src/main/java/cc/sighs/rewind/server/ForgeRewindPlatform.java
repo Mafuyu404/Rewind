@@ -1,11 +1,16 @@
 package cc.sighs.rewind.server;
 
 import java.nio.file.Path;
+import cc.sighs.rewind.api.RewindResult;
+import cc.sighs.rewind.api.RollbackRequest;
 import cc.sighs.rewind.common.spi.FlushOutcome;
 import cc.sighs.rewind.common.spi.RewindPlatform;
 import cc.sighs.rewind.common.spi.RollbackOutcome;
+import cc.sighs.rewind.event.RollbackEndEvent;
+import cc.sighs.rewind.event.RollbackStartEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.loading.FMLLoader;
 
 /**
@@ -68,6 +73,24 @@ public final class ForgeRewindPlatform implements RewindPlatform {
         InPlaceRollback.Result rolled = InPlaceRollback.run(server(server), worldRoot, slot);
         return new RollbackOutcome(rolled.summary(), rolled.mirrorCopied, rolled.mirrorSkipped,
                 rolled.mirrorFiles, rolled.totalMs);
+    }
+
+    /**
+     * 回溯开始前把它变成 {@link RollbackStartEvent} 发到游戏事件总线上：监听者可以在这里取消。
+     *
+     * <p>返回 {@code false} 之后 common 什么都不做，原因取 {@link RollbackRequest#cancelReason}。
+     */
+    @Override
+    public boolean beforeRollback(RollbackRequest request) {
+        RollbackStartEvent event = new RollbackStartEvent(request);
+        MinecraftForge.EVENT_BUS.post(event);
+        return !event.isCanceled();
+    }
+
+    /** 回溯结束后的 {@link RollbackEndEvent}（不可取消）——成功失败都发。 */
+    @Override
+    public void afterRollback(RollbackRequest request, RewindResult result) {
+        MinecraftForge.EVENT_BUS.post(new RollbackEndEvent(request, result));
     }
 
     /**

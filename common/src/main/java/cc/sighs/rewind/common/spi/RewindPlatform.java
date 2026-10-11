@@ -2,6 +2,8 @@ package cc.sighs.rewind.common.spi;
 
 import java.nio.file.Path;
 import java.util.List;
+import cc.sighs.rewind.api.RewindResult;
+import cc.sighs.rewind.api.RollbackRequest;
 import cc.sighs.rewind.snapshot.SnapshotInventory;
 
 /**
@@ -58,4 +60,33 @@ public interface RewindPlatform {
      * <p>用于可选模组适配，见 {@code cc.sighs.rewind.common.compat.SophisticatedCoreCompat}。
      */
     ClassLoader modClassLoader(String modId);
+
+    /**
+     * 回溯开始前的一次通知：返回 {@code false} 表示**取消**这次回溯，什么都不做。
+     *
+     * <p>取消原因写在 {@link RollbackRequest#cancelReason} 里（可空），它会进日志，也会跟着
+     * {@link cc.sighs.rewind.api.RollbackCanceledException} 回到调用方。
+     *
+     * <p>target 侧在这里发自己的加载器事件：Forge / NeoForge 各有一个可取消的
+     * {@code cc.sighs.rewind.event.RollbackStartEvent}。**默认实现放行**——没有事件总线的加载器
+     * （Fabric）就用默认的，别的地方想接就自己接那边的入口。
+     *
+     * <p><b>线程</b>：原地回滚那条路上它在服务端线程上被调用；只覆盖文件的那条路
+     * （世界已经关了，没有服务端线程可言）在调用它的那条线程上。
+     */
+    default boolean beforeRollback(RollbackRequest request) {
+        return true;
+    }
+
+    /**
+     * 回溯结束后的一次通知——不管成功还是失败都会来一次，**不可取消**。
+     *
+     * <p>{@code request} 就是 {@link #beforeRollback} 收到的那一个（同一次回溯复用同一个对象），
+     * {@code result} 是这次回溯的结果：{@code success} / {@code failure} / {@code summary} /
+     * {@code millis} 都在里面。被取消的那次**没有**结束通知（它根本没开始）。
+     *
+     * <p>默认实现什么都不做（Fabric）。
+     */
+    default void afterRollback(RollbackRequest request, RewindResult result) {
+    }
 }

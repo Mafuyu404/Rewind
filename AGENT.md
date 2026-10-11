@@ -32,6 +32,8 @@ common 需要平台能力时只经 `cc.sighs.rewind.common.spi.RewindPlatform`�
 | `supportsInPlaceRollback()` | 有没有原地回滚 | 没有就返回 false；`RewindApi.rollbackInPlace` 直接失败，客户端回退到「关世界 → 覆盖 → 重开」 |
 | `rollbackInPlace(server, worldRoot, slot)` | 原地回滚引擎 | 依赖原版内部结构，按版本各写一份 |
 | `modClassLoader(modId)` | 跨模组反射（可选模组适配用） | JPMS 下 mod 的模块名就是 modid，用 `FMLLoader.getGameLayer().findLoader(modId)`（26.1 的 FML 把它改成了实例方法）；Fabric 只有一个 KnotClassLoader，返回自己那个。见 `SophisticatedCoreCompat` |
+| `beforeRollback(request)` | 回溯开始前的可取消钩子 | 返回 false = 取消这次回溯（原因写在 `RollbackRequest.cancelReason`）。Forge / NeoForge 在这里发**可取消**的 `RollbackStartEvent`；有 **default 实现（放行）**，Fabric 不接就什么都不发 |
+| `afterRollback(request, result)` | 回溯结束后的通知 | 成功失败都会来一次，**不可取消**（`RollbackEndEvent`）。同样有 default 空实现 |
 
 参数里的服务器对象对 common 是不透明的 `Object`，实现方自己转型。`RewindApi` / `CheckpointWriter` / `AutoCheckpoint` 全靠这个接口拿世界根、线程判定、落盘与回滚能力。
 
@@ -140,6 +142,7 @@ cd targets\neoforge-1.21.1
 
 ```
 common/api        RewindApi / RewindResult        对外门面；不引用任何 net.minecraft.* 类
+                  RollbackRequest / RollbackCanceledException  回溯事件的载荷与「被取消」的失败类型
 common/core       CheckpointWriter                纯机制：索引、清单、块映射、镜像编排、时间线边
                   AutoCheckpoint                  「跟着原版自动保存建点」的策略与跳过条件
                   SavedDataRollback               回滚收尾把内存里的存档数据拉回存档点：骨架在 common，版本相关的四处走 Hook
@@ -152,6 +155,8 @@ common/compat     SophisticatedCoreCompat         可选模组适配：回滚后
 target/server     WorldFlush / NeoForgeRewindPlatform  强制落盘 + 玩家展示信息；SPI 的 NeoForge 1.21.1 实现
                   InPlaceRollback                 原地回滚引擎（吃原版内部结构，按版本各写一份）
                   RewindServerConfig / RewindVersion  配置落盘与 mod 版本号（值存 common）
+event             RollbackStartEvent              回溯开始（可取消）/ 结束（不可取消）的加载器事件：Forge / NeoForge 各一份
+                  RollbackEndEvent                （Fabric 没有事件总线，那边是 SPI 的 default 空实现）
 client            CheckpointController            客户端策略：过渡、界面、失败回退、状态机
                   RewindTreeScreen                「时间树」管理界面（Java 侧驱动 AUI 的 HTML）
                   WorldRepair                     世界列表上那颗「读取存档点」（按下去开时间树的离线模式）
@@ -162,7 +167,9 @@ client            CheckpointController            客户端策略：过渡、界
 
 **迁移边界看的是「是不是 MC-无关」，不是「有没有版本差异」**：`InPlaceRollback` 里那几段（`.mca` 头部解析、存档数据回滚骨架、文件→id 分类与日志、保护/白名单判定）不碰 `net.minecraft.*`，四个 target 逐字节相同，所以都在 common（`RegionHeader` / `SavedDataRollback`）；而卸载 / 重载 / 玩家 / 世界时间那几百行**即使四个 target 逐字节相同也搬不动**——它们调用的原版内部结构要经各 target 自己的 mixin 访问器（`ChunkMapAccess` / `IOWorkerAccess` / …）和 `net.minecraft.*` 类型，common 引用不了。判据手法：`grep -rl` 比方法体 + 看签名/方法体里有没有 MC 类型或 `cc.sighs.mixin.*`。唯一剩下的一处 MC-无关重复是每个文件里那句一行的 `millisSince`（16 个调用点 × 4 份），迁移收益低于改动风险，暂时留着。
 
-- **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot)` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot)` 是纯文件操作，任意线程可调。
+- **同步入口**（直接干活，不带过渡、不碰界面）：`createCheckpoint(server, slot, source)` 与 `rollbackInPlace(server, slot[, source])` **必须在服务端线程上调用**（进去会 `isSameThread()` 校验并报错）。没有界面就没法靠「暂停世界」保证拷贝期间没人写盘，让服务端线程忙在落盘和拷贝上等价于把它冻结——这也是要求服务端线程的原因。`restoreFiles(worldRoot, slot[, source])` 是纯文件操作，任意线程可调。
+- **回溯的开始 / 结束事件（Forge / NeoForge）**：两个回溯入口在动手前后各经 `RewindPlatform.beforeRollback` / `afterRollback` 通知一次，target 把它变成加载器事件——`cc.sighs.rewind.event.RollbackStartEvent`（**可取消**：`setCanceled(true)`，可选 `setCancelReason(...)`，在 `NeoForge.EVENT_BUS` / `MinecraftForge.EVENT_BUS` 上发布）与 `RollbackEndEvent`（**不可取消**：类型上没有取消入口——NeoForge 那份不实现 `ICancellableEvent`，Forge 那份不加 `@Cancelable`，成功失败都发）。载荷是 `cc.sighs.rewind.api.RollbackRequest`（槽位 / 来源 / `inPlace` / 目标存档点的元数据）与 `RewindResult`。
+  > 三条必须记住的：① **被取消 = 什么都没发生**：引擎一次都不跑、没有结束事件、入口返回一条 `failure` 是 `RollbackCanceledException` 的失败结果；**客户端认得出这个类型，所以不会退回「关世界 → 覆盖 → 重开」**（`CheckpointController.finishRollback` 里那一支），否则取消就被绕过去了。② **一次用户可见的回溯可能发两轮**（原地失败 → 退回文件覆盖），要按「这次尝试」判断；③ 冷却 / 没有存档点 / 不是服务端线程这些「根本没动手」的拒绝**不发**事件（没开始就没有结束）。线程：原地回滚那条路在服务端线程上发；只覆盖文件那条路（世界已经关着、没有服务端线程可言）在调用它的线程上。来源（`source`）由调用方给：热键 `key`、时间树 `ui`（离线模式 `repair`）、命令 `command`、死亡回溯 `death`、别的模组 `api`。
 - **带过渡的异步入口**（等价于按 F7 / F8）：`requestCheckpoint(source)` / `requestRollback(source)`。它们经 `ClientBridge` 转到 `CheckpointController`；专用服务器上没有客户端，调用返回 false 并写一条日志。这个桥做成接口就是为了让 `RewindApi` 本身不引用客户端类——主类是按 `FMLEnvironment.dist` 判定后才加载 `RewindClient` 的，`RewindApi` 必须能在专用服务器上被加载。带槽位的重载 `requestCheckpoint(slot, source)` / `requestRollback(slot, source)` 指向任意槽位；时间树界面上的「读取」走的就是它们（「覆盖」不走——它要界面一直开着，见「时间树」一节）。
 - **原地回滚开关**：COMMON 配置 `rollback.inPlaceRollback`（`RollbackSettings.inPlaceRollback()`，默认开）。关掉之后 F8 / 界面上的「读取」都退回「关世界 → 覆盖 → 重开」那条路（`CheckpointController.beginRestore` 里是 `inPlaceEnabled && RewindServerConfig.inPlaceRollback()`）。原地回滚快，但它只保证**磁盘**与内存里那些被显式重建的状态回到过去——模组自己缓存的「解码后的世界状态」不归世界生命周期管，整合包里就可能出现「文件回滚了、游戏里看着没回滚」，那种情况就关掉这个开关。
 - **读档冷却**：一次成功回溯之后要等一段时间才能再回溯，时长是 COMMON 配置 `rollback.cooldownSeconds`（`RollbackSettings.cooldownSeconds()`，默认 `0` = 关闭，上限 3600 秒）。起点 `lastRollbackAt` 记在存档点索引里，所以退出游戏重进也绕不过去、换存档目录各算各的；只挡回溯（冷却中 `rollbackInPlace` / `restoreFiles` 直接返回失败结果），建点不受影响。要问还剩多久用 `rollbackCooldownRemainingMillis(worldRoot)`（0 = 可以读档）。**客户端 `CheckpointController.requestRestore` 必须在开过渡之前就用它拦下**（F8 / 界面上的「读取」），被拦时只写一条日志、不动界面——不然被拒的原地回滚会误触发「关世界 → 覆盖 → 重开」那条回退路径。
@@ -172,10 +179,11 @@ client            CheckpointController            客户端策略：过渡、界
 - **槽位清单**：`SnapshotLayout.uiSlots()` = `auto`、`quick`，然后是 8 个手动槽位 `s1`..`s8`。`quick` 就是 F7/F8 用的 `DEFAULT_SLOT`；`auto` 是「跟着原版自动保存建点」用的槽位（见「自动存档点」一节），也可以手动覆盖。槽位名会当目录名用，所以 `isValidSlotName` 限定 `[A-Za-z0-9_-]`；玩家起的名字由 `isValidDisplayName` 限定 1-20 字符。
 - **结果**：`RewindResult` 是只读的（final 字段 + 静态工厂），`success` / `failure` / `millis` / `copiedFiles` / `skippedFiles` / `totalFiles` / `inPlace` / `summary`；`RewindApi.lastResult()` 给最近一次结果。`CheckpointController.lastRestore*()` 那几个给自测看的统计现在是它的转发。
 - **按 4 KiB 扇区共享数据块**：`region` / `entities` / `poi` 的 `.mca` 不再整份拷贝，而是切成 4 KiB 块、以内容哈希命名存进 `rewind_snapshots/blocks/`（`SnapshotBlockStore`），每个槽位只多一份 `<槽位>.blocks` 映射（`SnapshotBlocks`，格式 `<大小>\t<相对路径>\t<块哈希…>`）。于是**换一个槽位建点只为真正变了的扇区付字节**。同一份 30 MB 测试世界的实测：整文件级只能省 8.3%（只有「从来没被写过的文件」跳得过），按扇区切块省 **79.9%**（一个 8.9 MB 的 region 文件实际只动了 19.7% 的扇区，整文件级却要整份拷）。块是不可变的（临时文件 + 原子替换），所以多个槽位引用同一个块永远安全。映射和清单一样，必须在把槽位标成 `complete` 之前落盘。
+  > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `RegionHeader.fromSnapshot` 从块存储拼出前 8 KiB（读活动存档那份走 `RegionHeader.read`）。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」这几条。
 - **被别的进程占着（锁着）的文件不会让建点 / 回溯失败**，这是通用规则，不依赖「认识哪个模组」：世界目录里躺着谁的文件不由我们决定，而这类占用经常是**强制锁**——模组自己开着的嵌入式数据库（RocksDB / LMDB / SQLite：RocksDB 的 `LOCK` 在 Windows 上被以独占方式打开，别的句柄连读都读不动，`Files.copy` 抛「另一个程序正在使用此文件」）。镜像里任何**单个文件**动不了（源读不动、正好被删掉、写不进目标、该删的删不掉）都只跳过它，不让整次建点（或整次回溯）泡汤：跳过时在清单里留一条 `putUntouched` 的「没动它」记录（`size` 用哨兵 `-1`，见 `SnapshotManifest`），回溯方向因此既不回拷它（快照里没有内容）、也不把它当「快照里没有的多余文件」删掉；计数进 `Result.untouched` / `Result.undeleted`（`summary()` 里出 `untouched=` / `undeleted=`），前 5 条逐条写 WARN、之后只留计数，另有一条汇总 WARN。**唯一照旧直接失败的是从块存储重建时的块缺失**（TO_WORLD 方向 `storeBlockEncoded` 的 `decode` 失败 = 存档点自己损坏，宁可失败也不写半个文件）。测试见 `SnapshotMirrorTest` 里 `keepsGoingWhenAFileCannotBeCopied` / `leavesUntouchedFilesAloneWhenRestoring` / `keepsGoingWhenAFileCannotBeDeleted`（分别用「目标是个非空目录」「清单里的哨兵记录」「Windows 只读文件」造出「动不了」，因为纯 Java 造不出跨进程的共享冲突）。另外 `listFiles` 里连属性都读不到的条目（没权限 / 走到一半被删）本来就只跳过，现在会写一条 WARN，不再无声消失。
 - **跨视距 / LOD 模组的运行时数据干脆不进快照**：`SnapshotLayout.MOD_RUNTIME_DIRS` 里的首层目录名（现在只有 Voxy 的 `voxy/`）两个方向都不碰——它是按存档的 LOD 键值库（默认 RocksDB，即 `<世界>/voxy/storage/LOCK`），内容不是存档状态、能从区块重建，而它大、活着拷下来也不自洽、回溯盖回去也没意义。有了上面那条通用规则它本来也不会再让建点失败（只是会白拷一遍、清单里多一堆「没动它」，而且拷了一半的活库以后盖回去能不能读是它自己的事），排除是为了省这份力气、也避免那份不确定性。**排除规则是后加的**，所以 `SnapshotMirror.mirror` 会把「目录 ∪ 清单 ∪ 块映射」拼出来的列表再按 `isExcluded` 滤一遍：老槽位的清单里记着的这类路径不回拷、也不被当成「快照里没有的多余文件」删掉。代价是回溯不会把 LOD 拨回存档点那一刻——回溯之后远处那段 LOD 在区块重新加载前是建点之后的样子。
-  > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `RegionHeader.fromSnapshot` 从块存储拼出前 8 KiB（读活动存档那份走 `RegionHeader.read`）。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」这几条。
-
+- **命令面**：`/rewind` 是模组主要功能的命令入口，完整清单在 `RewindCommands` 的类注释里——`status`（时间线的头 + 每个槽位一行 + 上一次操作）、`ui`（= F9）、`snapshot [槽位]`（= F7，不给槽位就是 `quick`）、`restore [槽位]`（= F8）、`info <槽位>`（元数据 + 背包快照几格）、`delete <槽位>`、`rename <槽位> <名字>`、`autosave on|off`（就是界面上「自动存档」卡那个开关，同一个 COMMON 配置项）。槽位参数是 Brigadier 的 `word` + `SharedSuggestionProvider.suggest(RewindApi.slots(), ...)`，所以 `<tab>` 补全出来的就是界面上那套槽位（`auto` / `quick` / `s1`..`sN`）。**建点 / 回溯这两条会在调用 API 之前自己再走一遍「能不能动手」的判定**（`busyBlocker` / `worldActionBlocker` + `hasCheckpoint` + 冷却，与 `CheckpointController.ensureUsable` / `requestRestore` 同一套条件）：热键那条路被挡下来时只写日志，命令得当场把原因说给玩家听——**改判定逻辑时两边一起改**。四个 target 的命令本体逐字节相同，差别只有注册入口（NeoForge / Forge 各自的事件类、Fabric 的 `CommandRegistrationCallback`）与 26.1 的权限判定（`Permissions.COMMANDS_GAMEMASTER`）。
+  > 两条必须记住的约定：**槽位目录里没有这些 `.mca` 的实体文件**（建点时会顺手删掉老格式留下的整文件），所以回溯方向的文件列表要把「目录 ∪ 清单 ∪ 块映射」并起来（`SnapshotMirror.sourceFiles`）——少一个就会漏还原，甚至反过来把世界里的 `.mca` 当多余文件删掉；`InPlaceRollback` 拿快照 `.mca` 头部做逐区块比对时要走 `RegionHeader.fromSnapshot` 从块存储拼出前 8 KiB（读活动存档那份走 `RegionHeader.read`）。删槽位时 `SnapshotBlockIo.collectGarbage` 按「所有槽位映射的并集」做标记-清除。老格式的槽位（槽位里是整文件、没有映射）照旧能还原——映射里有没有这个文件就是判断依据；`SnapshotMirrorTest` / `SnapshotBlockStoreTest` 盯着块编码、部分扇区复用、老格式兼容和「块缺失时宁可直接失败也不写半个文件」
 `CheckpointController` 只保留「怎么让玩家看到这件事发生」：过渡包络、界面收放、原地回滚失败后退回「关世界 → 覆盖 → 重开」、以及把结果记下来给命令和自测看。状态机因此只剩 `WORKING`（服务端线程上跑 API 同步入口，客户端轮询）+ 回退路径的三个阶段 + `REVEALING`。
 
 ### 进世界之前的回溯入口（世界选择界面上的「读取存档点」）

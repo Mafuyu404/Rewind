@@ -1,12 +1,17 @@
 package cc.sighs.rewind.server;
 
 import java.nio.file.Path;
+import cc.sighs.rewind.api.RewindResult;
+import cc.sighs.rewind.api.RollbackRequest;
 import cc.sighs.rewind.common.spi.FlushOutcome;
 import cc.sighs.rewind.common.spi.RewindPlatform;
 import cc.sighs.rewind.common.spi.RollbackOutcome;
+import cc.sighs.rewind.event.RollbackEndEvent;
+import cc.sighs.rewind.event.RollbackStartEvent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 import net.neoforged.fml.loading.FMLLoader;
+import net.neoforged.neoforge.common.NeoForge;
 
 /**
  * NeoForge 1.21.1 的 {@link RewindPlatform} 实现：把 common 需要知道的全部平台能力接进来。
@@ -63,6 +68,24 @@ public final class NeoForgeRewindPlatform implements RewindPlatform {
         InPlaceRollback.Result rolled = InPlaceRollback.run(server(server), worldRoot, slot);
         return new RollbackOutcome(rolled.summary(), rolled.mirrorCopied, rolled.mirrorSkipped,
                 rolled.mirrorFiles, rolled.totalMs);
+    }
+
+    /**
+     * 回溯开始前把它变成 {@link RollbackStartEvent} 发到游戏事件总线上：监听者可以在这里取消。
+     *
+     * <p>返回 {@code false} 之后 common 什么都不做，原因取 {@link RollbackRequest#cancelReason}。
+     */
+    @Override
+    public boolean beforeRollback(RollbackRequest request) {
+        RollbackStartEvent event = new RollbackStartEvent(request);
+        NeoForge.EVENT_BUS.post(event);
+        return !event.isCanceled();
+    }
+
+    /** 回溯结束后的 {@link RollbackEndEvent}（不可取消）——成功失败都发。 */
+    @Override
+    public void afterRollback(RollbackRequest request, RewindResult result) {
+        NeoForge.EVENT_BUS.post(new RollbackEndEvent(request, result));
     }
 
     /**

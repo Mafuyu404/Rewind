@@ -1,5 +1,27 @@
 # 更新日志
 
+## 1.0.3
+
+### 新增：`/rewind` 命令覆盖全部主要功能
+
+- `/rewind` 从四条扩到八条：`status`（时间线的头 + 每个槽位 + 上一次操作）/ `ui`（= F9）/ `snapshot [槽位]`（= F7）/ `restore [槽位]`（= F8）/ `info <槽位>` / `delete <槽位>` / `rename <槽位> <名字>` / `autosave on|off`。不写槽位就是 `quick`；槽位参数带补全（`<tab>` 出来的是界面上那套槽位），想在 `.mcfunction` 里驱动也再不必靠热键。
+- 命令里建点 / 回溯被挡下来时**当场说明原因**（忙 / 不在世界里 / 局域网已开放 / 没有存档点 / 读档冷却），而不是像热键那样只写日志。
+
+### 新增：回溯的开始 / 结束事件（Forge / NeoForge）
+
+- `RollbackStartEvent`：回溯**开始之前**发，**可取消**（`setCanceled(true)`，可配 `setCancelReason("原因")`）。取消之后这次回溯完全不做——引擎一次都不跑、没有结束事件、调用方拿到的失败里是 `RollbackCanceledException`；客户端认得出这个类型，所以**不会**退回「关世界 → 覆盖 → 重开」（否则取消就被绕过去了）。
+- `RollbackEndEvent`：回溯**结束之后**发，**不可取消**（类型上没有取消入口），成功失败都发，载荷里有 `RewindResult`。典型用途：回溯之后清掉自己模组缓存的那份世界状态（Rewind 自己也要为精妙核心做一次）。
+- 事件类在 `cc.sighs.rewind.event`，发在游戏事件总线上（`NeoForge.EVENT_BUS` / `MinecraftForge.EVENT_BUS`）；载荷是 `cc.sighs.rewind.api.RollbackRequest`（槽位 / 来源 / 走哪条路 / 目标存档点的元数据）。Fabric 没有事件总线，那边保留 SPI 的默认空实现。
+
+### 修复
+
+- **被别的进程占着的文件不再让建点 / 回溯整个失败**：以前世界目录里只要有一个文件动不了（典型：模组自己开着的嵌入式数据库，比如跨视距模组 Voxy 的 `voxy/storage/LOCK`——Windows 上它被独占打开，连读都读不动），建点就会以 `FileSystemException: ... 另一个程序正在使用此文件` 失败、槽位停在 `incomplete`，回溯同样半途而废。现在这类文件只被跳过：记进清单（回溯时既不回拷它、也不把世界里的那一份当多余文件删掉），计数写进结果与日志（`untouched=` / `undeleted=`，前几条附完整原因），其余文件照常处理。通用规则，不需要认识是哪个模组、用的什么锁。
+- **Voxy 的世界目录数据干脆不纳入快照**：`voxy/`（按存档的 LOD 键值库，默认 RocksDB）建点与回溯两个方向都不碰——它不是存档状态、能从区块重建，而它大、活着拷下来也不自洽、回溯盖回去也没意义。代价：回溯不会把远处的 LOD 拨回存档点那一刻。
+
+### 内部
+
+- 镜像的文件列表建点前统一过一遍排除规则：老槽位的清单 / 块映射里记着的、今天已经被排除的路径不再回拷，也不会被当成「快照里没有的多余文件」删掉。
+
 ## 1.0.2
 
 ### 新增：进世界之前的「读取存档点」
@@ -10,15 +32,9 @@
 - 第一排现在是**三颗等宽按钮**（进入选中的世界 / 读取存档点 / 创建新的世界），整排宽度与原版一致。
 - 新增查询接口 `RewindApi.repairSlot(worldRoot)`，整合包作者可以自己接。
 
-### 修复
-
-- **被别的进程占着的文件不再让建点 / 回溯整个失败**：以前只要世界目录里有一个文件动不了（典型：模组自己开着的嵌入式数据库，比如跨视距模组 Voxy 的 `voxy/storage/LOCK`——Windows 上它被独占打开，连读都读不动），建点就会以 `FileSystemException: ... 另一个程序正在使用此文件` 失败、槽位停在 `incomplete`，回溯同样会半途而废。现在这类文件只被跳过：记进清单（回溯时既不会回拷它、也不会把世界里的那一份当多余文件删掉），计数写进结果与日志（`untouched=` / `undeleted=`，前几条附完整原因），其余文件照常处理。这是通用规则，不需要认识是哪个模组、用的什么锁。
-- **Voxy 的世界目录数据干脆不纳入快照**：`voxy/`（按存档的 LOD 键值库，默认 RocksDB）建点与回溯两个方向都不碰——它不是存档状态、能从区块重建，而它大、活着拷下来也不自洽、回溯盖回去也没意义。代价：回溯不会把远处的 LOD 拨回存档点那一刻（LOD 本来就能从区块重建）。
-
 ### 内部
 
 - `.mca` 头部解析（`RegionHeader`）与存档数据回滚骨架（`SavedDataRollback`）从各 target 抽到 common——四个 target 逐字节相同，少一份重复。
-- 镜像的文件列表建点前统一过一遍排除规则：老槽位的清单 / 块映射里记着的、今天已经被排除的路径不再回拷，也不会被当成「快照里没有的多余文件」删掉。
 
 ## 1.0.1（自 1.0.0 起）
 
@@ -65,13 +81,18 @@
 
 ## English
 
+### 1.0.3
+
+- **`/rewind` now covers every main feature**: `status` (timeline head + every slot + the last operation) / `ui` (= F9) / `snapshot [slot]` (= F7) / `restore [slot]` (= F8) / `info <slot>` / `delete <slot>` / `rename <slot> <name>` / `autosave on|off`. The slot argument is optional (defaults to `quick`) and tab-completes to the slots the GUI shows, so hotkeys are no longer the only way to drive this from a scripted `.mcfunction`. A refused `snapshot` / `restore` now says why in chat (busy / not in a world / LAN published / no such checkpoint / rollback cooldown) instead of only logging it like the hotkey path does.
+- **Rollback events (Forge / NeoForge)**: `cc.sighs.rewind.event.RollbackStartEvent` is posted on the game event bus before a rollback and is **cancellable** (`setCanceled(true)` plus an optional `setCancelReason("...")`) — cancelling means nothing happens at all: the engine never runs, no end event fires, callers get a `RollbackCanceledException`, and the client does **not** fall back to close-and-reopen (which would silently defeat the cancellation). `RollbackEndEvent` is posted afterwards, is **not cancellable** and fires on success and failure alike, carrying the `RewindResult`. The payload is `cc.sighs.rewind.api.RollbackRequest` (slot, source, which path, target metadata). Fabric has no event bus, so that side keeps the default no-op SPI hook.
+- **A file held by another process no longer fails the whole checkpoint or restore**: a single unreadable file — typically an embedded database a mod keeps open, like the distance-rendering mod Voxy's `voxy/storage/LOCK` (opened exclusively on Windows, so not even readable) — used to kill the checkpoint with `FileSystemException: ... being used by another process`, leaving the slot `incomplete`, and aborted restores halfway. Such files are now skipped and recorded in the manifest (a restore neither copies them back nor deletes the world's copy as an extra file), with counts in the result and the log (`untouched=` / `undeleted=`). A general rule — no knowledge of which mod locks what.
+- **Voxy's world data is left out of snapshots altogether**: `voxy/` (its per-world LOD store, a RocksDB by default) is never touched in either direction — it is not world state and can be rebuilt from chunks. The trade-off: a rollback does not rewind far-away LOD data.
+
 ### 1.0.2
 
 - New **Rewind** button on the world-selection screen: restore a world's files from one of its own checkpoints **before opening it** — the only recovery path when a world no longer loads. It picks the timeline head (falling back to the newest complete checkpoint), asks for confirmation before overwriting anything, then copies on a background thread and reports progress and result.
 - The first button row is now three equal-width buttons (Play Selected World / Rewind / Create New World), the same total width as vanilla.
 - New query API `RewindApi.repairSlot(worldRoot)`.
-- **A file held by another process no longer fails the whole checkpoint or restore**: previously a single unreadable file — typically an embedded database a mod keeps open, like the distance-rendering mod Voxy's `voxy/storage/LOCK` (opened exclusively on Windows, so not even readable) — made the checkpoint die with `FileSystemException: ... being used by another process`, leaving the slot `incomplete`, and aborted restores halfway. Such files are now skipped instead: recorded in the manifest (a restore neither copies them back nor deletes the world's copy as an extra file), counted in the result and the log (`untouched=` / `undeleted=`, with the full reason for the first few), and everything else proceeds. This is a general rule — no knowledge of which mod locks what.
-- **Voxy's world data is left out of snapshots altogether**: `voxy/` (its per-world LOD store, a RocksDB by default) is never touched in either direction — it is not world state, can be rebuilt from chunks, and it is large, inconsistent to copy live and pointless to roll back. The trade-off: a rollback does not rewind far-away LOD data (it is derived from chunks anyway).
 
 ### 1.0.1 (since 1.0.0)
 

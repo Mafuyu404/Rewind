@@ -451,7 +451,8 @@ public final class RewindTreeScreen extends ApricityScreen {
         restoringSlot = slot;
         restoringResult = null;
         log("rewind.ui.log.loading", title(slot, RewindApi.describe(world, slot)));
-        Thread worker = new Thread(() -> restoringResult = RewindApi.restoreFiles(world, slot), "rewind-restore");
+        Thread worker = new Thread(() -> restoringResult = RewindApi.restoreFiles(world, slot,
+                offline() ? "repair" : "ui"), "rewind-restore");
         worker.setDaemon(true);
         worker.start();
     }
